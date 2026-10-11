@@ -90,6 +90,32 @@ export function TabbedPane(props: TabbedPaneProps) {
         "transferable",
     ]);
     const scroller = useRef<HTMLDivElement>(null);
+    // A vertical wheel over the strip walks it sideways, the way a mouse
+    // without a tilt wheel expects; a trackpad's horizontal swipe already
+    // scrolls natively. The listener is attached directly because React's
+    // wheel handler is passive, and only a strip that actually moved may take
+    // the gesture from whatever scrolls beyond it.
+    const scrollerAttach = (element: HTMLDivElement | null) => {
+        scroller.current = element;
+        if (!element) return;
+        const wheel = (event: WheelEvent) => {
+            if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+            const delta =
+                event.deltaMode === WheelEvent.DOM_DELTA_LINE
+                    ? event.deltaY * 16
+                    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+                      ? event.deltaY * element.clientWidth
+                      : event.deltaY;
+            const before = element.scrollLeft;
+            element.scrollLeft += delta;
+            if (element.scrollLeft !== before) event.preventDefault();
+        };
+        element.addEventListener("wheel", wheel, { passive: false });
+        return () => {
+            element.removeEventListener("wheel", wheel);
+            scroller.current = null;
+        };
+    };
     // eslint-disable-next-line happy-react/no-layout-effect -- activation must reveal the committed tab before paint by moving its horizontal browser scrollport; depending only on activeId preserves a deliberate manual scroll until another tab is activated
     useLayoutEffect(() => {
         const viewport = scroller.current;
@@ -123,14 +149,7 @@ export function TabbedPane(props: TabbedPaneProps) {
                 <div
                     className="happy-tabbed-pane__scroller"
                     data-happy-desktop-ui="tabbed-pane-scroller"
-                    ref={scroller}
-                    // A vertical wheel over the strip walks it sideways, the
-                    // way a mouse without a tilt wheel expects; a trackpad's
-                    // horizontal swipe already scrolls natively.
-                    onWheel={(event) => {
-                        if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-                        event.currentTarget.scrollLeft += event.deltaY;
-                    }}
+                    ref={scrollerAttach}
                 >
                     {/* The strip is only as wide as the tabs. The action follows
                         this shrinkable scrollport outside its clip, so it stays
