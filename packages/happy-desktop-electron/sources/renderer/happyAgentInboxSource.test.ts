@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
 import { fakeHappyAgentDaemonCreate, type FakeHappyAgentDaemon } from "happy-desktop-state/testing";
-import type {
-    HappyAgentInboxItemId,
-    HappyAgentProjectId,
-    HappyAgentSessionId,
-    happyAgentProtocol,
+import {
+    connectHappyAgent,
+    happyAgentInboxStoreCreate,
+    type HappyAgentInboxItemId,
+    type HappyAgentProjectId,
+    type HappyAgentSessionId,
+    type happyAgentProtocol,
 } from "happy-desktop-state";
 import { happyAgentConnectionOpen, type HappyAgentConnectionHandle } from "./happyAgentConnection";
+import { happyAgentInboxSourceCreate } from "./happyAgentInboxSource";
 
 vi.mock("happy-desktop-app", () => ({ terminalDriverCreate: () => undefined }));
 const handles: HappyAgentConnectionHandle[] = [];
@@ -51,10 +54,9 @@ function questionCreate(daemon: FakeHappyAgentDaemon): happyAgentProtocol.Questi
  * Opens the desktop's real connection to a fake daemon with one agent that asks
  * and one that never does, and watches the inbox the way the sidebar count does.
  * `waiting` starts the asking agent already paused on its question, as a window
- * opened onto a machine with work blocked would find it. `readHeld` holds the
- * daemon's answer to that question's read after the daemon has decided it.
+ * opened onto a machine with work blocked would find it.
  */
-async function fixture(options: { readonly waiting?: boolean; readonly readHeld?: boolean } = {}) {
+async function fixture(options: { readonly waiting?: boolean } = {}) {
     const daemon = fakeHappyAgentDaemonCreate();
     const project = daemon.projectSeed({ id: "project-inbox", name: "Inbox project" });
     const agent = daemon.agentSeed(project.id, {
@@ -64,10 +66,6 @@ async function fixture(options: { readonly waiting?: boolean; readonly readHeld?
     });
     if (options.waiting) daemon.questionSet(agent.id, questionCreate(daemon));
     daemon.agentSeed(project.id, { id: "agent-quiet", title: "Quiet work" });
-    const readRelease = options.readHeld
-        ? daemon.pause("getPendingQuestion:respond")
-        : () => undefined;
-    subscriptions.push(readRelease);
     const handle = happyAgentConnectionOpen({
         client: daemon.client,
         cloudHost: {
@@ -117,7 +115,6 @@ async function fixture(options: { readonly waiting?: boolean; readonly readHeld?
         daemon,
         inbox,
         inboxUnsubscribe,
-        readRelease,
         openChat,
     };
 }
@@ -203,24 +200,55 @@ it("drops a question whose run was aborted without calling it answered", async (
 });
 
 it("keeps an answer that arrived while the question was still being read", async () => {
-    const f = await fixture({ waiting: true, readHeld: true });
-    await vi.waitFor(() => expect(f.daemon.callCount("getPendingQuestion")).toBe(1));
+    const daemon = fakeHappyAgentDaemonCreate();
+    const project = daemon.projectSeed({ id: "project-inbox" });
+    daemon.agentSeed(project.id, { id: AGENT_ID, pendingQuestionId: QUESTION_ID });
+    daemon.questionSet(AGENT_ID, questionCreate(daemon));
+    const readRelease = daemon.pause("getPendingQuestion:respond");
+    subscriptions.push(readRelease);
+    const connection = connectHappyAgent({
+        client: daemon.client,
+        endpoint: "http://happy-agent.test/",
+        token: "token",
+    });
+    subscriptions.push(() => connection.close());
+    // The events the source has finished handling. A generator resumes after
+    // `yield` only once its consumer asks for the next input, which is after
+    // the consumer's loop body for this one has run.
+    const handled: happyAgentProtocol.HappyAgentEvent["type"][] = [];
+    const inbox = happyAgentInboxStoreCreate({
+        source: happyAgentInboxSourceCreate(daemon.client, {
+            connectGroups: (options) => connection.connectGroups(options),
+            sync: {
+                async *follow(options) {
+                    for await (const input of connection.sync.follow(options)) {
+                        yield input;
+                        if (input.kind === "update" && input.update.kind === "event")
+                            handled.push(input.update.event.type);
+                    }
+                },
+            },
+        }),
+    });
+    subscriptions.push(() => inbox[Symbol.dispose]());
+    subscriptions.push(inbox.subscribe(() => {}));
+    await vi.waitFor(() => expect(daemon.callCount("getPendingQuestion")).toBe(1));
 
     // Another client answers after the read captured the question pending but
-    // before its response arrives.
-    await f.daemon.client.answerQuestion(AGENT_ID, QUESTION_ID, {
+    // before its response arrives, and the source handles the answer first.
+    await daemon.client.answerQuestion(AGENT_ID, QUESTION_ID, {
         answers: { "prompt-migration": ["Piecemeal"] },
     });
-    // Let the resolution reach the feed ahead of the held read.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    f.readRelease();
+    await vi.waitFor(() => expect(handled).toContain("question.updated"));
+    expect(inbox.get().answered).toEqual([]);
+    readRelease();
 
     await vi.waitFor(() =>
-        expect(f.inbox.get().answered.map((item) => [item.id, item.answers])).toEqual([
+        expect(inbox.get().answered.map((item) => [item.id, item.answers])).toEqual([
             [ITEM_ID, { "prompt-migration": ["Piecemeal"] }],
         ]),
     );
-    expect(f.inbox.get().pending).toEqual([]);
+    expect(inbox.get().pending).toEqual([]);
 });
 
 it("keeps the answered list when the inbox is followed again", async () => {
@@ -233,9 +261,15 @@ it("keeps the answered list when the inbox is followed again", async () => {
     // The sidebar stops following when experimental features are switched off
     // or another Happy Agent is addressed, and follows again on the way back.
     f.inboxUnsubscribe();
+    // Following again delivers the source's first list in the same call.
     subscriptions.push(f.inbox.subscribe(() => {}));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
     expect(f.inbox.get().answered.map((item) => item.id)).toEqual([ITEM_ID]);
-    expect(f.inbox.get().pending).toEqual([]);
+
+    // And it is still there once the queue has changed under the new subscription.
+    const later = { ...questionCreate(f.daemon), id: "question-later", agentId: "agent-quiet" };
+    f.daemon.questionAsk("agent-quiet", later);
+    await vi.waitFor(() =>
+        expect(f.inbox.get().pending.map((item) => item.requestId)).toEqual(["question-later"]),
+    );
+    expect(f.inbox.get().answered.map((item) => item.id)).toEqual([ITEM_ID]);
 });
