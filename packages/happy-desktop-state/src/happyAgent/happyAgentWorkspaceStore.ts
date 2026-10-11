@@ -1497,8 +1497,10 @@ export interface HappyAgentWorkspaceStore {
     conversationRestore(conversationId: HappyAgentSessionId): Promise<void>;
     /**
      * Opens a closed browser page again, in the side panel of the group it was
-     * closed in, and drops it from `closedTabs`. Addressing that group, when it
-     * is not the open one, remains the caller's.
+     * closed in, and drops it from `closedTabs`. `tab` is the entry as
+     * `closedTabs` holds it: two pages on one address are two entries, and only
+     * this one is dropped. Addressing that group, when it is not the open one,
+     * remains the caller's.
      */
     browserReopen(tab: HappyAgentClosedTab & { readonly type: "browser" }): void;
     /**
