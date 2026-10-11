@@ -40,7 +40,24 @@ export const composerCapabilitiesNone: ComposerCapabilities = {
     mentions: false,
 };
 
-/** One local file or image attachment waiting with its draft. */
+/**
+ * One review note carried by a draft, flattened out of wherever it was written.
+ *
+ * The address travels with the words because it is what makes the note worth
+ * more than a sentence: "this is wrong" about a named line is actionable, and
+ * the same words about a file are a guess.
+ */
+export interface ComposerReviewComment {
+    readonly path: string;
+    /** 0 when the note is about the file rather than one of its lines. */
+    readonly lineNumber: number;
+    readonly side: "deletions" | "additions";
+    readonly text: string;
+    /** The file changed after the note was written, so its line moved. */
+    readonly stale: boolean;
+}
+
+/** One local file, image, or set of review notes waiting with its draft. */
 export type ComposerAttachment =
     | {
           readonly kind: "inlineImage";
@@ -81,6 +98,19 @@ export type ComposerAttachment =
           readonly sourcePath?: string;
           /** Object URL for image/video thumbnails; owned by the workspace store. */
           readonly previewUrl?: string;
+      }
+    | {
+          /**
+           * Notes left while reading a change, waiting to go with the sentence
+           * the reader is writing about them. They ride as an attachment rather
+           * than as text in the draft so the request stays one chip the reader
+           * can drop whole, instead of a wall of quoted lines they have to edit
+           * around to say anything of their own.
+           */
+          readonly kind: "reviewComments";
+          /** Client-minted; unique within this draft only. */
+          readonly id: string;
+          readonly comments: readonly ComposerReviewComment[];
       };
 
 export type ComposerSubmission =
@@ -89,6 +119,8 @@ export type ComposerSubmission =
     | { readonly status: "failed"; readonly revision: number; readonly error: UserError };
 
 export interface ComposerSnapshot {
+    /** Locally staged generated text; never eligible for draft autosave or question answering. */
+    readonly voiceDraft?: true;
     readonly scopeId: string;
     readonly text: string;
     readonly attachments: readonly ComposerAttachment[];
@@ -171,6 +203,7 @@ export type ComposerOutput =
       };
 
 export type ComposerInput =
+    | { readonly type: "voiceTextAppended"; readonly text: string }
     | { readonly type: "textReconciled"; readonly text: string }
     | { readonly type: "commandsReconciled"; readonly commands: readonly ComposerCommand[] }
     | {
@@ -330,7 +363,12 @@ export function composerStoreCreate(
         textUpdate(text): void {
             const previous = get();
             if (previous.text === text) return;
-            const derived = draftDerive(text, previous.capabilities);
+            const derived = draftDerive(
+                text,
+                previous.voiceDraft && text.length > 0
+                    ? { ...previous.capabilities, commands: [], shellMode: false }
+                    : previous.capabilities,
+            );
             const mentionQueryChanged = derived.mentionQuery !== previous.mentionQuery;
             // A narrowed token keeps the candidates it already has until the
             // owner answers the new one. Emptying the list on every keystroke
@@ -339,6 +377,7 @@ export function composerStoreCreate(
             const mentionEnded = derived.mentionQuery === undefined;
             set({
                 text,
+                ...(text.length === 0 ? { voiceDraft: undefined } : {}),
                 revision: previous.revision + 1,
                 submission: { status: "idle" },
                 textUpdatedAt: now(),
@@ -414,6 +453,7 @@ export function composerStoreCreate(
 
         commandInvoke(commandId): void {
             const previous = get();
+            if (previous.voiceDraft) return;
             if (!previous.capabilities.commands.some((command) => command.id === commandId)) return;
             const textUpdatedAt = now();
             set({
@@ -441,7 +481,7 @@ export function composerStoreCreate(
             )
                 return;
             const commandInvocation =
-                previous.attachments.length === 0
+                !previous.voiceDraft && previous.attachments.length === 0
                     ? commandInvocationOf(previous.text, previous.capabilities.commands)
                     : undefined;
             if (commandInvocation !== undefined) {
@@ -459,8 +499,8 @@ export function composerStoreCreate(
             }
             // An open command palette is an affordance, not a message: Enter picks
             // nothing and sends nothing until the caller invokes a command.
-            if (previous.commandQuery !== undefined) return;
-            if (previous.shellCommand !== undefined) {
+            if (!previous.voiceDraft && previous.commandQuery !== undefined) return;
+            if (!previous.voiceDraft && previous.shellCommand !== undefined) {
                 if (previous.shellCommand.length === 0) return;
                 set({ submission: { status: "pending", revision: previous.revision } });
                 output({
@@ -486,7 +526,26 @@ export function composerStoreCreate(
         composerInput(event): void {
             const snapshot = get();
             switch (event.type) {
+                case "voiceTextAppended": {
+                    if (snapshot.submission.status === "pending") return;
+                    if (snapshot.text.length > 0 && !snapshot.voiceDraft) return;
+                    const text = snapshot.text ? `${snapshot.text}\n\n${event.text}` : event.text;
+                    set({
+                        text,
+                        voiceDraft: true,
+                        revision: snapshot.revision + 1,
+                        submission: { status: "idle" },
+                        textUpdatedAt: now(),
+                        ...draftDerive(text, {
+                            ...snapshot.capabilities,
+                            commands: [],
+                            shellMode: false,
+                        }),
+                    });
+                    return;
+                }
                 case "textReconciled":
+                    if (snapshot.voiceDraft) return;
                     if (snapshot.text !== event.text)
                         set({
                             text: event.text,
@@ -501,7 +560,12 @@ export function composerStoreCreate(
                     const capabilities = { ...snapshot.capabilities, commands };
                     set({
                         capabilities,
-                        ...draftDerive(snapshot.text, capabilities),
+                        ...draftDerive(
+                            snapshot.text,
+                            snapshot.voiceDraft
+                                ? { ...capabilities, commands: [], shellMode: false }
+                                : capabilities,
+                        ),
                     });
                     return;
                 }
@@ -535,6 +599,7 @@ export function composerStoreCreate(
                     )
                         set({
                             text: "",
+                            voiceDraft: undefined,
                             attachments: [],
                             submission: { status: "idle" },
                             commandQuery: undefined,

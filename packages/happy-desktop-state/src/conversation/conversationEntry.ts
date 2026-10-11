@@ -86,6 +86,24 @@ export interface ConversationMessageProjection {
     readonly createdAt: string;
 }
 
+/**
+ * How an agent is pictured, the same way its own row pictures it: a bot's
+ * picture, a team task's owner's photo or initials, the tasks glyph for a task
+ * on a standalone machine, or the mark generated from a seed for anything with
+ * no picture of its own.
+ */
+export type ConversationAgentFace =
+    | { readonly kind: "image"; readonly url: string }
+    | { readonly kind: "initials"; readonly initials: string }
+    | { readonly kind: "task" }
+    | { readonly kind: "generated"; readonly seed: string };
+
+/** A known agent as a transcript names it. */
+export interface ConversationAgentIdentity {
+    readonly name: string;
+    readonly face: ConversationAgentFace;
+}
+
 /** Lifecycle of one piece of agent activity, shared by tool calls and shell runs. */
 export type ConversationActivityStatus =
     | "running"
@@ -227,8 +245,10 @@ export type ConversationActivity =
           readonly kind: "agentMessage";
           /** The sending agent, exactly as Happy Agent identified it. */
           readonly agentId: string;
-          /** That agent's title, when this session knows the agent by one. */
+          /** That agent's name — a bot's, a task's, or a session's title — when known. */
           readonly agentName?: string;
+          /** How that agent is pictured wherever else it is listed, when known. */
+          readonly agentFace?: ConversationAgentFace;
           /** The message as it arrived, addressing envelope included. */
           readonly text: string;
       }
@@ -319,6 +339,8 @@ export interface ConversationMessageEntry {
     readonly kind: "message";
     readonly message: ConversationMessageProjection;
     readonly source: "server" | "local";
+    /** Explicit send acceptance for daemon-projected user rows; voice never shares optimistic text. */
+    readonly pendingSend?: boolean;
     readonly delivery: "sending" | "pending_steering" | "sent" | "failed";
     readonly clientMutationId?: string;
     readonly error?: UserError;
@@ -374,6 +396,23 @@ export interface ConversationServiceNoticeEntry extends ConversationNoticeEntryB
         readonly maxAttempts?: number;
     };
     readonly title?: string;
+    /** Explicit durable provenance for a user-requested diagnostic handoff. */
+    readonly source?: { readonly messageId: string; readonly runId: string };
+}
+
+/**
+ * Whether an error can be handed to the Chief of Staff. A handoff writes that
+ * conversation's draft and opens it, so once written it is ready again.
+ */
+export type ConversationErrorAssistance =
+    | { readonly status: "ready" }
+    | { readonly status: "pending" }
+    | { readonly status: "failed"; readonly reason: string }
+    | { readonly status: "unavailable"; readonly reason: string };
+
+export interface ConversationErrorAssistanceEntry {
+    readonly entryId: string;
+    readonly assistance: ConversationErrorAssistance;
 }
 
 /**

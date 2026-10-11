@@ -4,6 +4,10 @@ import type {
 } from "../modules/terminal/terminalState.js";
 import type { HappyAgentClient } from "@slopus/happy-agent-client";
 import { happyAgentProjectAddError } from "./happyAgentProjectRegistration.js";
+import {
+    happyAgentAgentIdentitySourceCreate,
+    type HappyAgentAgentIdentitySource,
+} from "./happyAgentAgentIdentities.js";
 import type { MutationRejectedDelta } from "../happyAgentConnection/index.js";
 import type { HappyAgentConnection } from "../happyAgentConnection/index.js";
 import {
@@ -93,6 +97,7 @@ import {
     type HappyAgentCloudStore,
 } from "./happyAgentCloudStore.js";
 import { happyAgentTeamsStoreCreate, type HappyAgentTeamsStore } from "./happyAgentTeamsStore.js";
+import { happyAgentArtifactsCreate, type HappyAgentArtifacts } from "../artifacts/artifacts.js";
 
 /** A disposable view lease on one retained session chat store. */
 export interface HappyAgentChatHandle {
@@ -162,6 +167,12 @@ export interface HappyAgentWorkspaceClient {
     securityPolicy(): HappyAgentSecurityPolicyStore;
     /** Global write-only environment bundles, materialized while Settings reads them. */
     secrets(): HappyAgentSecretsStore;
+    /**
+     * This Happy Agent's published artifacts: the catalog, the list beside a
+     * chat, and the viewer. Materialized on first access; a daemon too old to
+     * have artifacts says so through each surface's availability.
+     */
+    artifacts(): HappyAgentArtifacts;
     /** Reads one bounded page of one checkout directory. */
     workspaceFileTreeRead(
         groupId: HappyAgentGroupId,
@@ -205,13 +216,18 @@ export interface HappyAgentWorkspaceClient {
      * that renders the document rather than its source.
      */
     htmlPreviewOpen(groupId: HappyAgentGroupId, path: string): Promise<string>;
-    /** Writes one existing text file back to its checkout. */
+    /**
+     * Writes one existing text file back to its checkout, answering with the
+     * identity the file now has. An accepted write is first-hand knowledge of
+     * what the file says, so the surface that wrote it does not have to read it
+     * back to find out.
+     */
     workspaceFileWrite(
         groupId: HappyAgentGroupId,
         path: string,
         content: string,
         expectedHash: string | null,
-    ): Promise<void>;
+    ): Promise<{ readonly hash: string }>;
     /** Where a file the reader chose lives on this machine, when it lives anywhere. */
     attachmentSourcePath(file: File): string | undefined;
     /**
@@ -276,8 +292,14 @@ export interface HappyAgentWorkspaceClient {
 }
 
 export interface HappyAgentWorkspaceClientDeps {
-    readonly connectLegacyCli?: () => Promise<void>;
-    readonly prepareLegacyCli?: () => Promise<void>;
+    /** The local desktop pairs Happy Mobile through the guided setup. */
+    readonly guidedMobileSetup?: boolean;
+    readonly readLegacyCli?: () => Promise<
+        import("./happyTerminalCli.js").HappyTerminalCliInspection
+    >;
+    readonly resetLegacyCli?: (
+        request: import("./happyTerminalCli.js").HappyTerminalCliResetRequest,
+    ) => Promise<import("./happyTerminalCli.js").HappyTerminalCliResetOutcome>;
     readonly client: HappyAgentClient;
     readonly cloudHost: HappyAgentCloudHost;
     readonly connection: HappyAgentConnection;
@@ -289,6 +311,12 @@ export interface HappyAgentWorkspaceClientDeps {
      * Omitted leaves the inbox unavailable rather than empty.
      */
     readonly inboxSource?: HappyAgentInboxSource;
+    /**
+     * Whether this host renders a document artifact of this media type inline,
+     * such as a PDF where the window has a PDF viewer. Omitted offers every
+     * document as its file.
+     */
+    readonly artifactDocumentInline?: (mimeType: string) => boolean;
     /**
      * Repeating read of each provider account's plan usage. Omitted leaves usage
      * unavailable rather than empty.
@@ -424,6 +452,7 @@ export function happyAgentWorkspaceClientCreate(
     });
     const memory = happyAgentWorkspaceMemoryStoreCreate(deps.workspaceMemoryPersistence);
     let sessionListStore: HappyAgentSessionListStore | undefined;
+    let agentIdentities: HappyAgentAgentIdentitySource | undefined;
     let inboxStore: HappyAgentInboxStore | undefined;
     let providerUsageStore: HappyAgentProviderUsageStore | undefined;
     let happyIntegrationStore: HappyAgentIntegrationStore | undefined;
@@ -434,6 +463,7 @@ export function happyAgentWorkspaceClientCreate(
     let instructionsStore: HappyAgentInstructionsStore | undefined;
     let securityPolicyStore: HappyAgentSecurityPolicyStore | undefined;
     let secretsStore: HappyAgentSecretsStore | undefined;
+    let artifacts: HappyAgentArtifacts | undefined;
     const chats = new Map<HappyAgentSessionId, ChatBinding>();
     let disposed = false;
     let chatUseOrder = 0;
@@ -527,7 +557,7 @@ export function happyAgentWorkspaceClientCreate(
         archivedRead();
     };
 
-    return {
+    const workspace: HappyAgentWorkspaceClient = {
         models,
         memory,
         catalogRead: () => models.load().then((snapshot) => snapshot.catalog),
@@ -564,11 +594,12 @@ export function happyAgentWorkspaceClientCreate(
             deps.hostServices.workspaceFileBytesRead(groupId, path, signal),
         htmlPreviewOpen: (groupId, path) => deps.hostServices.htmlPreviewOpen(groupId, path),
         workspaceFileWrite: async (groupId, path, content, expectedHash) => {
-            await deps.client.writeFile(groupId, {
+            const written = await deps.client.writeFile(groupId, {
                 path,
                 content: happyAgentTextEncodeBase64(content),
                 expectedHash,
             });
+            return { hash: written.hash };
         },
         attachmentSourcePath: (file) => deps.hostServices.attachmentSourcePath(file),
         attachmentSourceReachable: (groupId, sourcePath) =>
@@ -603,6 +634,22 @@ export function happyAgentWorkspaceClientCreate(
             }
             return sessionListStore;
         },
+        artifacts() {
+            if (disposed) throw new Error("The Happy Agent client is disposed.");
+            artifacts ??= happyAgentArtifactsCreate({
+                client: deps.client,
+                sync: deps.connection.sync,
+                ...(deps.artifactDocumentInline
+                    ? { documentInline: deps.artifactDocumentInline }
+                    : {}),
+                ...(deps.hostServices.artifactSiteOpen
+                    ? {
+                          siteOpen: deps.hostServices.artifactSiteOpen.bind(deps.hostServices),
+                      }
+                    : {}),
+            });
+            return artifacts;
+        },
         inbox() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
             const source = deps.inboxSource;
@@ -632,8 +679,9 @@ export function happyAgentWorkspaceClientCreate(
             happyIntegrationStore ??= happyAgentIntegrationStoreCreate({
                 client: deps.client,
                 sync: deps.connection.sync,
-                connectLegacyCli: deps.connectLegacyCli,
-                prepareLegacyCli: deps.prepareLegacyCli,
+                guidedMobileSetup: deps.guidedMobileSetup,
+                readLegacyCli: deps.readLegacyCli,
+                resetLegacyCli: deps.resetLegacyCli,
             });
             return happyIntegrationStore;
         },
@@ -701,6 +749,13 @@ export function happyAgentWorkspaceClientCreate(
                         modelSelect: (current, input) => models.modelSelect(current, input),
                         effortRemembered: (providerId, modelId) =>
                             models.effortRemembered(providerId, modelId),
+                        // A conversation is opened through the workspace that
+                        // already lists everything, so the list is there to
+                        // name whoever writes into it.
+                        agentIdentities: (agentIdentities ??= happyAgentAgentIdentitySourceCreate({
+                            client: deps.client,
+                            list: workspace.sessionList(),
+                        })),
                         output: deps.chatOutput
                             ? (event) => deps.chatOutput?.(sessionId, event)
                             : undefined,
@@ -805,6 +860,8 @@ export function happyAgentWorkspaceClientCreate(
             securityPolicyStore = undefined;
             secretsStore?.[Symbol.dispose]();
             secretsStore = undefined;
+            artifacts?.[Symbol.dispose]();
+            artifacts = undefined;
             deps.catalogSource[Symbol.dispose]();
             for (const binding of chats.values()) {
                 chatDeactivate(binding);
@@ -813,4 +870,5 @@ export function happyAgentWorkspaceClientCreate(
             chats.clear();
         },
     };
+    return workspace;
 }

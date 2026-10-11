@@ -12,9 +12,16 @@ export * from "./conversation/conversationSummary.js";
 export * from "./conversation/inlineImageSize.js";
 export * from "./conversation/loadable.js";
 export * from "./appearance/appearanceStore.js";
+export * from "./keepAwake/keepAwakeStore.js";
 export * from "./commandPalette/commandPaletteStore.js";
 export * from "./experiments/experimentsStore.js";
+export * from "./projectsVisibility/projectsVisibilityStore.js";
+export * from "./statusBar/statusBarStore.js";
+export * from "./usageAnalytics/usageAnalyticsStore.js";
 export * from "./gptLive/gptLiveStore.js";
+export * from "./gptLive/gptLiveRuntime.js";
+export * from "./gptLive/gptLiveRuntimeCreate.js";
+export * from "./gptLive/gptLiveDesktopSource.js";
 export * from "./titleShimmer/titleShimmerStore.js";
 export * from "./modules/composer/composerState.js";
 export * from "./modules/terminal/terminalState.js";
@@ -36,6 +43,41 @@ export * from "./happyAgent/happyAgentIntegrationStore.js";
 export * from "./happyAgent/happyAgentCloudStore.js";
 export * from "./happyAgent/happyAgentTeamsStore.js";
 export * from "./happyAgent/happyAgentInboxStore.js";
+export * from "./artifacts/artifactTypes.js";
+export {
+    happyAgentArtifactFilterMatches,
+    happyAgentArtifactSourceId,
+} from "./artifacts/artifactCatalog.js";
+export * from "./artifacts/artifactLabels.js";
+export * from "./artifacts/artifactReference.js";
+export {
+    happyAgentArtifactCatalogStoreNoop,
+    type HappyAgentArtifactCatalogSnapshot,
+    type HappyAgentArtifactCatalogStore,
+    type HappyAgentArtifactChatContext,
+    type HappyAgentArtifactNarrowing,
+    type HappyAgentArtifactScope,
+} from "./artifacts/artifactCatalogStore.js";
+export * from "./artifacts/artifactChatContext.js";
+export type {
+    HappyAgentArtifactContent,
+    HappyAgentArtifactPage,
+    HappyAgentArtifactStaticReason,
+    HappyAgentArtifactDeletion,
+    HappyAgentArtifactFileLink,
+    HappyAgentArtifactViewerArtifact,
+    HappyAgentArtifactViewerSnapshot,
+    HappyAgentArtifactViewerStore,
+} from "./artifacts/artifactViewerStore.js";
+export type { HappyAgentArtifactPeopleStore } from "./artifacts/artifactPeopleStore.js";
+export type { HappyAgentArtifacts } from "./artifacts/artifacts.js";
+export type {
+    HappyAgentArtifactTitle,
+    HappyAgentArtifactTitlesSnapshot,
+    HappyAgentArtifactTitlesStore,
+} from "./artifacts/artifactTitlesStore.js";
+// Vendored until the client release that exports the grammar is published.
+export * from "./references/happyReferences.js";
 export * from "./happyAgent/happyAgentInstructionsStore.js";
 export * from "./happyAgent/happyAgentMenusStore.js";
 export * from "./happyAgent/happyAgentModelStore.js";
@@ -52,12 +94,31 @@ export * from "./happyAgent/happyAgentSessionListStore.js";
 export * from "./happyAgent/happyAgentSettingsStore.js";
 export * from "./happyAgent/happyAgentSidebarCollapseStore.js";
 export * from "./happyAgent/happyAgentSidebarVisibilityStore.js";
+export * from "./happyAgent/happyAgentChiefOfStaffRequest.js";
 export * from "./happyAgent/happyAgentSupport.js";
+export * from "./happyAgent/happyAgentActivity.js";
 export * from "./happyAgent/happyAgentTerminalStore.js";
 export * from "./happyAgent/happyAgentHostServices.js";
 export * from "./happyAgent/happyAgentTypes.js";
-export { happyAgentBotSubtasks } from "./happyAgent/happyAgentBotSubtasks.js";
+export { happyAgentBotSubtasks, happyAgentTaskDepths } from "./happyAgent/happyAgentBotSubtasks.js";
+export type { HappyAgentSubtaskRoot } from "./happyAgent/happyAgentBotSubtasks.js";
+export {
+    HAPPY_AGENT_TASKS_VERSION,
+    HAPPY_AGENT_TASK_CREATE_VERSION,
+    happyAgentTasksBrowsable,
+    happyAgentTasksJoined,
+} from "./happyAgent/happyAgentTasks.js";
 export * from "./happyAgent/happyAgentWindowStore.js";
 export * from "./happyAgent/happyAgentWorkspaceMemory.js";
 export * from "./happyAgent/happyAgentWorkspaceStore.js";
 export * from "./happyAgent/happyAgentViewPreferences.js";
+export type {
+    HappyTerminalCliSnapshot,
+    HappyTerminalCliResetPreview,
+    HappyTerminalCliInspection,
+    HappyTerminalCliResetRequest,
+    HappyTerminalCliResetOutcome,
+    HappyTerminalCliResetErrorCode,
+    HappyTerminalCliResetEffects,
+    HappyMobileManagementConfirmation,
+} from "./happyAgent/happyTerminalCli.js";

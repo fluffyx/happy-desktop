@@ -1,5 +1,7 @@
 import type {
     LocalOnboardingAssistant,
+    LocalOnboardingCommandCopy,
+    LocalOnboardingCustom,
     LocalOnboardingView,
     OnboardingStage,
 } from "happy-desktop-ui";
@@ -24,8 +26,27 @@ interface ProviderAuthenticationSnapshot {
     readonly claude?: ProviderAuthenticationResult;
     readonly codex?: ProviderAuthenticationResult;
     readonly complete: boolean;
+    /** Model access configured some other way, and the kinds it was found to be. */
+    readonly custom?: {
+        readonly result: ProviderAuthenticationResult;
+        readonly providers: readonly string[];
+    };
     readonly grok?: ProviderAuthenticationResult;
     readonly key?: string;
+}
+
+/**
+ * A request this window made that did not go through: which of its own calls
+ * it was, and what to tell the person about it.
+ */
+export interface LocalOnboardingFailure {
+    /**
+     * `stateRead` is reading setup, download, or connection state from the
+     * shell; `download` and `start` are the automatic first install; `request`
+     * is any step the person asked for.
+     */
+    readonly cause: "stateRead" | "download" | "start" | "request";
+    readonly message: string;
 }
 
 export interface LocalOnboardingViewSnapshot {
@@ -39,10 +60,8 @@ export interface LocalOnboardingViewSnapshot {
     /** True while a request this window made is still in flight. */
     readonly pending: boolean;
     /** Why the last request could not be delivered, until another is made. */
-    readonly failure?: string;
-    readonly profileName: string;
-    readonly profileEmail: string;
-    /** The optional mobile step, materialized only before the first project. */
+    readonly failure?: LocalOnboardingFailure;
+    /** The optional mobile steps, materialized only until setup completes. */
     readonly happyMobile?: HappyMobileOnboardingSnapshot;
     readonly chiefOfStaffReady: boolean;
 }
@@ -53,13 +72,14 @@ export interface LocalOnboardingStore {
     connectRetry(): void;
     /** Enters machine setup and allows its automatic download and launch to begin. */
     agentSetupBegin(): void;
-    projectChoose(): void;
     chiefOfStaffSetup(): void;
     assistantsContinue(): void;
+    /**
+     * The person copied a Subscriptions card's command or prompt. Setup keeps
+     * nothing of it; it is here so whoever owns the window can count it.
+     */
+    commandCopied(copy: LocalOnboardingCommandCopy): void;
     stepBack(step: LocalOnboardingStepBack): void;
-    profileNameUpdate(value: string): void;
-    profileEmailUpdate(value: string): void;
-    profileCreate(): void;
     happyMobileConnect(): void;
     happyMobileSkip(): void;
     happyMobilePlatformSelect(platform: "ios" | "android"): void;
@@ -92,6 +112,7 @@ export interface LocalOnboardingStoreOptions {
 const providerRecheckMs = 2_000;
 /** A failed network check must not turn the local discovery poll into paid traffic. */
 const providerVerificationRetryMs = 30_000;
+const HAPPY_MOBILE_SKIPPED: HappyMobileOnboardingSnapshot = { status: "skipped" };
 const downloadRetryMinimumMs = 3_000;
 const downloadRetryMaximumMs = 30_000;
 const startRetryMinimumMs = 3_000;
@@ -116,8 +137,6 @@ export function localOnboardingStoreCreate(
         agentStarting: false,
         chiefOfStaffReady: false,
         pending: false,
-        profileEmail: "",
-        profileName: "",
         providerAuthentication: { complete: false },
     };
     let bridgeUnsubscribe: (() => void) | undefined;
@@ -132,16 +151,18 @@ export function localOnboardingStoreCreate(
     let eventReceived = false;
     let daemonEventReceived = false;
     let runtimeEventReceived = false;
-    let profileDraftDirty = false;
     let verificationAbort: AbortController | undefined;
     let verificationRunning = false;
     let verificationGeneration = 0;
     let verificationConnectionId: number | undefined;
     const verificationRetryAt = new Map<LocalAssistantState["id"], number>();
+    let customVerificationRetryAt = 0;
     let providerRecheck: ReturnType<typeof setInterval> | undefined;
     let happyMobileStore: HappyMobileOnboardingStore | undefined;
     let happyMobileUnsubscribe: (() => void) | undefined;
     let happyMobileSourceUnsubscribe: (() => void) | undefined;
+    /** Skipped before the local connection offered the step; applied once it does. */
+    let happyMobileSkipped = false;
     let chiefOfStaffWorkspace: HappyAgentWorkspaceStore | undefined;
     let chiefOfStaffUnsubscribe: (() => void) | undefined;
     let chiefOfStaffSourceUnsubscribe: (() => void) | undefined;
@@ -155,15 +176,7 @@ export function localOnboardingStoreCreate(
     };
     const onboardingSet = (next: LocalOnboardingSnapshot) => {
         if (Object.is(snapshot.onboarding, next)) return;
-        const savedProfileArrived =
-            next.profile !== undefined && snapshot.onboarding?.profile === undefined;
-        publish({
-            ...snapshot,
-            onboarding: next,
-            ...(savedProfileArrived && !profileDraftDirty
-                ? { profileEmail: next.profile.email, profileName: next.profile.name }
-                : {}),
-        });
+        publish({ ...snapshot, onboarding: next });
         setupSynchronize();
     };
     const daemonSet = (next: DesktopDaemonSnapshot) => {
@@ -201,7 +214,7 @@ export function localOnboardingStoreCreate(
                 inFlight -= 1;
                 publish({
                     ...snapshot,
-                    failure: `${failure} ${errorMessage(error)}`,
+                    failure: { cause: "request", message: `${failure} ${errorMessage(error)}` },
                     pending: inFlight > 0,
                 });
             },
@@ -223,7 +236,10 @@ export function localOnboardingStoreCreate(
             .catch((error: unknown) => {
                 publish({
                     ...snapshot,
-                    failure: `Happy could not download Happy Agent. ${errorMessage(error)}`,
+                    failure: {
+                        cause: "download",
+                        message: `Happy could not download Happy Agent. ${errorMessage(error)}`,
+                    },
                 });
             })
             .finally(() => {
@@ -280,7 +296,10 @@ export function localOnboardingStoreCreate(
             .catch((error: unknown) => {
                 publish({
                     ...snapshot,
-                    failure: `Happy could not start Happy Agent. ${errorMessage(error)}`,
+                    failure: {
+                        cause: "start",
+                        message: `Happy could not start Happy Agent. ${errorMessage(error)}`,
+                    },
                 });
             })
             .finally(() => {
@@ -393,7 +412,8 @@ export function localOnboardingStoreCreate(
         happyMobileUnsubscribe?.();
         happyMobileUnsubscribe = undefined;
         happyMobileStore = undefined;
-        if (snapshot.happyMobile) publish({ ...snapshot, happyMobile: undefined });
+        const next = happyMobileSkipped ? HAPPY_MOBILE_SKIPPED : undefined;
+        if (snapshot.happyMobile !== next) publish({ ...snapshot, happyMobile: next });
     };
 
     function happyMobileSynchronize() {
@@ -415,12 +435,14 @@ export function localOnboardingStoreCreate(
         happyMobileStop();
         if (!store) return;
         happyMobileStore = store;
-        publish({ ...snapshot, happyMobile: store.get() });
         happyMobileUnsubscribe = store.subscribe(() => {
             if (happyMobileStore !== store) return;
             publish({ ...snapshot, happyMobile: store.get() });
             chiefOfStaffSetupAutomatically();
         });
+        // The store records the skip, so a later launch remembers it too.
+        if (happyMobileSkipped) store.happyMobileSkip();
+        publish({ ...snapshot, happyMobile: store.get() });
         chiefOfStaffSetupAutomatically();
     }
 
@@ -475,6 +497,7 @@ export function localOnboardingStoreCreate(
         if (connectionChanged) {
             verificationConnectionId = runtime.connectionId;
             verificationRetryAt.clear();
+            customVerificationRetryAt = 0;
         }
         const previous = connectionChanged ? { complete: false } : snapshot.providerAuthentication;
         const generation = ++verificationGeneration;
@@ -489,6 +512,10 @@ export function localOnboardingStoreCreate(
                     claude: assistantAuthenticationInitial(assistants, "claude", previous),
                     codex: assistantAuthenticationInitial(assistants, "codex", previous),
                     complete: assistants.length === 0,
+                    custom:
+                        previous.custom?.result === "valid"
+                            ? previous.custom
+                            : { providers: [], result: "checking" },
                     grok: assistantAuthenticationInitial(assistants, "grok", previous),
                     key,
                 },
@@ -522,13 +549,70 @@ export function localOnboardingStoreCreate(
                 ),
             });
         };
+        const customPublish = (
+            result: Exclude<ProviderAuthenticationResult, "checking">,
+            providers: readonly string[],
+        ) => {
+            if (!current()) return;
+            const previous = snapshot.providerAuthentication.custom;
+            publish({
+                ...snapshot,
+                providerAuthentication: {
+                    ...snapshot.providerAuthentication,
+                    custom: {
+                        providers,
+                        result: authenticationResultProject(previous?.result, result),
+                    },
+                },
+            });
+        };
+        // The same proof the three CLIs get, for whatever else is configured:
+        // one real inference through it, backed off after a failure.
+        const customCheck = async () => {
+            const config = await client.getConfig({ signal: abort.signal }).catch(() => undefined);
+            if (!current()) return;
+            if (!config) {
+                customPublish("error", snapshot.providerAuthentication.custom?.providers ?? []);
+                return;
+            }
+            const configured = customProvidersFind(config);
+            const providers = [...new Set(configured.map(({ type }) => providerKindLabel(type)))];
+            if (configured.length === 0) {
+                customVerificationRetryAt = 0;
+                customPublish("invalid", []);
+                return;
+            }
+            if (snapshot.providerAuthentication.custom?.result === "valid") {
+                customPublish("valid", providers);
+                return;
+            }
+            if (Date.now() < customVerificationRetryAt) {
+                customPublish("error", providers);
+                return;
+            }
+            customVerificationRetryAt = Date.now() + providerVerificationRetryMs;
+            const passed = await Promise.all(
+                configured.map(({ id }) =>
+                    client
+                        .verifyProvider(id, { level: "inference" }, { signal: abort.signal })
+                        .then(
+                            (result) =>
+                                result.status === "passed" && result.performedLevel === "inference",
+                            () => false,
+                        ),
+                ),
+            );
+            if (passed.includes(true)) customVerificationRetryAt = 0;
+            customPublish(passed.includes(true) ? "valid" : "error", providers);
+        };
         void client
             .scanProviders({ signal: abort.signal })
             // A failed local scan says nothing about an earlier successful check.
             .catch(() => undefined)
             .then((scan) =>
-                Promise.all(
-                    assistants.map(async (assistant) => {
+                Promise.all([
+                    customCheck(),
+                    ...assistants.map(async (assistant) => {
                         if (!current()) return;
                         const credentials = scan?.providers.find(
                             (provider) => provider.providerId === assistant.id,
@@ -587,7 +671,7 @@ export function localOnboardingStoreCreate(
                             resultPublish(assistant.id, "error");
                         }
                     }),
-                ),
+                ]),
             )
             .then(() => {
                 if (generation !== verificationGeneration) return;
@@ -661,7 +745,10 @@ export function localOnboardingStoreCreate(
                     (error: unknown) => {
                         publish({
                             ...snapshot,
-                            failure: `Happy could not read the state of first-run setup. ${errorMessage(error)}`,
+                            failure: {
+                                cause: "stateRead",
+                                message: `Happy could not read the state of first-run setup. ${errorMessage(error)}`,
+                            },
                         });
                     },
                 );
@@ -672,7 +759,10 @@ export function localOnboardingStoreCreate(
                     (error: unknown) => {
                         publish({
                             ...snapshot,
-                            failure: `Happy could not read Happy Agent download state. ${errorMessage(error)}`,
+                            failure: {
+                                cause: "stateRead",
+                                message: `Happy could not read Happy Agent download state. ${errorMessage(error)}`,
+                            },
                         });
                     },
                 );
@@ -683,7 +773,10 @@ export function localOnboardingStoreCreate(
                     (error: unknown) => {
                         publish({
                             ...snapshot,
-                            failure: `Happy could not read Happy Agent connection state. ${errorMessage(error)}`,
+                            failure: {
+                                cause: "stateRead",
+                                message: `Happy could not read Happy Agent connection state. ${errorMessage(error)}`,
+                            },
                         });
                     },
                 );
@@ -721,42 +814,29 @@ export function localOnboardingStoreCreate(
             agentSetupActive = true;
             setupSynchronize();
         },
-        projectChoose() {
-            if (snapshot.pending) return;
-            attempt(bridge.onboardingProjectChoose(), "Happy could not open a project.");
-        },
         chiefOfStaffSetup() {
             chiefOfStaffSetupBegin();
         },
         assistantsContinue() {
             attempt(bridge.onboardingAssistantsContinue(), "Happy could not continue setup.");
         },
+        commandCopied() {},
         stepBack(step) {
             attempt(bridge.onboardingStepBack(step), "Happy could not go back to that step.");
-        },
-        profileNameUpdate(value) {
-            profileDraftDirty = true;
-            publish({ ...snapshot, profileName: value });
-        },
-        profileEmailUpdate(value) {
-            profileDraftDirty = true;
-            publish({ ...snapshot, profileEmail: value });
-        },
-        profileCreate() {
-            if (snapshot.pending) return;
-            attempt(
-                bridge.onboardingProfileCreate({
-                    email: snapshot.profileEmail.trim(),
-                    name: snapshot.profileName.trim(),
-                }),
-                "Happy could not create that profile.",
-            );
         },
         happyMobileConnect() {
             happyMobileStore?.happyMobileConnect();
         },
         happyMobileSkip() {
-            happyMobileStore?.happyMobileSkip();
+            if (happyMobileStore) {
+                happyMobileStore.happyMobileSkip();
+                return;
+            }
+            // Pairing is optional, so a step that has not come up yet must
+            // not hold the person on it.
+            happyMobileSkipped = true;
+            publish({ ...snapshot, happyMobile: HAPPY_MOBILE_SKIPPED });
+            chiefOfStaffSetupAutomatically();
         },
         happyMobilePlatformSelect(platform) {
             happyMobileStore?.happyMobilePlatformSelect(platform);
@@ -770,11 +850,14 @@ export function localOnboardingView(
 ): LocalOnboardingView | undefined {
     const onboarding = snapshot.onboarding;
     if (!onboarding)
-        return { kind: "checking", ...(snapshot.failure ? { message: snapshot.failure } : {}) };
+        return {
+            kind: "checking",
+            ...(snapshot.failure ? { message: snapshot.failure.message } : {}),
+        };
     // What the shell reported about the step comes first; a request this window
     // could not even deliver is the fallback, so one failure is never shown as
     // if it were the other.
-    const message = onboarding.message ?? snapshot.failure;
+    const message = onboarding.message ?? snapshot.failure?.message;
     const busy = onboarding.busy || snapshot.pending;
     switch (onboarding.stage) {
         case "inactive":
@@ -805,8 +888,11 @@ export function localOnboardingView(
                 assistants: assistantsProject(
                     onboarding.assistants,
                     snapshot.providerAuthentication,
+                    providersRefused(snapshot),
                 ),
+                custom: customProject(snapshot),
                 kind: "provider-authentication",
+                installShell: onboarding.installShell ?? rendererInstallShell(),
             };
         case "agentReady":
             return {
@@ -815,14 +901,6 @@ export function localOnboardingView(
                     ? { version: snapshot.daemon.installedVersion }
                     : {}),
                 ...(onboarding.node ? { nodeVersion: onboarding.node.version } : {}),
-            };
-        case "profileRequired":
-            return {
-                busy,
-                email: snapshot.profileEmail,
-                kind: "profile-required",
-                name: snapshot.profileName,
-                ...(message ? { message } : {}),
             };
         case "examining":
             return { kind: "examining" };
@@ -881,8 +959,6 @@ export function localOnboardingReachedStage(
         case "assistantsFound":
         case "examining":
             return "subscriptions";
-        case "profileRequired":
-            return "profile";
         case "project":
         case "complete":
             return "connect-phone";
@@ -918,9 +994,14 @@ function agentSetupProject(
 function assistantsProject(
     assistants: readonly LocalAssistantState[] | undefined,
     authentication: ProviderAuthenticationSnapshot,
+    refused: boolean,
 ): readonly LocalOnboardingAssistant[] {
     return (assistants ?? []).map((assistant) => {
-        const result = authenticationFor(authentication, assistant.id) ?? "checking";
+        // Nothing can be checked against a daemon that would not start, and it
+        // already said why: none of these works yet.
+        const result = refused
+            ? "invalid"
+            : (authenticationFor(authentication, assistant.id) ?? "checking");
         return {
             authentication:
                 result === "invalid" && assistant.status === "missing" ? "unavailable" : result,
@@ -983,9 +1064,65 @@ function authenticationResultsProject(
         ...(claude ? { claude } : {}),
         ...(codex ? { codex } : {}),
         complete,
+        ...(previous.custom ? { custom: previous.custom } : {}),
         ...(grok ? { grok } : {}),
         key,
     };
+}
+
+/**
+ * Model access configured some other way than the three CLIs' own sign-ins:
+ * every enabled provider with models that is not `claude`, `codex`, or `grok`.
+ * Pools are left out because their members are providers of their own.
+ */
+function customProvidersFind(
+    config: Awaited<ReturnType<HappyAgentClient["getConfig"]>>,
+): readonly { readonly id: string; readonly type: string }[] {
+    return Object.entries(config.config.providers).flatMap(([id, provider]) =>
+        !LOCAL_PROVIDER_IDS.has(id) &&
+        provider.type !== "smart" &&
+        provider.enabled &&
+        provider.models.some((model) => model.enabled)
+            ? [{ id, type: provider.type }]
+            : [],
+    );
+}
+
+const LOCAL_PROVIDER_IDS: ReadonlySet<string> = new Set(["claude", "codex", "grok"]);
+
+/** A provider kind as a person would name it on the card. */
+function providerKindLabel(type: string): string {
+    switch (type) {
+        case "bedrock":
+            return "Bedrock";
+        case "claude":
+            return "Claude";
+        case "codex":
+            return "Codex";
+        case "grok":
+            return "Grok";
+        case "openai":
+            return "OpenAI";
+        default:
+            return type;
+    }
+}
+
+/**
+ * The custom column as the screen reads it. A daemon that refused to start
+ * because no provider works has answered for every column already, so nothing
+ * custom is configured; otherwise it is whatever the last check found.
+ */
+function customProject(snapshot: LocalOnboardingViewSnapshot): LocalOnboardingCustom {
+    if (providersRefused(snapshot)) return { authentication: "invalid", providers: [] };
+    const custom = snapshot.providerAuthentication.custom;
+    if (!custom) return { authentication: "checking", providers: [] };
+    return { authentication: custom.result, providers: custom.providers };
+}
+
+/** Happy Agent would not start because no inference provider works at all. */
+function providersRefused(snapshot: LocalOnboardingViewSnapshot): boolean {
+    return snapshot.onboarding?.stage === "providersMissing" && snapshot.runtime?.phase !== "ready";
 }
 
 /**
@@ -1003,4 +1140,16 @@ function authenticationResultProject(
 
 function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The install shell for a shell too old to name one. A hosted renderer can
+ * outlive its shell, and the browser's platform string is the only answer it
+ * has; Windows must not be handed POSIX commands that cannot run there.
+ */
+export function rendererInstallShell(
+    platform: string = (navigator as Navigator & { userAgentData?: { platform?: string } })
+        .userAgentData?.platform ?? navigator.platform,
+): "powershell" | "posix" {
+    return platform.toLowerCase().startsWith("win") ? "powershell" : "posix";
 }

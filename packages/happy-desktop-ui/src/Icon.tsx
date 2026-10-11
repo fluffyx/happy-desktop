@@ -12,6 +12,7 @@ export type IconName =
     | "files"
     | "search"
     | "settings"
+    | "call"
     | "clock"
     | "history"
     | "plus"
@@ -22,6 +23,8 @@ export type IconName =
     | "chevron-down"
     | "chevron-left"
     | "chevron-right"
+    | "chevron-up"
+    | "file-diff"
     | "close"
     | "branch"
     | "merge"
@@ -42,7 +45,12 @@ export type IconName =
     | "shield"
     | "lock"
     | "eye"
+    | "eye-off"
     | "link"
+    | "open-external"
+    | "fold"
+    | "unfold"
+    | "locate"
     | "mobile"
     | "smile"
     | "paperclip"
@@ -58,6 +66,7 @@ export type IconName =
     | "edit"
     | "sun"
     | "moon"
+    | "coffee"
     | "sidebar-collapse"
     | "sidebar-expand"
     | "panel-collapse"
@@ -124,6 +133,7 @@ const glyphs: Record<IconName, IconGlyph> = {
     files: { set: "ionicons", name: "documents-outline" },
     search: { set: "ionicons", name: "search-outline" },
     settings: { set: "ionicons", name: "settings-outline" },
+    call: { set: "ionicons", name: "call-outline" },
     clock: { set: "ionicons", name: "time-outline" },
     history: { set: "octicons", name: "history" },
     plus: { set: "ionicons", name: "add-outline" },
@@ -134,10 +144,14 @@ const glyphs: Record<IconName, IconGlyph> = {
     "chevron-down": { set: "ionicons", name: "chevron-down-outline" },
     "chevron-left": { set: "ionicons", name: "chevron-back-outline" },
     "chevron-right": { set: "ionicons", name: "chevron-forward-outline" },
+    "chevron-up": { set: "ionicons", name: "chevron-up-outline" },
     // A bare cross: dismissing a thing where it is an affordance, and what went
     // wrong where it is not. In a danger or warning tone beside a failure it is
     // the house mark for trouble; `shield` says the opposite and is never it.
     close: { set: "ionicons", name: "close-outline" },
+    // The whole change read as one thing, rather than one file's diff: the mark
+    // for the review stream and nothing else.
+    "file-diff": { set: "octicons", name: "file-diff" },
     branch: { set: "octicons", name: "git-branch" },
     merge: { set: "octicons", name: "git-merge" },
     spark: { set: "ionicons", name: "sparkles-outline" },
@@ -167,7 +181,19 @@ const glyphs: Record<IconName, IconGlyph> = {
     shield: { set: "ionicons", name: "shield-checkmark-outline" },
     lock: { set: "ionicons", name: "lock-closed-outline" },
     eye: { set: "ionicons", name: "eye-outline" },
+    "eye-off": { set: "ionicons", name: "eye-off-outline" },
     link: { set: "ionicons", name: "link-outline" },
+    // A box with an arrow leaving it: the same thing, opened somewhere of its
+    // own. Never "a link" — `link` is that — and never a navigation arrow.
+    "open-external": { set: "ionicons", name: "open-outline" },
+    // Collapsing many things to their headers and opening them again. Octicons
+    // draws the pair as arrows meeting a line and leaving it, which reads as
+    // what happens to a list rather than to one row.
+    fold: { set: "octicons", name: "fold" },
+    unfold: { set: "octicons", name: "unfold" },
+    // Finding your own place again: the crosshair that centres on where you
+    // already are, not an arrow that takes you somewhere else.
+    locate: { set: "ionicons", name: "locate-outline" },
     mobile: { set: "ionicons", name: "phone-portrait-outline" },
     smile: { set: "ionicons", name: "happy-outline" },
     paperclip: { set: "ionicons", name: "attach-outline" },
@@ -183,6 +209,9 @@ const glyphs: Record<IconName, IconGlyph> = {
     edit: { set: "ionicons", name: "create-outline" },
     sun: { set: "ionicons", name: "sunny-outline" },
     moon: { set: "ionicons", name: "moon-outline" },
+    // A cup of coffee: the sign every keep-awake utility has used for keeping a
+    // machine up, so the footer control reads without a label.
+    coffee: { set: "ionicons", name: "cafe-outline" },
     // The panel and its column, with no arrow in it: the control says what the
     // window is made of, and the button's label says which way it goes. The
     // collapse name shows the column open, because that is the state you are in

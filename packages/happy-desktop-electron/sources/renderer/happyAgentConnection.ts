@@ -5,6 +5,9 @@ import {
     HappyAgentClient,
     happyAgentWorkspaceClientCreate,
     happyAgentClockStoreCreate,
+    gptLiveRuntimeCreate,
+    type GptLiveRuntime,
+    type GptLiveRuntimeCreateOptions,
     happyAgentDebugLogStoreCreate,
     happyAgentWorkspaceStoreCreate,
     happyAgentOnboardingStoreCreate,
@@ -14,6 +17,7 @@ import {
     HappyAgentApiError,
     type MutationRejectedDelta,
     type HappyAgentWorkspaceClient,
+    type HappyAgentActivity,
     type HappyAgentClockStore,
     type HappyAgentCloudHost,
     type HappyAgentCloudStore,
@@ -33,6 +37,7 @@ import {
     type HappyAgentProvidersStore,
     type HappyAgentSecurityPolicyStore,
     type HappyAgentSecretsStore,
+    type HappyAgentArtifacts,
     type HappyAgentSessionLocation,
     type HappyAgentWorkspaceMemoryDocument,
     type HappyAgentWorkspaceMemoryPersistence,
@@ -92,6 +97,8 @@ function workspaceMemoryPersistence(happyAgentId: string): HappyAgentWorkspaceMe
 }
 
 export interface HappyAgentSession {
+    /** Supplies the existing authenticated connection only to the opt-in voice integration. */
+    gptLiveRuntimeCreate(options: Omit<GptLiveRuntimeCreateOptions, "client">): GptLiveRuntime;
     readonly welcome: WelcomeStore;
     readonly onboarding: HappyAgentOnboardingStore;
     readonly connection: HappyAgentConnectionStore;
@@ -108,6 +115,8 @@ export interface HappyAgentSession {
     readonly instructions: HappyAgentInstructionsStore;
     readonly securityPolicy: HappyAgentSecurityPolicyStore;
     readonly secrets: () => HappyAgentSecretsStore;
+    /** This Happy Agent's published artifacts, materialized as their surfaces open. */
+    readonly artifacts: HappyAgentArtifacts;
     readonly clock: HappyAgentClockStore;
 }
 
@@ -120,6 +129,13 @@ export interface HappyAgentSessionDeps {
      * to a row that no longer exists.
      */
     readonly groupForget: (groupId: string) => void;
+    /** Takes bot subtasks the host stopped listing out of this window's navigation. */
+    readonly subtasksForget: (
+        removed: readonly HappyAgentSessionLocation[],
+        open: HappyAgentSessionLocation | undefined,
+    ) => void;
+    /** A reader-initiated act this connection's workspace finished. */
+    readonly activity?: (activity: HappyAgentActivity) => void;
     /** Announces that this connection's session is ready or has been replaced. */
     readonly changed: () => void;
     readonly unavailable?: (error: unknown) => void;
@@ -278,8 +294,20 @@ function streamConnectionStoreCreate(connection: HappyAgentConnection): {
  * state with the small set of services that remain owned by the desktop host.
  */
 export function happyAgentConnectionOpen(input: {
-    readonly prepareLegacyCli?: () => Promise<void>;
-    readonly connectLegacyCli?: () => Promise<void>;
+    /** The local desktop pairs Happy Mobile through the guided setup. */
+    readonly guidedMobileSetup?: boolean;
+    /**
+     * Whether product stores wait for the member's profile. A remote Happy
+     * Agent may be a team that authorizes nothing else until one exists; the
+     * machine's own Happy Agent is solo and never asks for one.
+     */
+    readonly memberProfileRequired: boolean;
+    readonly readLegacyCli?: () => Promise<
+        import("happy-desktop-state").HappyTerminalCliInspection
+    >;
+    readonly resetLegacyCli?: (
+        request: import("happy-desktop-state").HappyTerminalCliResetRequest,
+    ) => Promise<import("happy-desktop-state").HappyTerminalCliResetOutcome>;
     readonly cloudHost: HappyAgentCloudHost;
     readonly host: HappyAgentHost;
     readonly deps: HappyAgentSessionDeps;
@@ -325,6 +353,7 @@ export function happyAgentConnectionOpen(input: {
         client: directClient,
         endpoint: input.happyAgentHttpUrl,
         token: "happy-local-capability",
+        memberProfileRequired: input.memberProfileRequired,
         onDebugEntry: debugEntry,
         onMutationRejected: (rejection) => {
             for (const listener of mutationListeners) listener(rejection);
@@ -354,14 +383,14 @@ export function happyAgentConnectionOpen(input: {
         setupActive: input.happyAgentId !== "local" && welcome.get().welcomeAcknowledged,
         mobileSkipped: desktopHappyMobileOnboardingSkipped(input.happyAgentId),
         onMobileSkip: () => desktopHappyMobileOnboardingSkip(input.happyAgentId),
-        connectLegacyCli: input.connectLegacyCli,
-        prepareLegacyCli: input.prepareLegacyCli,
+        guidedMobileSetup: input.guidedMobileSetup,
     });
     const client: HappyAgentWorkspaceClient = happyAgentWorkspaceClientCreate({
         client: directClient,
-        connectLegacyCli: input.connectLegacyCli,
-        prepareLegacyCli: input.prepareLegacyCli,
+        guidedMobileSetup: input.guidedMobileSetup,
         cloudHost: input.cloudHost,
+        readLegacyCli: input.readLegacyCli,
+        resetLegacyCli: input.resetLegacyCli,
         connection: agentConnection,
         hostServices,
         modelPreferencePersistence: input.modelPreferencePersistence,
@@ -377,6 +406,10 @@ export function happyAgentConnectionOpen(input: {
         },
         terminalDriverCreate,
         terminalColorScheme: input.terminalColorScheme,
+        // Chromium's own viewer shows a PDF inline when this window has one;
+        // anything else is offered as a download.
+        artifactDocumentInline: (mimeType) =>
+            mimeType === "application/pdf" && navigator.pdfViewerEnabled,
     });
     // Keep account authentication subscribed for this connection's lifetime so
     // browser callbacks are handled even when Settings is closed or reloading.
@@ -398,13 +431,17 @@ export function happyAgentConnectionOpen(input: {
             session ||
             modelsLoading ||
             !startup.available ||
-            !(startup.state?.completed || startup.state?.steps.profile.done) ||
+            !startup.state ||
+            (input.memberProfileRequired &&
+                !startup.state.completed &&
+                !startup.state.steps.profile.done) ||
             startup.error
         )
             return;
-        // Profile completion is the first authorized opportunity to load the
-        // workspace. Warm its empty state and bot catalog alongside models,
-        // while onboarding is still on the steps before first-project setup.
+        // This is the first authorized opportunity to load the workspace — for
+        // a team member, once their profile exists. Warm its empty state and
+        // bot catalog alongside models, while onboarding is still on the steps
+        // before first-project setup.
         if (!workspace) {
             workspace = happyAgentWorkspaceStoreCreate(client, {
                 host: input.host,
@@ -419,6 +456,12 @@ export function happyAgentConnectionOpen(input: {
                             return;
                         case "addressedGroupRemoved":
                             input.deps.groupForget(event.groupId);
+                            return;
+                        case "subtasksRemoved":
+                            input.deps.subtasksForget(event.removed, event.open);
+                            return;
+                        case "activityRecorded":
+                            input.deps.activity?.(event.activity);
                             return;
                     }
                 },
@@ -455,6 +498,11 @@ export function happyAgentConnectionOpen(input: {
                 });
                 sessionConnection = streamConnectionStoreCreate(agentConnection);
                 session = {
+                    gptLiveRuntimeCreate: (options) =>
+                        gptLiveRuntimeCreate({
+                            ...options,
+                            client: () => (disposed ? undefined : directClient),
+                        }),
                     welcome,
                     onboarding,
                     cloud: () => cloudStore,
@@ -471,6 +519,7 @@ export function happyAgentConnectionOpen(input: {
                     instructions: client.instructions(),
                     securityPolicy: client.securityPolicy(),
                     secrets: () => client.secrets(),
+                    artifacts: client.artifacts(),
                     clock: happyAgentClockStoreCreate(),
                 };
                 debugEntry({

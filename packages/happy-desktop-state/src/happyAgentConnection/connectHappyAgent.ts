@@ -21,6 +21,8 @@ import {
     type SendMessageRequest,
     type SendMessageResponse,
     type SlashCommand,
+    type Task,
+    type TaskMembership,
     type UsageBreakdown,
     type Workspace,
 } from "@slopus/happy-agent-client";
@@ -37,14 +39,17 @@ import { deepEqual } from "../happyAgent/happyAgentSupport.js";
 import type { HappyAgentDebugLogInput } from "../happyAgent/happyAgentDebugLogStore.js";
 import {
     applyChanges,
+    archivedAgentsMerge,
     defaultMode,
     elementsReuse,
     modeOf,
+    ownerResourceReplace,
     projectElements,
     projectBots,
     projectGroups,
     projectNumericIdentity,
     projectSession,
+    projectTasks,
     replaceResource,
     type SessionProjectionInput,
     type TranscriptMessage,
@@ -62,6 +67,7 @@ import type {
     HappyAgentGroupsSubscriptionOptions,
     HappyAgentSessionSubscriptionOptions,
     ServerCompatibility,
+    TaskOwner,
 } from "./types.js";
 
 const INITIAL_RECONNECT_MS = 250;
@@ -70,6 +76,16 @@ const DEFAULT_HISTORY_LIMIT = 100;
 const GIT_WATCH_RENEW_MS = 2 * 60 * 1000;
 const RECENT_EVENT_RETENTION_MS = 60_000;
 const SNAPSHOT_RESPONSE_TIMEOUT_MS = 60_000;
+
+/**
+ * The desktop bootstrap as a current daemon serves it: beside the owners and their active
+ * agents, the most recently archived agents of those owners, newest first, as full agent
+ * objects. The published client this package pins does not describe that additive field yet;
+ * this widening goes away with the client release that does.
+ */
+type DesktopBootstrapWithArchivedAgents = Awaited<
+    ReturnType<HappyAgentClient["getDesktopBootstrap"]>
+> & { readonly archivedAgents?: readonly Agent[] };
 /*
  * Deadline for mutations the daemon answers without doing model work. A
  * create, send, or abort whose response never arrives would otherwise pend
@@ -188,6 +204,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             for (const entry of userSessions.get(id) ?? []) {
                 if (!entry.hydrating) publishSession(entry, true);
             }
+            // A task row wears its owner's face, so the catalog is published
+            // again when the person who owns one changes.
+            if (groupsStore.getState().tasks.some((task) => task.ownerUserId === id))
+                publishGroups();
         },
     });
     const ensureMessageUsers = (messages: readonly Message[]): Promise<void> =>
@@ -230,7 +250,22 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     const agentModes = new Map<string, MessageMode | null>();
     const draftRevisions = new Map<string, number>();
     const pendingDraftSaves = new Map<string, PendingDraftSave>();
+    /*
+     * Routine writes the window makes while someone simply reads and types —
+     * saving a draft, marking a conversation read — are held while the daemon
+     * cannot take them: while it drains for an update, and while the
+     * connection is down. Only the latest of each per session is kept, and it
+     * is sent once a daemon that admits work is live again. Nothing about a
+     * held write is reported, because nothing has gone wrong: the draft is
+     * still on screen and will be saved.
+     */
+    const heldDraftSaves = new Map<string, DraftSave>();
+    const heldReads = new Set<string>();
+    // Whether the daemon answering admits mutations. A daemon's drain is
+    // sticky, so this only becomes true again for a replacement process.
+    let admitting = true;
     const draftSaveCancel = (sessionId: string): void => {
+        heldDraftSaves.delete(sessionId);
         const pending = pendingDraftSaves.get(sessionId);
         if (pending === undefined) return;
         clearTimeout(pending.timer);
@@ -245,6 +280,33 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
      */
     const unannouncedAgents = new Set<string>();
     const sendConfirmations = new Map<string, () => void>();
+    const sessionCreationOutcomes = new Map<string, Promise<void>>();
+    const workspaceCreationOutcomes = new Map<string, Promise<void>>();
+    const sendAcceptance = new Map<string, Promise<void>>();
+    const sendAcceptanceCreate = (id: string) => {
+        let resolve!: () => void;
+        let reject!: (error: Error) => void;
+        const promise = new Promise<void>((accepted, refused) => {
+            resolve = accepted;
+            reject = refused;
+        });
+        // The ordinary optimistic send has no promise consumer.
+        void promise.catch(() => undefined);
+        sendAcceptance.set(id, promise);
+        let settled = false;
+        const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            rootController.signal.removeEventListener("abort", aborted);
+            if (error) reject(error);
+            else resolve();
+            queueMicrotask(() => sendAcceptance.delete(id));
+        };
+        const aborted = () =>
+            finish(new Error("The connection ended before message acceptance was confirmed."));
+        rootController.signal.addEventListener("abort", aborted, { once: true });
+        return { accept: () => finish(), reject: (error: Error) => finish(error) };
+    };
     const mutationQueues = new Map<string, Promise<void>>();
     const sessionCreations = new Map<string, Promise<void>>();
     const sessionMutationCounts = new Map<string, number>();
@@ -269,11 +331,17 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         readonly projects: readonly Project[];
         readonly workspaces: readonly Workspace[];
         readonly bots: readonly Bot[];
+        /** Every task the host holds, archived ones included. */
+        readonly tasks: readonly Task[];
+        /** The caller's own memberships; order is by `orderKey`, not array position. */
+        readonly taskMemberships: readonly TaskMembership[];
         readonly connection: GroupsState["connection"];
         /** The published group projection, rebuilt by `publishGroups`. */
         readonly groups: ReturnType<typeof projectGroups>;
         /** The published bot projection, rebuilt beside `groups`. */
         readonly botGroups: ReturnType<typeof projectBots>;
+        /** The published task projection, rebuilt beside `groups`. */
+        readonly taskGroups: ReturnType<typeof projectTasks>;
     }
 
     const groupsStore = createStore<GroupsStoreState>()(() => ({
@@ -282,6 +350,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         connection: "connecting",
         groups: [],
         projects: [],
+        taskGroups: [],
+        taskMemberships: [],
+        tasks: [],
         workspaces: [],
     }));
 
@@ -364,6 +435,47 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         sessionsComplete: config !== undefined,
     });
 
+    /**
+     * The person a task belongs to, as this connection can name them.
+     *
+     * A team task names its owner, who is resolved through the user directory
+     * like any other identity this connection renders. A team task that names
+     * nobody is left without a face rather than given the viewer's, because in
+     * a team the viewer is not everybody. A standalone daemon has one person,
+     * every task is theirs, and so it shows no owner at all: `null`.
+     */
+    const taskOwnerOf = (task: Task): TaskOwner | null => {
+        const base = endpoint.replace(/\/$/, "");
+        if (task.ownerUserId !== null) {
+            const profile = users.profiles.get(task.ownerUserId);
+            return {
+                userId: task.ownerUserId,
+                ...(profile === undefined || profile.name === "DELETED"
+                    ? {}
+                    : { name: profile.name }),
+                ...(profile?.avatar
+                    ? {
+                          avatar: {
+                              url: `${base}/v0/users/${encodeURIComponent(task.ownerUserId)}/photo`,
+                              thumbhash: profile.avatar.thumbhash,
+                          },
+                      }
+                    : {}),
+            };
+        }
+        return currentUserId === undefined ? null : {};
+    };
+
+    /** Reads the people who own tasks, so their rows can wear their faces. */
+    const taskOwnersEnsure = (tasks: readonly Task[]): void => {
+        const ids = [
+            ...new Set(
+                tasks.flatMap((task) => (task.ownerUserId === null ? [] : [task.ownerUserId])),
+            ),
+        ].filter((id) => !users.profiles.has(id));
+        if (ids.length > 0) background(users.ensure(ids));
+    };
+
     const publishGroupDeltas = (deltas: readonly GroupDelta[]): void => {
         for (const subscriber of groupSubscribers) {
             if (subscriber.closed) continue;
@@ -392,13 +504,23 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     agentDrafts,
                     agentModes,
                 ),
+                taskGroups: projectTasks(
+                    current.tasks,
+                    current.taskMemberships,
+                    current.workspaces,
+                    endpoint,
+                    daemonConfig,
+                    taskOwnerOf,
+                    agentDrafts,
+                    agentModes,
+                ),
             }));
         }
         const state = groupState();
-        const { botGroups, groups } = groupsStore.getState();
+        const { botGroups, groups, taskGroups } = groupsStore.getState();
         for (const subscriber of groupSubscribers) {
             if (subscriber.closed) continue;
-            subscriber.onChange(groups, state, botGroups);
+            subscriber.onChange(groups, state, botGroups, taskGroups);
             for (const delta of deltas) subscriber.onDelta?.(delta);
         }
     };
@@ -452,6 +574,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         const projection = projectionOf(entry);
         if (projection === undefined) return;
         let session = projectSession(projection);
+        if (!entry.historyLoaded) session = { ...session, historyLoading: true };
         if (entry.loadingMore) session = { ...session, loadingMore: true };
         if (entry.loadMoreError !== undefined) {
             session = { ...session, loadMoreError: entry.loadMoreError };
@@ -471,17 +594,23 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     /** Ownership is scoped to this authenticated connection, never the host's account. */
     const viewerIdentityUpdate = (profile: Profile): void => {
         const next = profile.userId ?? undefined;
-        if (next === currentUserId) return;
-        const previous = currentUserId;
-        currentUserId = next;
-        const affected = new Set<SessionEntry>();
-        for (const id of [previous, next]) {
-            if (id === undefined) continue;
-            for (const entry of userSessions.get(id) ?? []) affected.add(entry);
+        // Whether there is a viewer user at all decides whether this is a team,
+        // and so whether task rows show an owner.
+        const taskOwnersChanged = next !== currentUserId;
+        if (next !== currentUserId) {
+            const previous = currentUserId;
+            currentUserId = next;
+            const affected = new Set<SessionEntry>();
+            for (const id of [previous, next]) {
+                if (id === undefined) continue;
+                for (const entry of userSessions.get(id) ?? []) affected.add(entry);
+            }
+            for (const entry of affected) {
+                if (!entry.hydrating) publishSession(entry, true);
+            }
         }
-        for (const entry of affected) {
-            if (!entry.hydrating) publishSession(entry, true);
-        }
+        if (taskOwnersChanged && config !== undefined && groupsStore.getState().tasks.length > 0)
+            publishGroups();
     };
 
     const reloadViewerProfile = (): Promise<void> => {
@@ -547,10 +676,17 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     const botOf = (botId: string): Bot | undefined =>
         groupsStore.getState().bots.find((candidate) => candidate.id === botId);
 
+    const taskOf = (taskId: string): Task | undefined =>
+        groupsStore.getState().tasks.find((candidate) => candidate.id === taskId);
+
     const agentOf = (agentId: string): Agent | undefined => {
-        const { bots, projects, workspaces } = groupsStore.getState();
+        const { bots, projects, tasks, workspaces } = groupsStore.getState();
         for (const bot of bots) {
             const agent = agentTreeFind(bot.agent, agentId);
+            if (agent !== undefined) return agent;
+        }
+        for (const task of tasks) {
+            const agent = agentTreeFind(task.agent, agentId);
             if (agent !== undefined) return agent;
         }
         for (const workspace of workspaces) {
@@ -598,6 +734,11 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             bots: current.bots.map((bot) => {
                 const next = agentTreeUpdate(bot.agent, agent);
                 return next === bot.agent ? bot : { ...bot, agent: next };
+            }),
+            // A task's row is drawn from its embedded agent the same way.
+            tasks: current.tasks.map((task) => {
+                const next = agentTreeUpdate(task.agent, agent);
+                return next === task.agent ? task : { ...task, agent: next };
             }),
         }));
         const entry = sessions.get(agent.id);
@@ -657,6 +798,11 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             draftSaveCancel(agentId);
             if (draftRevisions.get(agentId) === pending.revision) draftRevisions.delete(agentId);
         }
+        const held = heldDraftSaves.get(agentId);
+        if (held !== undefined && draft.updatedAt !== null && draft.updatedAt >= held.updatedAt) {
+            heldDraftSaves.delete(agentId);
+            if (draftRevisions.get(agentId) === held.revision) draftRevisions.delete(agentId);
+        }
         replaceDraft(agentId, draft);
         return true;
     };
@@ -666,7 +812,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             .getState()
             .projects.find((candidate) => candidate.id === project.id);
         if (!shouldAdoptVersion(current, project)) return false;
-        groupsStore.setState((state) => ({ projects: replaceResource(state.projects, project) }));
+        groupsStore.setState((state) => ({
+            projects: ownerResourceReplace(state.projects, project),
+        }));
         publishGroups(deltas);
         return true;
     };
@@ -674,7 +822,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     const adoptWorkspace = (workspace: Workspace, deltas: readonly GroupDelta[] = []): boolean => {
         if (!shouldAdoptVersion(workspaceOf(workspace.id), workspace)) return false;
         groupsStore.setState((state) => ({
-            workspaces: replaceResource(state.workspaces, workspace),
+            workspaces: ownerResourceReplace(state.workspaces, workspace),
         }));
         publishGroups(deltas);
         return true;
@@ -820,6 +968,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         }
         entry.hydrating = true;
         const revision = entry.loadRequestedRevision;
+        const draftRevision = draftRevisions.get(entry.id);
         const signal = deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS);
         const loading = Promise.all([
             client.getMessages(
@@ -827,7 +976,21 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 { limit: DEFAULT_HISTORY_LIMIT, omitToolData: false },
                 { signal },
             ),
-            client.getAgentBootstrap(entry.id, { signal }),
+            client.getAgentBootstrap(entry.id, { signal }).then((bootstrap) => {
+                if (closed || entry.loading !== loading || sessions.get(entry.id) !== entry)
+                    return bootstrap;
+                // The controls need the session's own selection, not its history.
+                // Keep local draft edits made while this snapshot was in flight.
+                entry.agent = bootstrap.agent;
+                entry.workspace = workspaceOf(bootstrap.agent.workspaceId);
+                agentModes.set(entry.id, bootstrap.mode);
+                entry.mode = bootstrap.mode;
+                if (draftRevisions.get(entry.id) === draftRevision && !intendedModes.has(entry.id))
+                    adoptDraft(entry.id, bootstrap.draft);
+                entry.draft = agentDrafts.get(entry.id);
+                publishSession(entry, true);
+                return bootstrap;
+            }),
             optional(() => client.getAgentActivity(entry.id, { signal })),
             optional(() => client.getPendingQuestion(entry.id, { signal })),
         ])
@@ -840,12 +1003,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 entry.agent = bootstrap.agent;
                 entry.workspace = workspaceOf(bootstrap.agent.workspaceId);
                 entry.context = bootstrap.context;
-                entry.draft = bootstrap.draft;
-                entry.mode = bootstrap.mode;
+                entry.draft = agentDrafts.get(entry.id);
+                entry.mode = agentModes.get(entry.id);
                 entry.slashCommands = bootstrap.slashCommands;
                 entry.usage = bootstrap.usage;
-                agentDrafts.set(entry.id, bootstrap.draft);
-                agentModes.set(entry.id, bootstrap.mode);
                 const pendingSends = [...entry.messages.values()].filter(
                     (message) => message.pendingSend,
                 );
@@ -973,7 +1134,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             source: "sync",
         });
         const running = (async (): Promise<void> => {
-            const bootstrap = await client.getDesktopBootstrap({
+            const bootstrap: DesktopBootstrapWithArchivedAgents = await client.getDesktopBootstrap({
                 signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS),
             });
             if (rootController.signal.aborted) return;
@@ -992,13 +1153,25 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 ),
             );
             config = bootstrap.config;
+            // The daemon lists a project's or workspace's active agents on the owner and its
+            // most recently archived ones apart, in `archivedAgents`; a daemon too old to carry
+            // that field remembers no archived agent for this connection at all.
+            const owners = archivedAgentsMerge(
+                bootstrap.projects,
+                bootstrap.workspaces,
+                bootstrap.archivedAgents ?? [],
+            );
             groupsStore.setState({
                 // A daemon too old to know about bots omits the field entirely,
                 // which is an empty catalog rather than an unknown one.
                 bots: bootstrap.bots ?? [],
-                projects: bootstrap.projects,
-                workspaces: bootstrap.workspaces,
+                projects: owners.projects,
+                // The same for tasks: absent together on a daemon that predates them.
+                taskMemberships: bootstrap.taskMemberships ?? [],
+                tasks: bootstrap.tasks ?? [],
+                workspaces: owners.workspaces,
             });
+            taskOwnersEnsure(bootstrap.tasks ?? []);
             const gitWorkspaceIds = new Set(
                 activeGitWorkspaceIds(bootstrap.projects, bootstrap.workspaces),
             );
@@ -1024,8 +1197,8 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 }
             }
             const projectedProjects = projectGroups(
-                bootstrap.projects,
-                bootstrap.workspaces,
+                owners.projects,
+                owners.workspaces,
                 endpoint,
                 config,
                 gitStates,
@@ -1214,6 +1387,58 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         refetchResource(read().finally(() => agentRefetches.delete(agentId)));
     };
 
+    /**
+     * Reads one task whole and adopts it with the caller's membership. It is
+     * how a task known only from an event learns whether the caller may
+     * archive it, and how a broken version chain is repaired.
+     */
+    const taskRefetch = (taskId: string): void =>
+        refetchResource(
+            client
+                .getTask(taskId, { signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS) })
+                .then(taskResponseAdopt),
+        );
+
+    /** Adopts a task route's answer: the task, and the caller's place in it or none. */
+    const taskResponseAdopt = ({
+        task,
+        membership,
+    }: {
+        readonly task: Task;
+        readonly membership: TaskMembership | null;
+    }): void => {
+        const latest = taskOf(task.id);
+        const adoptTask =
+            latest === undefined ||
+            latest.version.localeCompare(task.version) <= 0 ||
+            (latest.canArchive === undefined && task.canArchive !== undefined);
+        groupsStore.setState((state) => ({
+            ...(adoptTask ? { tasks: replaceResource(state.tasks, task) } : {}),
+            taskMemberships:
+                membership === null
+                    ? state.taskMemberships.filter((entry) => entry.taskId !== task.id)
+                    : taskMembershipsReplace(state.taskMemberships, membership),
+        }));
+        taskOwnersEnsure([task]);
+        publishGroups();
+    };
+
+    const taskMembershipAdopt = (membership: TaskMembership): void => {
+        groupsStore.setState((state) => ({
+            taskMemberships: taskMembershipsReplace(state.taskMemberships, membership),
+        }));
+        publishGroups();
+    };
+
+    const taskMembershipRemove = (taskId: string): void => {
+        if (!groupsStore.getState().taskMemberships.some((entry) => entry.taskId === taskId))
+            return;
+        groupsStore.setState((state) => ({
+            taskMemberships: state.taskMemberships.filter((entry) => entry.taskId !== taskId),
+        }));
+        publishGroups();
+    };
+
     const reloadConfig = async (): Promise<void> => {
         const response = await client.getConfig({
             signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS),
@@ -1250,7 +1475,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             })
                             .then(({ project }) => {
                                 groupsStore.setState((state) => ({
-                                    projects: replaceResource(state.projects, project),
+                                    projects: ownerResourceReplace(state.projects, project),
                                 }));
                                 publishGroups();
                             }),
@@ -1272,7 +1497,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                                     latest.version.localeCompare(project.version) <= 0
                                 ) {
                                     groupsStore.setState((state) => ({
-                                        projects: replaceResource(state.projects, project),
+                                        projects: ownerResourceReplace(state.projects, project),
                                     }));
                                     publishGroups();
                                 }
@@ -1281,7 +1506,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     return;
                 }
                 groupsStore.setState((state) => ({
-                    projects: replaceResource(state.projects, {
+                    projects: ownerResourceReplace(state.projects, {
                         ...applyChanges(current, event.payload.changes),
                         version: event.payload.version,
                     }),
@@ -1349,6 +1574,51 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 publishGroups();
                 return;
             }
+            case "task.created":
+                // The event carries no `canArchive`: that answer is the caller's
+                // own and only the task route states it. The task is listed at
+                // once and read whole for the rest.
+                groupsStore.setState((state) => {
+                    const known = state.tasks.find(
+                        (candidate) => candidate.id === event.payload.task.id,
+                    )?.canArchive;
+                    return {
+                        tasks: replaceResource(
+                            state.tasks,
+                            known === undefined
+                                ? event.payload.task
+                                : { ...event.payload.task, canArchive: known },
+                        ),
+                    };
+                });
+                taskOwnersEnsure([event.payload.task]);
+                publishGroups();
+                taskRefetch(event.payload.task.id);
+                return;
+            case "task.updated": {
+                const current = taskOf(event.payload.taskId);
+                if (current === undefined || current.version !== event.payload.previousVersion) {
+                    taskRefetch(event.payload.taskId);
+                    return;
+                }
+                const updated: Task = {
+                    ...applyChanges(current, event.payload.changes),
+                    version: event.payload.version,
+                };
+                groupsStore.setState((state) => ({ tasks: replaceResource(state.tasks, updated) }));
+                taskOwnersEnsure([updated]);
+                publishGroups();
+                return;
+            }
+            case "task.joined":
+            case "task.reordered":
+                taskMembershipAdopt(event.payload.membership);
+                if (taskOf(event.payload.membership.taskId) === undefined)
+                    taskRefetch(event.payload.membership.taskId);
+                return;
+            case "task.left":
+                taskMembershipRemove(event.payload.membership.taskId);
+                return;
             case "workspace.updated": {
                 const current = workspaceOf(event.payload.workspaceId);
                 if (current === undefined) {
@@ -1359,7 +1629,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             })
                             .then(({ workspace }) => {
                                 groupsStore.setState((state) => ({
-                                    workspaces: replaceResource(state.workspaces, workspace),
+                                    workspaces: ownerResourceReplace(state.workspaces, workspace),
                                 }));
                                 publishGroups();
                             }),
@@ -1379,7 +1649,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                                     latest.version.localeCompare(workspace.version) <= 0
                                 ) {
                                     groupsStore.setState((state) => ({
-                                        workspaces: replaceResource(state.workspaces, workspace),
+                                        workspaces: ownerResourceReplace(
+                                            state.workspaces,
+                                            workspace,
+                                        ),
                                     }));
                                     publishGroups();
                                 }
@@ -1388,7 +1661,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     return;
                 }
                 groupsStore.setState((state) => ({
-                    workspaces: replaceResource(state.workspaces, {
+                    workspaces: ownerResourceReplace(state.workspaces, {
                         ...applyChanges(current, event.payload.changes),
                         version: event.payload.version,
                     }),
@@ -1978,6 +2251,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             : "Happy Agent is not ready",
                         source: "connection",
                     });
+                    // Health is read for every new process, so this is where a
+                    // replacement that admits work again is first known.
+                    admitting = health.draining !== true && health.shuttingDown !== true;
                     const nextCompatibility = serverCompatibility(health.version);
                     reportCompatibility(nextCompatibility);
                     if (nextCompatibility.status !== "compatible" || !health.ready) {
@@ -1998,6 +2274,8 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     // Team members without a profile can read these endpoints,
                     // but cannot read config/bootstrap or open the event stream.
                     // Keep that authorization boundary identical for every route.
+                    // A solo Happy Agent has no such boundary: it reports a
+                    // missing profile too, but authorizes bootstrap regardless.
                     const signal = AbortSignal.any([
                         attemptSignal,
                         AbortSignal.timeout(SNAPSHOT_RESPONSE_TIMEOUT_MS),
@@ -2008,7 +2286,11 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     ]);
                     if (attemptSignal.aborted) continue;
                     sync.writer.onboardingReceived({ onboarding, profile: profile.profile });
-                    if (!onboarding.completed && !onboarding.steps.profile.done) {
+                    if (
+                        options.memberProfileRequired !== false &&
+                        !onboarding.completed &&
+                        !onboarding.steps.profile.done
+                    ) {
                         // There is no authorized SSE channel yet. Reconcile
                         // narrow startup state until this member can bootstrap.
                         reconnectMs = INITIAL_RECONNECT_MS;
@@ -2054,6 +2336,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             source: "sse",
                         });
                         publishConnection("live");
+                        heldWritesFlush();
                         reconnectMs = INITIAL_RECONNECT_MS;
                     } else if (update.kind === "state_lost") {
                         reportDebug({
@@ -2099,9 +2382,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             break;
                         }
                     } else if (update.kind === "draining") {
-                        // Reported rather than acted on: a draining agent still
-                        // answers and still streams, and the feed says so itself
-                        // when it finally stops.
+                        // A draining agent still answers and still streams, and
+                        // the feed says so itself when it finally stops. It no
+                        // longer admits writes, so routine ones are held.
+                        admitting = false;
                         reportDebug({
                             detail: debugDetail({
                                 cursor: update.cursor,
@@ -2237,6 +2521,21 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         const completed = queued.then((value) => {
             if (!closed) applied?.(value);
         });
+        const creationOutcomes =
+            action === "create_session"
+                ? sessionCreationOutcomes
+                : action === "create_workspace"
+                  ? workspaceCreationOutcomes
+                  : undefined;
+        if (creationOutcomes) {
+            creationOutcomes.set(
+                mutationId,
+                completed.then(() => undefined),
+            );
+            void creationOutcomes.get(mutationId)!.catch(() => undefined);
+            while (creationOutcomes.size > 256)
+                creationOutcomes.delete(creationOutcomes.keys().next().value!);
+        }
         // An optimistic conversation can accept input before its backend resource
         // exists. Sends wait for this dependency only, not the agent's work queue.
         if (action === "create_session" && sessionId !== undefined) {
@@ -2273,21 +2572,88 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         return mutationId;
     };
 
-    const draftSave = (sessionId: string, save: DraftSave): string =>
-        mutation(
+    /**
+     * Archives or unarchives a task for everyone, guarded by the version this
+     * connection holds. The host refuses a caller it does not let archive the
+     * task, and a version someone else has already moved past; both refusals
+     * are reworded here because the host's own message names neither the task
+     * nor what to do next.
+     */
+    const taskArchivalSet = (taskId: string, archived: boolean): string => {
+        const mutationId = nextId();
+        const action = archived ? "archive_task" : "unarchive_task";
+        const verb = archived ? "archive" : "unarchive";
+        return mutation(
+            action,
+            mutationId,
+            async () => {
+                const task = taskOf(taskId);
+                if (task === undefined) throw new Error("The task is not loaded.");
+                const options = { ifMatch: task.version, mutationId, signal: deadlineSignal() };
+                try {
+                    return await (archived
+                        ? client.archiveTask(taskId, options)
+                        : client.unarchiveTask(taskId, options));
+                } catch (error) {
+                    if (error instanceof HappyAgentApiError && error.status === 403)
+                        throw new Error(
+                            `You can’t ${verb} “${task.name}”. Only its owner or the team owner can.`,
+                        );
+                    if (error instanceof HappyAgentApiError && error.status === 409) {
+                        // The version moved under us; read the task again so a
+                        // second try is made against what the host now holds.
+                        taskRefetch(taskId);
+                        throw new Error(
+                            `“${task.name}” changed while you were looking at it. Try again.`,
+                        );
+                    }
+                    throw error;
+                }
+            },
+            taskResponseAdopt,
+            undefined,
+            undefined,
+            `task:${taskId}`,
+        );
+    };
+
+    const writesHeld = (): boolean => !admitting || groupsStore.getState().connection !== "live";
+
+    /** The daemon's own refusal of a mutation because it is draining. */
+    const drainingRefusal = (error: unknown): boolean =>
+        error instanceof HappyAgentApiError && error.code === "draining";
+
+    const draftSave = (sessionId: string, save: DraftSave): string => {
+        if (writesHeld()) {
+            heldDraftSaves.set(sessionId, save);
+            return save.mutationId;
+        }
+        return mutation(
             "set_draft",
             save.mutationId,
-            () =>
-                client.saveAgentDraft(
-                    sessionId,
-                    {
-                        draft: save.draft.value,
-                        mutationId: save.mutationId,
-                        updatedAt: save.updatedAt,
-                    },
-                    { signal: deadlineSignal() },
-                ),
-            ({ draft: saved }) => {
+            async () => {
+                try {
+                    return await client.saveAgentDraft(
+                        sessionId,
+                        {
+                            draft: save.draft.value,
+                            mutationId: save.mutationId,
+                            updatedAt: save.updatedAt,
+                        },
+                        { signal: deadlineSignal() },
+                    );
+                } catch (error) {
+                    if (!drainingRefusal(error)) throw error;
+                    // The drain began while this was on its way. Held, with
+                    // the same idempotency key, unless a newer save already is.
+                    admitting = false;
+                    if (!heldDraftSaves.has(sessionId)) heldDraftSaves.set(sessionId, save);
+                    return undefined;
+                }
+            },
+            (response) => {
+                if (response === undefined) return;
+                const saved = response.draft;
                 if (draftRevisions.get(sessionId) !== save.revision) return;
                 draftRevisions.delete(sessionId);
                 replaceDraft(sessionId, saved);
@@ -2300,6 +2666,54 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             sessionId,
             `agent:${sessionId}`,
         );
+    };
+
+    const sessionReadMark = (sessionId: string): string => {
+        const mutationId = nextId();
+        if (writesHeld()) {
+            heldReads.add(sessionId);
+            return mutationId;
+        }
+        return mutation(
+            "mark_session_read",
+            mutationId,
+            async () => {
+                try {
+                    return await client.markAgentRead(
+                        sessionId,
+                        { mutationId },
+                        { signal: deadlineSignal() },
+                    );
+                } catch (error) {
+                    if (!drainingRefusal(error)) throw error;
+                    admitting = false;
+                    heldReads.add(sessionId);
+                    return undefined;
+                }
+            },
+            (response) => {
+                if (response !== undefined) adoptAgent(response.agent);
+            },
+            undefined,
+            sessionId,
+            `agent:${sessionId}`,
+        );
+    };
+
+    /** Sends what was held, once a daemon that admits work is live again. */
+    const heldWritesFlush = (): void => {
+        if (closed || writesHeld()) return;
+        for (const [sessionId, save] of [...heldDraftSaves]) {
+            heldDraftSaves.delete(sessionId);
+            // A newer edit is already scheduled and supersedes this one.
+            if (pendingDraftSaves.has(sessionId)) continue;
+            draftSave(sessionId, save);
+        }
+        for (const sessionId of [...heldReads]) {
+            heldReads.delete(sessionId);
+            sessionReadMark(sessionId);
+        }
+    };
 
     const draftSaveSchedule = (sessionId: string, save: DraftSave): void => {
         draftSaveCancel(sessionId);
@@ -2395,10 +2809,12 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 groupsStore.getState().groups,
                 groupState(),
                 groupsStore.getState().botGroups,
+                groupsStore.getState().taskGroups,
             );
             return {
                 projects: () => groupsStore.getState().groups,
                 bots: () => groupsStore.getState().botGroups,
+                tasks: () => groupsStore.getState().taskGroups,
                 state: groupState,
                 close: () => {
                     subscriber.closed = true;
@@ -2441,6 +2857,8 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 if (known !== undefined) {
                     entry.agent = known;
                     entry.workspace = workspaceOf(known.workspaceId);
+                    entry.draft = agentDrafts.get(subscription.sessionId);
+                    entry.mode = agentModes.get(subscription.sessionId);
                 }
                 sessions.set(subscription.sessionId, entry);
             }
@@ -2449,7 +2867,6 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             entry.subscribers.add(subscriber);
             if (
                 wasInactive &&
-                entry.historyLoaded &&
                 !entry.reconcileRequired &&
                 entry.agent !== undefined &&
                 config !== undefined
@@ -2800,22 +3217,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             );
         },
         markSessionRead(sessionId) {
-            const mutationId = nextId();
-            return mutation(
-                "mark_session_read",
-                mutationId,
-                () => client.markAgentRead(sessionId, { mutationId }, { signal: deadlineSignal() }),
-                ({ agent }) => adoptAgent(agent),
-                undefined,
-                sessionId,
-                `agent:${sessionId}`,
-            );
+            return sessionReadMark(sessionId);
         },
         sendMessage(sessionId, message) {
             const mutationId = nextId();
+            const acceptance = sendAcceptanceCreate(mutationId);
             const created = sessionCreations.get(sessionId);
             const agent = sessions.get(sessionId)?.agent ?? agentOf(sessionId);
             if (agent === undefined || config === undefined) {
+                acceptance.reject(new Error("The agent is not loaded."));
                 reportMutationFailure(
                     "send_message",
                     mutationId,
@@ -2907,6 +3317,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     if (response !== undefined) {
                         updateMessage(sessionId, response.message, response.message.runId);
                     }
+                    acceptance.accept();
                 },
                 () => {
                     sendConfirmations.delete(mutationId);
@@ -2915,16 +3326,47 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     if (current !== undefined && message?.pendingSend) {
                         current.messages.delete(mutationId);
                         publishSession(current);
+                        acceptance.reject(
+                            new Error(
+                                "The message was not accepted. Your local draft is retained.",
+                            ),
+                        );
                         return true;
                     }
                     // The event stream or bootstrap already confirmed this ID;
                     // a lost HTTP response must not turn a delivered message
                     // into a visible failure.
+                    if (message === undefined)
+                        acceptance.reject(
+                            new Error(
+                                "Message acceptance could not be confirmed. Check the conversation before retrying.",
+                            ),
+                        );
+                    else acceptance.accept();
                     return message === undefined;
                 },
                 sessionId,
                 // Each send starts independently, including while another send
                 // retries. Its mode is captured above and retries reuse its ID.
+            );
+        },
+        sendMessageConfirmed(sessionId, message) {
+            const id = this.sendMessage(sessionId, message);
+            return (
+                sendAcceptance.get(id) ??
+                Promise.reject(new Error("Message acceptance is unavailable."))
+            );
+        },
+        sessionCreationWait(sessionId) {
+            return (
+                sessionCreationOutcomes.get(sessionId) ??
+                Promise.reject(new Error("This session creation is no longer tracked."))
+            );
+        },
+        workspaceCreationWait(workspaceId) {
+            return (
+                workspaceCreationOutcomes.get(workspaceId) ??
+                Promise.reject(new Error("This workspace creation is no longer tracked."))
             );
         },
         invokeSlashCommand(sessionId, name, argumentsValue) {
@@ -3308,6 +3750,118 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 `bot:${botId}`,
             );
         },
+        joinTask(taskId) {
+            const mutationId = nextId();
+            return mutation(
+                "join_task",
+                mutationId,
+                () =>
+                    client.joinTask(taskId, {
+                        mutationId,
+                        signal: deadlineSignal(),
+                    }),
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
+            );
+        },
+        leaveTask(taskId) {
+            const mutationId = nextId();
+            return mutation(
+                "leave_task",
+                mutationId,
+                () =>
+                    client.leaveTask(taskId, {
+                        mutationId,
+                        signal: deadlineSignal(),
+                    }),
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
+            );
+        },
+        reorderTask(taskId, afterId) {
+            const mutationId = nextId();
+            return mutation(
+                "reorder_task",
+                mutationId,
+                () =>
+                    client.reorderTask(
+                        taskId,
+                        { afterId, mutationId },
+                        { signal: deadlineSignal() },
+                    ),
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
+            );
+        },
+        archiveTask(taskId) {
+            return taskArchivalSet(taskId, true);
+        },
+        unarchiveTask(taskId) {
+            return taskArchivalSet(taskId, false);
+        },
+        createTask(name) {
+            // As with a bot, all three identities are named here, and the task
+            // id doubles as the mutation key so a request repeated after a
+            // dropped answer settles on the task already made.
+            const taskId = nextId();
+            const workspaceId = nextId();
+            const agentId = nextId();
+            const task = (async () => {
+                const response = await client.createTask(
+                    {
+                        agentId,
+                        id: taskId,
+                        mutationId: taskId,
+                        // Left out rather than sent blank: an absent name is
+                        // what asks the host to name it from the first message.
+                        ...(name === undefined ? {} : { name }),
+                        workspaceId,
+                    },
+                    { signal: rootController.signal },
+                );
+                // The task and the caller's place at the top of their list,
+                // adopted now so the caller about to open it finds it listed.
+                taskResponseAdopt(response);
+                return response.task;
+            })();
+            return { agentId, task, taskId, workspaceId };
+        },
+        renameTask(taskId, name) {
+            const mutationId = nextId();
+            return mutation(
+                "rename_task",
+                mutationId,
+                async () => {
+                    const task = taskOf(taskId);
+                    if (task === undefined) throw new Error("The task is not loaded.");
+                    try {
+                        return await client.renameTask(
+                            taskId,
+                            { mutationId, name },
+                            { ifMatch: task.version, signal: deadlineSignal() },
+                        );
+                    } catch (error) {
+                        if (error instanceof HappyAgentApiError && error.status === 409) {
+                            taskRefetch(taskId);
+                            throw new Error(
+                                `“${task.name}” changed while you were renaming it. Try again.`,
+                            );
+                        }
+                        throw error;
+                    }
+                },
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
+            );
+        },
         reorderProject(projectId, afterId) {
             const mutationId = nextId();
             const project = groupsStore
@@ -3385,6 +3939,23 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 mutationId,
                 () =>
                     client.reorderAgent(
+                        sessionId,
+                        { afterId, mutationId },
+                        { signal: rootController.signal },
+                    ),
+                ({ agent }) => adoptAgent(agent),
+                undefined,
+                sessionId,
+                `agent:${sessionId}`,
+            );
+        },
+        reorderSubtask(sessionId, afterId) {
+            const mutationId = nextId();
+            return mutation(
+                "reorder_subtask",
+                mutationId,
+                () =>
+                    client.reorderSubtask(
                         sessionId,
                         { afterId, mutationId },
                         { signal: rootController.signal },
@@ -3730,6 +4301,24 @@ function activeGitWorkspaceIds(
                 .map((workspace) => workspace.id),
         ]),
     ];
+}
+
+/**
+ * The caller's memberships with one replaced or added. Order is carried by the
+ * membership's own `orderKey`, so the array position means nothing.
+ */
+function taskMembershipsReplace(
+    memberships: readonly TaskMembership[],
+    membership: TaskMembership,
+): readonly TaskMembership[] {
+    const index = memberships.findIndex((entry) => entry.taskId === membership.taskId);
+    if (index < 0) return [...memberships, membership];
+    const current = memberships[index]!;
+    if (current.orderKey === membership.orderKey && current.joinedAt === membership.joinedAt)
+        return memberships;
+    const next = [...memberships];
+    next[index] = membership;
+    return next;
 }
 
 function agentIdOfEvent(event: HappyAgentEvent): string | undefined {

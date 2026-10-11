@@ -591,7 +591,7 @@ function linuxDisplayEnvironment(): Record<string, string> {
  * must exercise the same renderer and IPC boundary as a person, not seed
  * desktop settings behind the app.
  */
-async function completeOnboarding(page: Page): Promise<void> {
+export async function completeOnboarding(page: Page): Promise<void> {
     const deadline = Date.now() + 45_000;
     // The welcome deck mounts after the renderer's first paint. Waiting for its
     // owned action avoids treating a not-yet-mounted button as proof that no
@@ -634,23 +634,17 @@ async function completeOnboarding(page: Page): Promise<void> {
             // the last answer and the workspace gate can mount.
             return;
         }
+        // A configured isolated daemon can skip native onboarding entirely
+        // after the welcome deck. Its mounted shell is the completion barrier.
         if (
-            (await page.getByRole("button", { name: "Create profile" }).count()) > 0 &&
+            !onboardingVisible &&
             (await page
-                .getByRole("button", { name: "Create profile" })
-                .first()
+                .locator(".happy-sidebar-footer")
                 .isVisible()
                 .catch(() => false))
-        ) {
-            const name = page.locator('input[type="text"]').first();
-            const email = page.locator('input[type="email"]').first();
-            await name.waitFor({ state: "visible", timeout: 5_000 });
-            await email.waitFor({ state: "visible", timeout: 5_000 });
-            await name.fill("Happy Desktop Gym");
-            await email.fill("gym@example.invalid");
-            await clickIfVisible("Create profile");
-            continue;
-        }
+        )
+            return;
+        if (await clickIfVisible("Continue")) continue;
         if (await clickIfVisible("Not now")) continue;
         if (await clickIfVisible("Skip")) continue;
         if (
@@ -673,7 +667,11 @@ async function completeOnboarding(page: Page): Promise<void> {
 
 async function clickButtonIfVisible(page: Page, label: string | RegExp): Promise<boolean> {
     const button = page.getByRole("button", { name: label }).first();
-    if ((await button.count()) === 0 || !(await button.isVisible().catch(() => false)))
+    if (
+        (await button.count()) === 0 ||
+        !(await button.isVisible().catch(() => false)) ||
+        !(await button.isEnabled().catch(() => false))
+    )
         return false;
     await button.click();
     await page.waitForTimeout(150);

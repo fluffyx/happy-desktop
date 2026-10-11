@@ -266,6 +266,19 @@ Pierre's horizontal code scrollport is the sole implementation exception: its
 markup lives inside third-party shadow DOM, so its native thumb is styled to the
 same visual contract without mutating vendor structure.
 
+## Text that does not fit
+
+Never truncate menu or popover headings, headers, buttons, or settings labels.
+Keep them short enough to fit, or let them wrap. Truncation is only for
+unbounded user content (titles, paths, branch names), with the full text
+reachable elsewhere.
+
+## Sentence case
+
+Write headings, labels, and buttons in sentence case. Do not use all caps,
+typed or via `text-transform: uppercase`. Existing uppercase styles are legacy;
+convert them when you touch them.
+
 ## Setup page layout
 
 Every first-run setup screen is the same four bands, in this order, and
@@ -288,6 +301,25 @@ to the window's bottom-right corner through `help`, outside the bands
 entirely.
 
 Moving between two setup screens must change the words, not where they are.
+
+## User-facing errors
+
+Prefer fewer buttons.
+
+Errors and troubleshooting go to the Chief of Staff. An error does not say
+"show the log", and it does not get its own diagnostic buttons such as "View
+log", "Copy details", or "Open logs folder". It offers one way out, "Ask Chief
+of Staff", which hands the error and its context to the Chief of Staff. A direct
+retry may sit beside it when retrying is the obvious recovery.
+
+Use the existing handoff rather than building another one. It writes a labelled
+draft into the Chief of Staff's conversation and opens it; nothing is sent on
+the user's behalf. `HappyAgentWorkspaceStore.errorAssistanceRequest` hands off a
+conversation error (`ConversationErrorCard`), and
+`HappyAgentWorkspaceStore.chiefOfStaffDraftAppend` takes any other
+`HappyAgentChiefOfStaffRequest`
+(`happy-desktop-state/src/happyAgent/happyAgentChiefOfStaffRequest.ts`); a new
+kind of error adds a variant there.
 
 ## Nested rounded corners
 

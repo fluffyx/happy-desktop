@@ -1,5 +1,6 @@
 import { BrowserTerminalConnection, TERMINAL_PROTOCOL, terminalSocketUrl } from "happy-desktop-app";
 import type {
+    HappyAgentArtifactSiteOpening,
     HappyAgentHostServices,
     HappyAgentOpenInTarget,
     HappyAgentOpenInTargets,
@@ -98,6 +99,29 @@ async function postJson<Value>(baseUrl: string, path: string, body: unknown): Pr
 }
 
 /**
+ * Asks the app to serve one artifact version as a site of its own.
+ *
+ * This renderer updates apart from the app around it. An app from before
+ * artifact sites has no such route, and its bridge answers an unknown one with
+ * a bare 404; an app that serves sites says why it refused, as JSON.
+ */
+async function artifactSiteOpen(
+    baseUrl: string,
+    artifactId: string,
+    version: number,
+): Promise<HappyAgentArtifactSiteOpening> {
+    const response = await fetch(
+        serviceUrl(baseUrl, "/artifact-site", { artifactId, version: String(version) }),
+    );
+    if (
+        response.status === 404 &&
+        !response.headers.get("content-type")?.startsWith("application/json")
+    )
+        return { type: "app-outdated" };
+    return { type: "opened", url: (await jsonRead<{ readonly url: string }>(response)).url };
+}
+
+/**
  * Renderer access to the small set of services that truly belong to the
  * desktop host. Agent resources use `HappyAgentClient` directly.
  */
@@ -154,6 +178,14 @@ export function happyAgentHostServicesCreate(
                     path,
                 })
             ).url,
+        // Only the desktop window has a guest to show an artifact's site in;
+        // a browser tab keeps the static preview.
+        ...(globalThis.window?.happyDesktop
+            ? {
+                  artifactSiteOpen: (artifactId: string, version: number) =>
+                      artifactSiteOpen(baseUrl, artifactId, version),
+              }
+            : {}),
         attachmentSourcePath: (file) => window.happyDesktop?.attachmentSourcePath(file),
         attachmentSourceReachable: async (workspaceId, sourcePath) =>
             (

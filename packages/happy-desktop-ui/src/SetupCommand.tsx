@@ -6,6 +6,8 @@ export interface SetupCommandProps {
     /** Names this particular command for assistive technology. */
     readonly label: string;
     readonly "data-testid"?: string;
+    /** Told when the command has been copied. */
+    readonly onCopy?: () => void;
 }
 
 /**
@@ -17,8 +19,8 @@ export interface SetupCommandProps {
  * has already been told once what a thing to type looks like.
  *
  * The command never wraps. A shell line broken across two rows reads as two
- * commands, so a long one scrolls inside its own well while the prompt and the
- * copy button stay where they are. The line is focusable and selectable: a
+ * commands, so a long one ends in an ellipsis and scrolls inside its own well
+ * while the prompt and the copy button stay where they are. The line is focusable and selectable: a
  * desktop window is usually unselectable chrome, and a command nobody can take
  * is worse than no command at all.
  *
@@ -42,6 +44,9 @@ export function SetupCommand(props: SetupCommandProps) {
                 aria-label={props.label}
                 className="happy-setup-command__text"
                 data-happy-desktop-ui="setup-command-text"
+                // A narrow well ends a long command in an ellipsis; hovering
+                // still reads the whole of it.
+                title={props.command}
             >
                 {props.command}
             </code>
@@ -49,6 +54,7 @@ export function SetupCommand(props: SetupCommandProps) {
                 className="happy-setup-command__copy"
                 data-happy-desktop-ui="setup-command-copy"
                 label={`Copy ${props.label}`}
+                {...(props.onCopy ? { onCopy: props.onCopy } : {})}
                 text={props.command}
             />
         </div>

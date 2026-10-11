@@ -79,6 +79,7 @@ export function browserDevBridgeCreate(): HappyDesktopBridge {
         // A normal browser exposes no native preferred-color-scheme override;
         // the application tree itself is already controlled by ThemeScope.
         appearanceSet: () => undefined,
+        keepAwakeSet: () => undefined,
         // A browser tab is told nothing about where a dropped file came from,
         // so every attachment here travels by value.
         attachmentSourcePath: () => undefined,
@@ -157,6 +158,13 @@ export function browserDevBridgeCreate(): HappyDesktopBridge {
         legacyCliPrepare: async () => {
             throw new Error("Install the terminal CLI from the Electron desktop window.");
         },
+        legacyCliStatus: async () => ({
+            snapshot: {
+                status: "unavailable",
+                message:
+                    "Terminal CLI status and sign-out are available in the Electron desktop window.",
+            },
+        }),
         daemonStart: async () => {
             throw new Error("Happy Agent is started from the Electron desktop window.");
         },
@@ -193,7 +201,6 @@ export function browserDevBridgeCreate(): HappyDesktopBridge {
         onboardingSubscribe: () => () => undefined,
         onboardingAssistantsContinue: async () => undefined,
         onboardingStepBack: async () => undefined,
-        onboardingProfileCreate: async () => undefined,
         onboardingProjectChoose: async () => undefined,
         onboardingChiefOfStaffComplete: async () => undefined,
         runtimeGet: async () => {

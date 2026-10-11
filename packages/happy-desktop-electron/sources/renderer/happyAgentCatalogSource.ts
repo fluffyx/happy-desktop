@@ -4,6 +4,7 @@ import {
     type GitChangeSnapshot,
     type GroupSession,
     type ProjectGroup,
+    type TaskGroup,
     type HappyAgentConnection,
     type HappyAgentGitChangedFile,
     type HappyAgentPermissionMode,
@@ -15,12 +16,13 @@ import {
     type HappyAgentProjectAvatar,
     type HappyAgentProjectCatalog,
     type HappyAgentProjectId,
-    type HappyAgentServiceTier,
     type HappyAgentSessionCatalogSnapshot,
     type HappyAgentSessionCatalogSource,
     type HappyAgentSessionId,
     type HappyAgentSessionStatus,
     type HappyAgentSessionSummary,
+    type HappyAgentTask,
+    type HappyAgentTaskId,
     type HappyAgentThinkingLevel,
     type HappyAgentWorktree,
     type HappyAgentWorktreeId,
@@ -46,9 +48,13 @@ export function happyAgentCatalogSourceCreate(
         reject: (error: unknown) => void;
     }>();
 
-    const publish = (projects: readonly ProjectGroup[], bots: readonly BotGroup[]): void => {
+    const publish = (
+        projects: readonly ProjectGroup[],
+        bots: readonly BotGroup[],
+        tasks: readonly TaskGroup[],
+    ): void => {
         if (disposed) return;
-        snapshot = catalogProject(projects, bots, base);
+        snapshot = catalogProject(projects, bots, tasks, base);
         for (const waiter of waiting) waiter.resolve(snapshot);
         waiting.clear();
         for (const listener of listeners) listener();
@@ -64,9 +70,9 @@ export function happyAgentCatalogSourceCreate(
     const start = (): void => {
         if (disposed || connection) return;
         connection = happyAgent.connectGroups({
-            onChange: (projects, state, bots) => {
+            onChange: (projects, state, bots, tasks) => {
                 if (!state.sessionsComplete) return;
-                publish(projects, bots);
+                publish(projects, bots, tasks);
             },
             onError: fail,
         });
@@ -109,6 +115,7 @@ export function happyAgentCatalogSourceCreate(
 function catalogProject(
     groups: readonly ProjectGroup[],
     botGroups: readonly BotGroup[],
+    taskGroups: readonly TaskGroup[],
     baseUrl: string,
 ): HappyAgentSessionCatalogSnapshot {
     const projects: HappyAgentProject[] = [];
@@ -183,7 +190,32 @@ function catalogProject(
         displayPath: bot.path,
         ...(bot.avatar === undefined ? {} : { avatar: bot.avatar }),
     }));
-    const catalog: HappyAgentProjectCatalog = { bots, projects, worktrees };
+    // A task's conversation is stated on the task for the same reason a bot's
+    // is, and its subtasks nest under it the same way.
+    const tasks: HappyAgentTask[] = taskGroups.map((task) => ({
+        id: task.id as HappyAgentTaskId,
+        workspaceId: task.workspaceId as HappyAgentWorktreeId,
+        name: task.name,
+        conversation: happyAgentConversationSummaryProject(conversationProject(task.session)),
+        subtasks: subtasksProject(task.subtasks),
+        owner:
+            task.owner === null
+                ? null
+                : {
+                      ...(task.owner.userId === undefined ? {} : { userId: task.owner.userId }),
+                      ...(task.owner.name === undefined ? {} : { name: task.owner.name }),
+                      ...(task.owner.avatar === undefined ? {} : { avatar: task.owner.avatar }),
+                  },
+        path: task.path,
+        displayPath: task.path,
+        createdAt: task.createdAt,
+        archived: task.archived,
+        canArchive: task.canArchive,
+        ...(task.membership === undefined
+            ? {}
+            : { membership: { orderKey: task.membership.orderKey } }),
+    }));
+    const catalog: HappyAgentProjectCatalog = { bots, projects, tasks, worktrees };
     return { archivedSessions, catalog, sessions };
 }
 
@@ -314,8 +346,7 @@ function sessionProject(
  */
 function conversationProject(session: GroupSession): HappyAgentConversationSummaryInput {
     const effort = thinkingLevel(session.effort);
-    const serviceTier =
-        session.serviceTier === "fast" ? ("fast" as HappyAgentServiceTier) : undefined;
+    const serviceTier = session.serviceTier;
     return {
         id: session.id as HappyAgentSessionId,
         ...(session.archivedAt === undefined ? {} : { archivedAt: session.archivedAt }),

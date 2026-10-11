@@ -112,7 +112,13 @@
    all — `app-region: none` is not an escape hatch, Chromium resolves it to
    `no-drag`, so the only way out of the region list is to not match here. */
 .happy-desktop-app-shell[data-window-controls]
-    button:not(.happy-agent-control__backdrop, .happy-menu-button__backdrop, .happy-slot-backdrop),
+    button:not(
+        .happy-agent-control__backdrop,
+        .happy-composer-model-control__notice-backdrop,
+        .happy-menu-button__backdrop,
+        .happy-context-menu__backdrop,
+        .happy-slot-backdrop
+    ),
 .happy-desktop-app-shell[data-window-controls] a,
 .happy-desktop-app-shell[data-window-controls] input,
 .happy-desktop-app-shell[data-window-controls] select,
@@ -153,6 +159,17 @@
 .happy-desktop-app-shell[data-window-controls] .happy-channel-header,
 .happy-desktop-app-shell[data-window-controls] .happy-panel-header {
     height: 40px;
+}
+
+/* The sidebar's band stays put while the list scrolls under it, so it closes on
+   a hairline. Drawn as an inset shadow rather than a border so the band keeps
+   its full 40px and its contents stay on the traffic lights' axis. A connection
+   rail beside it draws the same line across its own band. */
+.happy-desktop-app-shell[data-window-controls]
+    .happy-desktop-app-shell__sidebar
+    > .happy-sidebar
+    > .happy-sidebar__header {
+    box-shadow: inset 0 -1px 0 var(--divider);
 }
 
 /* The native controls occupy x=14…68, so sidebar content begins after their
@@ -256,6 +273,10 @@
 /* Same reservation on whichever strip heads the workspace once the sidebar is
    hidden and the traffic lights plus the floating toggle sit over it. */
 .happy-desktop-app-shell[data-window-controls][data-sidebar-collapsed] .happy-channel-header,
+.happy-desktop-app-shell[data-window-controls][data-sidebar-collapsed]
+    .happy-agent-artifacts__header,
+.happy-desktop-app-shell[data-window-controls][data-sidebar-collapsed]
+    .happy-agent-artifact-viewer__header,
 .happy-desktop-app-shell[data-window-controls][data-sidebar-collapsed]
     .happy-desktop-app-shell__workspace
     > .happy-tabbed-pane:first-child

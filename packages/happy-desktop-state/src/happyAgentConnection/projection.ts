@@ -14,13 +14,12 @@ import type {
     Question,
     Run,
     SlashCommand,
+    Task,
+    TaskMembership,
     UsageBreakdown,
     Workspace,
 } from "@slopus/happy-agent-client";
-import {
-    happyAgentServiceTierFromWire,
-    happyAgentServiceTiersFromWire,
-} from "../happyAgentServiceTier.js";
+import { happyAgentServiceTierFromWire } from "../happyAgentServiceTier.js";
 import type { UserProfile } from "./userProfiles.js";
 import type {
     BotGroup,
@@ -30,6 +29,8 @@ import type {
     ProjectGroup,
     SessionState,
     SessionUsage,
+    TaskGroup,
+    TaskOwner,
     ToolPresentation,
     UserInputRequest,
     WorkspaceGroup,
@@ -149,6 +150,11 @@ export function projectSession(input: SessionProjectionInput): SessionState {
               }),
         modelId: mode.modelId,
         providerId: mode.providerId,
+        selectionKnown:
+            input.intendedMode !== undefined ||
+            input.draft?.value != null ||
+            input.mode != null ||
+            (input.mode === null && agent.parentAgentId === null),
         ...(agent.title === null ? {} : { title: agent.title }),
         titleStatus: agent.titleStatus,
         effort: mode.effort,
@@ -462,6 +468,64 @@ export function applyChanges<T extends object>(resource: T, changes: Partial<T>)
 }
 
 /**
+ * Replaces one project or workspace while keeping the archived agents it cannot carry.
+ *
+ * The daemon's owner resources hold only active agents: a project or workspace object, whether
+ * read whole, received in an update, or returned by a mutation, never lists an archived one.
+ * Archived agents reach this connection separately — through bootstrap's `archivedAgents` and
+ * through the agent events of a chat archived while connected — and live in the owner's
+ * `agents` beside the active ones, marked by `archivedAt`. So an incoming owner resource is a
+ * statement about the active series only; the archived agents already held are carried over,
+ * and only a later bootstrap says which of them the daemon still remembers.
+ */
+export function ownerResourceReplace<T extends { id: string; agents: Agent[] }>(
+    resources: readonly T[],
+    resource: T,
+): readonly T[] {
+    const current = resources.find((candidate) => candidate.id === resource.id);
+    if (current === undefined) return replaceResource(resources, resource);
+    const kept = current.agents.filter(
+        (agent) =>
+            agent.archivedAt !== null &&
+            !resource.agents.some((candidate) => candidate.id === agent.id),
+    );
+    return replaceResource(
+        resources,
+        kept.length === 0 ? resource : { ...resource, agents: [...resource.agents, ...kept] },
+    );
+}
+
+/**
+ * Places bootstrap's archived agents beside the active ones of their owners, so every later
+ * projection sees one series per owner with archival as a field rather than as absence.
+ * An archived agent names its owner by `workspaceId`; a project's root workspace shares the
+ * project's ID, so a root-owned agent lands in both the project and its root workspace copy,
+ * exactly as an active one does.
+ */
+export function archivedAgentsMerge(
+    projects: readonly Project[],
+    workspaces: readonly Workspace[],
+    archivedAgents: readonly Agent[],
+): { readonly projects: readonly Project[]; readonly workspaces: readonly Workspace[] } {
+    if (archivedAgents.length === 0) return { projects, workspaces };
+    const byOwner = new Map<string, Agent[]>();
+    for (const agent of archivedAgents) {
+        const owned = byOwner.get(agent.workspaceId) ?? [];
+        owned.push(agent);
+        byOwner.set(agent.workspaceId, owned);
+    }
+    const merge = <T extends { id: string; agents: Agent[] }>(owner: T): T => {
+        const owned = byOwner.get(owner.id);
+        if (owned === undefined) return owner;
+        const missing = owned.filter(
+            (agent) => !owner.agents.some((candidate) => candidate.id === agent.id),
+        );
+        return missing.length === 0 ? owner : { ...owner, agents: [...owner.agents, ...missing] };
+    };
+    return { projects: projects.map(merge), workspaces: workspaces.map(merge) };
+}
+
+/**
  * The bot catalog, in the order the daemon keeps it.
  *
  * A bot carries its one agent inline, so no workspace lookup is needed to state
@@ -481,27 +545,7 @@ export function projectBots(
 ): readonly BotGroup[] {
     const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
     const subtasksProject = (agent: Agent, bot: Bot): readonly BotSubtaskGroup[] =>
-        (agent.subtasks ?? [])
-            .filter((child) => child.archivedAt === null)
-            .map((child) => {
-                const workspace = workspaceById.get(child.workspaceId);
-                return {
-                    workspaceId: child.workspaceId,
-                    path:
-                        child.workspaceId === bot.workspaceId
-                            ? computePath(bot.compute)
-                            : workspacePath(workspace),
-                    session: projectAgent(
-                        child,
-                        workspace,
-                        endpoint,
-                        config,
-                        drafts.get(child.id),
-                        modes.get(child.id),
-                    ),
-                    subtasks: subtasksProject(child, bot),
-                };
-            });
+        agentSubtasksProject(agent, bot, workspaceById, endpoint, config, drafts, modes);
     return bots
         .filter((bot) => bot.archivedAt === null && bot.status === "active")
         .sort(orderCompare)
@@ -533,6 +577,128 @@ export function projectBots(
                 ),
                 unread: unreadOf([bot.agent]),
                 subtasks: subtasksProject(bot.agent, bot),
+            };
+        });
+}
+
+/**
+ * The active, user-interactive children of one bot or task conversation, in the
+ * daemon's explicit tree order. A child sharing its owner's folder reports the
+ * owner's path; one with a worktree of its own reports that checkout's.
+ */
+function agentSubtasksProject(
+    agent: Agent,
+    owner: { readonly workspaceId: string; readonly compute: Bot["compute"] },
+    workspaceById: ReadonlyMap<string, Workspace>,
+    endpoint: string,
+    config: DaemonConfig,
+    drafts: ReadonlyMap<string, AgentDraftSnapshot>,
+    modes: ReadonlyMap<string, MessageMode | null>,
+): readonly BotSubtaskGroup[] {
+    return (agent.subtasks ?? [])
+        .filter((child) => child.archivedAt === null)
+        .map((child) => {
+            const workspace = workspaceById.get(child.workspaceId);
+            return {
+                workspaceId: child.workspaceId,
+                path:
+                    child.workspaceId === owner.workspaceId
+                        ? computePath(owner.compute)
+                        : workspacePath(workspace),
+                session: projectAgent(
+                    child,
+                    workspace,
+                    endpoint,
+                    config,
+                    drafts.get(child.id),
+                    modes.get(child.id),
+                ),
+                subtasks: agentSubtasksProject(
+                    child,
+                    owner,
+                    workspaceById,
+                    endpoint,
+                    config,
+                    drafts,
+                    modes,
+                ),
+            };
+        });
+}
+
+/**
+ * Every task the host holds, oldest first, each carrying the caller's own
+ * membership when they have joined it.
+ *
+ * The caller's list is not ordered here: membership order is the caller's, and
+ * the surface that lists joined tasks sorts them by it. Archived tasks are kept,
+ * marked, because a membership outlives an archive and the host says so.
+ *
+ * `ownerOf` resolves the person a task belongs to. It is supplied by the
+ * connection, which is what knows whether this is a team or a standalone
+ * daemon and which user profiles it has read.
+ */
+export function projectTasks(
+    tasks: readonly Task[],
+    memberships: readonly TaskMembership[],
+    workspaces: readonly Workspace[],
+    endpoint: string,
+    config: DaemonConfig,
+    ownerOf: (task: Task) => TaskOwner | null,
+    drafts: ReadonlyMap<string, AgentDraftSnapshot> = new Map(),
+    modes: ReadonlyMap<string, MessageMode | null> = new Map(),
+): readonly TaskGroup[] {
+    const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+    const membershipByTask = new Map(
+        memberships.map((membership) => [membership.taskId, membership]),
+    );
+    return [...tasks]
+        .sort((left, right) =>
+            left.createdAt === right.createdAt
+                ? left.id < right.id
+                    ? -1
+                    : left.id > right.id
+                      ? 1
+                      : 0
+                : left.createdAt - right.createdAt,
+        )
+        .map((task) => {
+            const membership = membershipByTask.get(task.id);
+            return {
+                id: task.id,
+                workspaceId: task.workspaceId,
+                name: task.name,
+                path: computePath(task.compute),
+                createdAt: task.createdAt,
+                archived: task.status === "archived" || task.archivedAt !== null,
+                canArchive: task.canArchive === true,
+                ...(membership === undefined
+                    ? {}
+                    : {
+                          membership: {
+                              orderKey: membership.orderKey,
+                              joinedAt: membership.joinedAt,
+                          },
+                      }),
+                owner: ownerOf(task),
+                session: projectAgent(
+                    task.agent,
+                    workspaceById.get(task.workspaceId),
+                    endpoint,
+                    config,
+                    drafts.get(task.agent.id),
+                    modes.get(task.agent.id),
+                ),
+                subtasks: agentSubtasksProject(
+                    task.agent,
+                    task,
+                    workspaceById,
+                    endpoint,
+                    config,
+                    drafts,
+                    modes,
+                ),
+                unread: unreadOf([task.agent]),
             };
         });
 }
@@ -843,6 +1009,7 @@ function messageElementsProject(
                 id: `message:${elementId}`,
                 kind: "user_message",
                 messageId: message.id,
+                authority: entry.pendingSend ? "local" : "server",
                 identity: null,
                 ...(message.metadata.userId === undefined
                     ? {}
@@ -911,6 +1078,7 @@ function messageElementsProject(
                     ...base,
                     id,
                     kind: "failure",
+                    messageId: message.id,
                     outcome: "failed",
                     reason: block.text,
                 });
@@ -1156,14 +1324,6 @@ function modelCatalog(config: DaemonConfig): SessionState["modelCatalog"] {
         providers: Object.entries(config.providers).map(([id, provider]) => ({
             id,
             ...provider,
-            models: provider.models.map((model) => ({
-                ...model,
-                ...(model.serviceTiers === undefined
-                    ? {}
-                    : {
-                          serviceTiers: happyAgentServiceTiersFromWire(model.serviceTiers),
-                      }),
-            })),
         })),
     };
 }
@@ -1172,7 +1332,6 @@ function modelDefinitionsProject(config: DaemonConfig): readonly unknown[] {
     return Object.entries(config.models).map(([id, model]) => ({
         id,
         ...model,
-        serviceTiers: happyAgentServiceTiersFromWire(model.serviceTiers),
     }));
 }
 
@@ -1209,7 +1368,14 @@ function workspacePath(workspace: Workspace | undefined): string {
 }
 
 function computePath(compute: Project["compute"]): string {
-    return compute.type === "host" ? compute.path : `/docker/${compute.image}`;
+    switch (compute.type) {
+        case "host":
+            return compute.path;
+        case "docker":
+            return `/docker/${compute.image}`;
+        case "runner":
+            return compute.path ?? "";
+    }
 }
 
 function newestRunningRun(runs: readonly Run[]): Run | undefined {

@@ -4,6 +4,7 @@ import {
     debugMetricsArgument,
     desktopIpc,
     mediaPreviewArgument,
+    liveWindowArgument,
     type DesktopBrowserStatus,
     type DesktopNavigationStep,
     type DesktopPreviewNavigation,
@@ -14,6 +15,7 @@ import {
     type DesktopMediaPreview,
     type DesktopRuntimeSnapshot,
     type DesktopStartRequest,
+    type DesktopSystem,
     type DesktopWindowState,
     type HappyDesktopBridge,
     type HappyMediaPreviewBridge,
@@ -41,11 +43,32 @@ function buildIdentityRead(): DesktopBuildIdentity | undefined {
     }
 }
 
+/**
+ * The OS version as a bare number and the shell's architecture. Linux reports
+ * a kernel release rather than an OS version, so it reports none.
+ */
+function systemRead(): DesktopSystem {
+    const version = process.getSystemVersion();
+    return {
+        osVersion:
+            process.platform !== "linux" && /^[0-9]+(\.[0-9]+){0,3}$/.test(version)
+                ? version
+                : null,
+        arch: process.arch === "arm64" || process.arch === "x64" ? process.arch : "other",
+    };
+}
+
 const identity = buildIdentityRead();
 const debugMetricsEnabled = process.argv.includes(debugMetricsArgument);
 
 const bridge: HappyDesktopBridge = {
+    liveWindowId: process.argv
+        .find((value) => value.startsWith(liveWindowArgument))
+        ?.slice(liveWindowArgument.length),
+    liveMicrophoneStart: (input) => ipcRenderer.invoke(desktopIpc.liveMicrophoneStart, input),
+    liveMicrophoneRevoke: () => ipcRenderer.invoke(desktopIpc.liveMicrophoneRevoke),
     ...(identity ? { buildIdentity: identity } : {}),
+    system: systemRead(),
     debugMetricsEnabled,
     appearanceSet: (mode) => ipcRenderer.send(desktopIpc.appearanceSet, mode),
     attachmentSourcePath(file: File) {
@@ -102,6 +125,7 @@ const bridge: HappyDesktopBridge = {
     // `send`, not `invoke`: the shell has nothing to answer, and a badge that
     // made the window await the operating system would be a worse badge.
     dockUnreadSet: (count: number) => ipcRenderer.send(desktopIpc.dockUnreadSet, count),
+    keepAwakeSet: (active: boolean) => ipcRenderer.send(desktopIpc.keepAwakeSet, active),
     /* The View menu does the zooming and says so; this side only relays. Reading
        it back from `webFrame` on a viewport change cannot see ⌘0 at 100% or a
        ⌘− that the floor refused, which are the two answers worth showing. */
@@ -123,6 +147,8 @@ const bridge: HappyDesktopBridge = {
     daemonInstallKill: () => ipcRenderer.invoke(desktopIpc.daemonInstallKill),
     daemonRestart: () => ipcRenderer.invoke(desktopIpc.daemonRestart),
     legacyCliConnect: () => ipcRenderer.invoke(desktopIpc.legacyCliConnect),
+    legacyCliStatus: () => ipcRenderer.invoke(desktopIpc.legacyCliStatus),
+    legacyCliReset: (request) => ipcRenderer.invoke(desktopIpc.legacyCliReset, request),
     legacyCliPrepare: () => ipcRenderer.invoke(desktopIpc.legacyCliPrepare),
     daemonGet: () => ipcRenderer.invoke(desktopIpc.daemonGet),
     daemonStart: () => ipcRenderer.invoke(desktopIpc.daemonStart),
@@ -177,8 +203,6 @@ const bridge: HappyDesktopBridge = {
         ipcRenderer.on(desktopIpc.onboardingChanged, receive);
         return () => ipcRenderer.removeListener(desktopIpc.onboardingChanged, receive);
     },
-    onboardingProfileCreate: (input) =>
-        ipcRenderer.invoke(desktopIpc.onboardingProfileCreate, input),
     onboardingProjectChoose: () => ipcRenderer.invoke(desktopIpc.onboardingProjectChoose),
     onboardingChiefOfStaffComplete: () =>
         ipcRenderer.invoke(desktopIpc.onboardingChiefOfStaffComplete),

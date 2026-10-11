@@ -4,6 +4,7 @@ import type { OnboardingStage } from "../../src/OnboardingSteps";
 import { ThemeScope } from "../../src/ThemeScope";
 import type { WelcomeSlide } from "../../src/WelcomeDeck";
 import { WelcomeScreen } from "../../src/WelcomeScreen";
+import { SplashCover } from "../../src/SplashCover";
 import { ComponentPage, FullScreenSpecimen } from "../kit";
 
 /** The page plan this page documents. The selector and the page header read the same value. */
@@ -27,19 +28,21 @@ const pitch: readonly WelcomeSlide[] = [
     },
 ];
 
-function onboarding(view: LocalOnboardingView, reachedStage?: OnboardingStage) {
+function onboarding(
+    view: LocalOnboardingView,
+    reachedStage?: OnboardingStage,
+    agentPromptsOpen = false,
+    appearance: "dark" | "light" = "dark",
+) {
     return (
         <LocalOnboardingScreen
-            appearance="dark"
+            agentPromptsOpen={agentPromptsOpen}
+            appearance={appearance}
             onAssistantsContinue={noop}
             onConnectRetry={noop}
             onExternalOpen={noop}
             onHappyMobileConnect={noop}
             onHappyMobileSkip={noop}
-            onProfileCreate={noop}
-            onProfileEmailChange={noop}
-            onProfileNameChange={noop}
-            onProjectChoose={noop}
             onStageSelect={noop}
             showSteps
             view={view}
@@ -48,8 +51,30 @@ function onboarding(view: LocalOnboardingView, reachedStage?: OnboardingStage) {
     );
 }
 
-/** First run in the order a new person meets it, one happy path. */
-const screens: readonly { id: string; label: string; render: () => ReactNode }[] = [
+/** First run in the order a new person meets it, one happy path, then a restart. */
+/** One of each card state side by side: signed in, not installed, not signed in, custom. */
+const mixedSubscriptions: LocalOnboardingView = {
+    assistants: [
+        {
+            authentication: "valid",
+            command: "/opt/homebrew/bin/claude",
+            id: "claude",
+            status: "found",
+        },
+        { authentication: "unavailable", id: "codex", status: "missing" },
+        { authentication: "invalid", command: "/usr/local/bin/grok", id: "grok", status: "found" },
+    ],
+    custom: { authentication: "invalid", providers: [] },
+    kind: "provider-authentication",
+    installShell: "posix",
+};
+
+const screens: readonly {
+    appearance?: "dark" | "light";
+    id: string;
+    label: string;
+    render: () => ReactNode;
+}[] = [
     {
         id: "welcome",
         label: "Welcome deck · first slide",
@@ -76,6 +101,11 @@ const screens: readonly { id: string; label: string; render: () => ReactNode }[]
             }),
     },
     {
+        id: "setup-starting",
+        label: "Setup · starting Happy Agent",
+        render: () => onboarding({ kind: "agent-setup", phase: { kind: "starting" } }),
+    },
+    {
         id: "subscriptions-checking",
         label: "Subscriptions · checking",
         render: () => onboarding({ kind: "examining" }),
@@ -95,7 +125,58 @@ const screens: readonly { id: string; label: string; render: () => ReactNode }[]
                     { authentication: "unavailable", id: "codex", status: "missing" },
                     { authentication: "unavailable", id: "grok", status: "missing" },
                 ],
+                custom: { authentication: "invalid", providers: [] },
                 kind: "provider-authentication",
+                installShell: "posix",
+            }),
+    },
+    {
+        id: "subscriptions-empty",
+        label: "Subscriptions · nothing on this machine",
+        render: () =>
+            onboarding({
+                assistants: [
+                    { authentication: "unavailable", id: "claude", status: "missing" },
+                    { authentication: "unavailable", id: "codex", status: "missing" },
+                    { authentication: "unavailable", id: "grok", status: "missing" },
+                ],
+                custom: { authentication: "invalid", providers: [] },
+                kind: "provider-authentication",
+                installShell: "posix",
+            }),
+    },
+    {
+        id: "subscriptions-agent-prompts",
+        label: "Subscriptions · set up with your agent",
+        render: () =>
+            onboarding(
+                {
+                    assistants: [
+                        { authentication: "unavailable", id: "claude", status: "missing" },
+                        { authentication: "unavailable", id: "codex", status: "missing" },
+                        { authentication: "unavailable", id: "grok", status: "missing" },
+                    ],
+                    custom: { authentication: "invalid", providers: [] },
+                    kind: "provider-authentication",
+                    installShell: "posix",
+                },
+                undefined,
+                true,
+            ),
+    },
+    {
+        id: "subscriptions-custom-ready",
+        label: "Subscriptions · custom configuration ready",
+        render: () =>
+            onboarding({
+                assistants: [
+                    { authentication: "unavailable", id: "claude", status: "missing" },
+                    { authentication: "unavailable", id: "codex", status: "missing" },
+                    { authentication: "unavailable", id: "grok", status: "missing" },
+                ],
+                custom: { authentication: "valid", providers: ["Bedrock"] },
+                kind: "provider-authentication",
+                installShell: "posix",
             }),
     },
     {
@@ -113,18 +194,25 @@ const screens: readonly { id: string; label: string; render: () => ReactNode }[]
                     { authentication: "unavailable", id: "codex", status: "missing" },
                     { authentication: "unavailable", id: "grok", status: "missing" },
                 ],
+                custom: { authentication: "invalid", providers: [] },
                 kind: "provider-authentication",
+                installShell: "posix",
             }),
     },
     {
-        id: "profile",
-        label: "Profile",
-        render: () =>
-            onboarding({ busy: false, email: "", kind: "profile-required", name: "" }, "profile"),
+        id: "subscriptions-mixed",
+        label: "Subscriptions · every card state",
+        render: () => onboarding(mixedSubscriptions),
+    },
+    {
+        appearance: "light",
+        id: "subscriptions-mixed-light",
+        label: "Subscriptions · every card state, light appearance",
+        render: () => onboarding(mixedSubscriptions, undefined, false, "light"),
     },
     {
         id: "mobile",
-        label: "Mobile · take Happy with you",
+        label: "Get Mobile App · iPhone",
         render: () =>
             onboarding(
                 { kind: "happy-mobile-desktop", step: { kind: "intro", platform: "ios" } },
@@ -132,26 +220,34 @@ const screens: readonly { id: string; label: string; render: () => ReactNode }[]
             ),
     },
     {
-        id: "connect-preparing",
-        label: "Connect phone · preparing",
+        id: "mobile-android",
+        label: "Get Mobile App · Android",
+        render: () =>
+            onboarding(
+                { kind: "happy-mobile-desktop", step: { kind: "intro", platform: "android" } },
+                "get-app",
+            ),
+    },
+    {
+        id: "connect-code-loading",
+        label: "Link Mobile App · code on its way (shown at least 1s)",
         render: () =>
             onboarding(
                 {
                     kind: "happy-mobile-desktop",
-                    step: { appReady: true, kind: "link", phase: { kind: "preparing" } },
+                    step: { kind: "link", phase: { kind: "checking" } },
                 },
                 "connect-phone",
             ),
     },
     {
         id: "connect-phone",
-        label: "Connect phone · QR",
+        label: "Link Mobile App · QR",
         render: () =>
             onboarding(
                 {
                     kind: "happy-mobile-desktop",
                     step: {
-                        appReady: true,
                         kind: "link",
                         phase: {
                             data: "happy://terminal?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -165,12 +261,21 @@ const screens: readonly { id: string; label: string; render: () => ReactNode }[]
     },
     {
         id: "phone-connected",
-        label: "Connect phone · connected",
+        label: "Link Mobile App · linked, the last page",
         render: () =>
             onboarding(
                 { kind: "happy-mobile-desktop", step: { kind: "connected", online: true } },
                 "connect-phone",
             ),
+    },
+    {
+        id: "restart",
+        label: "Any later launch · until the workspace is ready",
+        render: () => (
+            <SplashCover quiet ready={false}>
+                {null}
+            </SplashCover>
+        ),
     },
 ];
 
@@ -193,7 +298,9 @@ export function OnboardingFlowPage() {
                             screen={`${number}-${screen.id}-${String(window.width)}x${String(window.height)}`}
                             window={window}
                         >
-                            <ThemeScope mode="dark">{screen.render()}</ThemeScope>
+                            <ThemeScope mode={screen.appearance ?? "dark"}>
+                                {screen.render()}
+                            </ThemeScope>
                         </FullScreenSpecimen>
                     );
                 }),

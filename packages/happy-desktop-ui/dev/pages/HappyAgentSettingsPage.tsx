@@ -12,6 +12,7 @@ import {
     HappyAgentProfileSettings,
     HappyAgentSecretSettings,
     HappyAgentSettingsShell,
+    GptLiveSettings,
     HappyAgentUsageSettings,
     type HappyAgentProviderRow,
     type HappyAgentSecretRow,
@@ -470,31 +471,62 @@ export function HappyAgentSettingsBlueprintPage() {
                         effort="medium"
                         effortOptions={effortOptions}
                         experimentalFeaturesEnabled
-                        gptLiveEnabled={false}
-                        onGptLiveEnabledChange={noop}
                         modelOptions={modelOptions}
                         onAppearanceChange={noop}
+                        statusBar={{
+                            themeShown: true,
+                            keepAwakeShown: false,
+                            onThemeShownChange: noop,
+                            onKeepAwakeShownChange: noop,
+                        }}
+                        keepAwake="agent"
+                        onKeepAwakeChange={noop}
                         onAgentCheck={noop}
                         onAgentRestart={noop}
                         onAgentUpgrade={noop}
                         onAgentVersionSelect={noop}
                         onPreviewUpdatesChange={noop}
                         previewUpdatesEnabled
+                        onUsageAnalyticsChange={noop}
+                        usageAnalyticsEnabled
                         onExperimentalFeaturesChange={noop}
                         onDefaultModelChange={noop}
                         onEffortChange={noop}
                         onPermissionModeChange={noop}
                         onScrollbarVisibilityChange={noop}
+                        onLinkOpenPlacementChange={noop}
+                        linkOpenPlacement="panel"
                         onTitleShimmerChange={noop}
+                        onProjectsHiddenChange={noop}
                         permissionMode="auto"
                         permissionModeOptions={permissionModeOptions}
+                        projectsHidden
                         scrollbarVisibility="automatic"
                         titleShimmerEnabled={false}
                     />
                 </HappyAgentSettingsShell>
             </FullScreenSpecimen>
             <FullScreenSpecimen
-                detail="Mobile Access category: configured and connected, with the installation-wide unlink action"
+                label="Happy Agent settings — Experimental"
+                detail="Revealed only after enabling experimental features in General"
+                number="01x"
+            >
+                <HappyAgentSettingsShell
+                    activeCategoryId="experimental"
+                    categories={[
+                        ...categories,
+                        { id: "experimental", label: "Experimental", icon: "zap" },
+                    ]}
+                    title="Experimental"
+                    description="Features that are still being built"
+                    onCategorySelect={noop}
+                    onClose={noop}
+                >
+                    <GptLiveSettings enabled={false} onEnabledChange={noop} />
+                </HappyAgentSettingsShell>
+            </FullScreenSpecimen>
+            <FullScreenSpecimen
+                detail="Mobile Access category: configured and connected, with the selected owner's disconnect action"
                 label="Happy Agent settings — Mobile Access"
                 number="01e"
             >
@@ -513,6 +545,35 @@ export function HappyAgentSettingsBlueprintPage() {
                         onPair={noop}
                         onPairingCancel={noop}
                         status="connected"
+                    />
+                </HappyAgentSettingsShell>
+            </FullScreenSpecimen>
+            <FullScreenSpecimen
+                detail="Happy could not confirm removing this computer: one banner with Try again and Keep linked; the status line does not repeat the reason."
+                label="Happy Agent settings — Mobile Access removal incomplete"
+                number="01e-removal"
+            >
+                <HappyAgentSettingsShell
+                    activeCategoryId="mobile-access"
+                    categories={categories}
+                    description={mobileDescription}
+                    onCategorySelect={noop}
+                    onClose={noop}
+                    title="Mobile Access"
+                >
+                    <HappyAgentMobileSettings
+                        configured
+                        disconnectError="Happy Agent couldn't remove this computer from Happy Mobile. Check your internet connection and try again. This computer stays linked until it is removed."
+                        message="Happy Agent couldn't remove this computer from Happy Mobile. Check your internet connection and try again. This computer stays linked until it is removed."
+                        onDisconnect={noop}
+                        onPair={noop}
+                        onPairingCancel={noop}
+                        onReconnect={noop}
+                        onRemovalRetry={noop}
+                        onSetup={noop}
+                        removalIncomplete
+                        removesComputer
+                        status="failed"
                     />
                 </HappyAgentSettingsShell>
             </FullScreenSpecimen>
@@ -567,20 +628,20 @@ export function HappyAgentSettingsBlueprintPage() {
                 </FullScreenSpecimen>
             ))}
             <FullScreenSpecimen
-                detail="Settings opens the exact first-run component and store. Not now or completion Continue returns to Mobile Access status."
+                detail="Settings opens the exact first-run component and store. Skip or Continue returns to Mobile Access status."
                 label="Happy Mobile — shared local setup"
                 number="01f-setup"
             >
                 <DesktopMobileSetup
                     appearance="light"
-                    step={{ alreadyLinked: true, kind: "intro", platform: "ios" }}
+                    step={{ kind: "intro", platform: "ios" }}
                     onContinue={noop}
                     onSkip={noop}
                     onPlatformSelect={noop}
                 />
             </FullScreenSpecimen>
             <FullScreenSpecimen
-                detail="A failed native status read stays unknown and shows its reason, even after the CLI is ready."
+                detail="A failed native status read stays unknown and shows its reason."
                 label="Happy Mobile — native status unavailable"
                 number="01f-read-failed"
             >
@@ -588,7 +649,6 @@ export function HappyAgentSettingsBlueprintPage() {
                     appearance="light"
                     step={{
                         kind: "link",
-                        appReady: true,
                         phase: {
                             kind: "failed",
                             message:
@@ -921,6 +981,8 @@ export function HappyAgentSettingsBlueprintPage() {
                         onExperimentalFeaturesChange={noop}
                         onPermissionModeChange={noop}
                         onScrollbarVisibilityChange={noop}
+                        onLinkOpenPlacementChange={noop}
+                        linkOpenPlacement="panel"
                         onTitleShimmerChange={noop}
                         permissionMode="auto"
                         permissionModeOptions={permissionModeOptions}

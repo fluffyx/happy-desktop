@@ -38,7 +38,9 @@ export const APP_SHORTCUTS = {
     tabMoveToMain: commandShortcut("ArrowLeft", { alt: true }),
     /** The sheet listing every chord, since the held-Command card shows only a few. */
     shortcutsShow: commandShortcut("/"),
-    workspaceCreate: commandShortcut("n"),
+    /** Opens the new-task surface on the active Happy Agent, as its Tasks heading's + does. */
+    taskCreate: commandShortcut("n"),
+    workspaceCreate: commandShortcut("n", { shift: true }),
 } as const;
 
 /**

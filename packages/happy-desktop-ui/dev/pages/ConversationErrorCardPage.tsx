@@ -7,11 +7,11 @@ export function ConversationErrorCardPage() {
     return (
         <ComponentPage
             number={componentNumber}
-            summary="Full diagnostic text stays readable in the transcript: paragraphs and indentation are preserved, long identifiers wrap, and Copy retains the original text."
+            summary="Full diagnostic text stays readable in the transcript: paragraphs and indentation are preserved, long identifiers wrap, and the one way out is Ask Chief of Staff, which receives the error itself."
             title="Conversation error card"
         >
             <Specimen
-                detail="Heading and reason stay separate; hover or focus reveals the full-text copy action."
+                detail="Heading and reason stay separate; there is no copy or log button."
                 label="Short failure"
                 number="01"
                 stage="surface"
@@ -22,6 +22,50 @@ export function ConversationErrorCardPage() {
                         title="Failure"
                     />
                     <DimensionRule label="760 px wide · 14/20 text · 4 px heading gap" />
+                </div>
+            </Specimen>
+            <Specimen
+                detail="An explicit click adds the quoted diagnostic to the Chief of Staff's draft and opens that conversation; nothing is sent. Pending, unavailable, and failed handoffs say so."
+                label="Chief of Staff handoff"
+                number="04"
+                stage="surface"
+            >
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "24px",
+                        width: "760px",
+                    }}
+                >
+                    <ConversationErrorCard
+                        assistance={{ status: "ready" }}
+                        onAssistanceRequest={() => {}}
+                        reason="The selected provider account needs attention. You can also sign in manually and retry."
+                        title="Failure"
+                    />
+                    <ConversationErrorCard
+                        assistance={{ status: "pending" }}
+                        reason="The provider connection closed."
+                        title="Failure"
+                    />
+                    <ConversationErrorCard
+                        assistance={{
+                            status: "unavailable",
+                            reason: "Chief of Staff is not available on this Happy Agent.",
+                        }}
+                        reason="The provider connection closed."
+                        title="Failure"
+                    />
+                    <ConversationErrorCard
+                        assistance={{
+                            status: "failed",
+                            reason: "Could not reach this Happy Agent. Your error and manual recovery options are unchanged.",
+                        }}
+                        onAssistanceRequest={() => {}}
+                        reason="The provider connection closed."
+                        title="Failure"
+                    />
                 </div>
             </Specimen>
             <Specimen

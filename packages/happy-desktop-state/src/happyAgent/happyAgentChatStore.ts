@@ -26,6 +26,11 @@ import {
     happyAgentSelectionServiceTierUpdate,
 } from "./happyAgentSessionDraftStore.js";
 import { deepEqual, happyAgentUserError } from "./happyAgentSupport.js";
+import {
+    happyAgentTranscriptSenderIds,
+    type HappyAgentAgentIdentitySource,
+} from "./happyAgentAgentIdentities.js";
+import type { ConversationAgentIdentity } from "../conversation/conversationEntry.js";
 import type {
     HappyAgentAnsweredUserInput,
     HappyAgentBackgroundProcess,
@@ -47,7 +52,7 @@ import type {
     HappyAgentSessionUsage,
     HappyAgentSlashCommand,
     SubagentSummary,
-    HappyAgentTask,
+    HappyAgentTodo,
     HappyAgentThinkingLevel,
     HappyAgentUserInputAnswers,
     HappyAgentUserInputRequest,
@@ -216,7 +221,7 @@ function transcriptQueuedMessagesProject(
     }));
 }
 
-function transcriptTasksProject(session: SessionState): readonly HappyAgentTask[] {
+function transcriptTasksProject(session: SessionState): readonly HappyAgentTodo[] {
     return session.tasks.map((task) => ({
         id: task.id,
         subject: task.subject,
@@ -509,7 +514,7 @@ export interface HappyAgentChatSnapshot {
     readonly queuedMessages: readonly HappyAgentQueuedMessage[];
     /** Complete ordered slash-command catalog projected from the focused agent. */
     readonly slashCommands: readonly HappyAgentSlashCommand[];
-    readonly tasks: readonly HappyAgentTask[];
+    readonly tasks: readonly HappyAgentTodo[];
     readonly goal?: HappyAgentGoal;
     readonly subagents: readonly SubagentSummary[];
     readonly backgroundProcesses: readonly HappyAgentBackgroundProcess[];
@@ -547,6 +552,11 @@ export interface HappyAgentChatStore {
     sessionRetry(): void;
     historyLoadMore(): void;
     messageSend(text: string, images?: readonly HappyAgentImageInput[]): Promise<void>;
+    /** Exact-text human confirmation from voice. Never routes text into a pending question. */
+    voiceMessageSendConfirmed(
+        text: string,
+        permissionMode: HappyAgentPermissionMode,
+    ): Promise<void>;
     slashCommandInvoke(name: string, argumentsValue?: string): Promise<void>;
     draftSet(draft: string, updatedAt: number, origin: string): Promise<void>;
     runAbort(): Promise<void>;
@@ -591,6 +601,7 @@ export interface HappyAgentChatDeps {
         | "compactSession"
         | "invokeSlashCommand"
         | "sendMessage"
+        | "sendMessageConfirmed"
         | "setDraft"
         | "setEffort"
         | "setPermissionMode"
@@ -609,6 +620,8 @@ export interface HappyAgentChatDeps {
     ) => HappyAgentSelection;
     readonly output?: (event: HappyAgentChatOutput) => void;
     readonly effortRemembered?: HappyAgentModelEffortRemembered;
+    /** Names the agents that send messages into this conversation. */
+    readonly agentIdentities?: HappyAgentAgentIdentitySource;
 }
 
 export interface HappyAgentChatTranscriptConnection {
@@ -690,6 +703,45 @@ export function happyAgentChatStoreCreate(
     let sentImages: ReadonlyMap<string, readonly HappyAgentImageInput[]> = new Map();
     let sentImageBytes = 0;
     const conversationCache = happyAgentConversationCacheCreate();
+    /* The agents that sent messages into this transcript, as the window knows
+       them. One map is kept while none of them changed, because the projection
+       compares it by identity and a new one rebuilds every turn. */
+    let senderIdsFrom: readonly ChatElement[] | undefined;
+    let senderIds: ReadonlySet<string> = new Set();
+    let senders: ReadonlyMap<string, ConversationAgentIdentity> = new Map();
+    let unsubscribeSenders: (() => void) | undefined;
+    const sendersResolve = (): boolean => {
+        const source = deps.agentIdentities;
+        if (source === undefined || senderIds.size === 0) return false;
+        const next = new Map<string, ConversationAgentIdentity>();
+        for (const agentId of senderIds) {
+            const known = source.lookup(agentId);
+            if (known === undefined) source.request(agentId);
+            else next.set(agentId, known);
+        }
+        if (
+            next.size === senders.size &&
+            [...next].every(([agentId, known]) => deepEqual(known, senders.get(agentId)))
+        )
+            return false;
+        senders = next;
+        return true;
+    };
+    const sendersFollow = (elements: readonly ChatElement[]): void => {
+        if (elements === senderIdsFrom) return;
+        senderIdsFrom = elements;
+        const ids = happyAgentTranscriptSenderIds(elements);
+        if (ids.size === senderIds.size && [...ids].every((agentId) => senderIds.has(agentId)))
+            return;
+        senderIds = ids;
+        sendersResolve();
+        // Followed only once someone has written in: a transcript nobody else
+        // speaks in has nothing to name, and needs no word of the list moving.
+        if (senderIds.size > 0 && deps.agentIdentities !== undefined)
+            unsubscribeSenders ??= deps.agentIdentities.subscribe(() => {
+                if (!disposed && sendersResolve()) commit();
+            });
+    };
     /* Nothing is projected into this conversation from outside it, and the
        projection compares what it was given last time, so the empty list is one
        object rather than a new one per commit. */
@@ -729,6 +781,7 @@ export function happyAgentChatStoreCreate(
             }));
         }
         const subagents = connected === undefined ? [] : transcriptSubagentsProject(connected);
+        sendersFollow(elements);
         const tasks = connected === undefined ? [] : transcriptTasksProject(connected);
         const goal = connected === undefined ? undefined : transcriptGoalProject(connected);
         const backgroundProcesses =
@@ -747,6 +800,7 @@ export function happyAgentChatStoreCreate(
                       answeredUserInputs: transcriptAnsweredUserInputs,
                       expandedGroupIds: expandedTurnIds,
                       subagents,
+                      agentIdentities: senders,
                   });
         const withHistory: readonly ConversationEntry[] =
             connected?.loadingMore === true
@@ -849,7 +903,7 @@ export function happyAgentChatStoreCreate(
             ),
             activityPanelOpen,
             ...(openImage === undefined ? {} : { openImage }),
-            ...(connected === undefined
+            ...(connected === undefined || connected.selectionKnown === false
                 ? {}
                 : {
                       menus: happyAgentMenusDerive(
@@ -875,6 +929,15 @@ export function happyAgentChatStoreCreate(
             onChange: (elements, connected, answeredUserInputs) => {
                 if (!active || disposed) return;
                 transcriptElements = elements;
+                // A refusal belongs to the connection that made it. Once a
+                // new one is live — after an update or an outage — it no
+                // longer describes anything, so it does not outlive it.
+                if (
+                    transcriptSession !== undefined &&
+                    transcriptSession.connection !== "live" &&
+                    connected.connection === "live"
+                )
+                    mutationRejection = undefined;
                 transcriptSession = connected;
                 transcriptAnsweredUserInputs = answeredUserInputs;
                 // Only authoritative question state settles the local submission.
@@ -1095,6 +1158,24 @@ export function happyAgentChatStoreCreate(
             if (token === undefined || transcriptSession?.loadingMore === true) return;
             transcriptConnection?.loadMore(token);
         },
+        voiceMessageSendConfirmed: (text, permissionMode) =>
+            rejecting(async () => {
+                const current = store.getState();
+                if (current.session.type !== "ready")
+                    throw new Error("The conversation is not ready.");
+                if (
+                    current.pendingUserInputs.length > 0 ||
+                    current.session.value.pendingUserInputs.length > 0
+                )
+                    throw new Error(
+                        "Answer the pending question yourself before sending a voice draft.",
+                    );
+                if (current.session.value.permissionMode !== permissionMode)
+                    throw new Error("The access mode changed. Review the message again.");
+                const steered = runStatus === "running";
+                await deps.connectActions.sendMessageConfirmed(sessionId, text);
+                output({ type: "messageSent", sessionId, steered });
+            }),
         messageSend: (text, images) =>
             rejecting(async () => {
                 if ((await pendingQuestionAnswer(text)).textUsed) return;
@@ -1279,6 +1360,7 @@ export function happyAgentChatStoreCreate(
             stop();
             unsubscribeMutationRejections();
             unsubscribeCatalog?.();
+            unsubscribeSenders?.();
             storeUnsubscribe();
             listeners.clear();
             pendingMutationIds.clear();

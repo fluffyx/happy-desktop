@@ -6,6 +6,14 @@ on:
             verify_agent_release:
                 type: boolean
                 default: false
+            release_analytics:
+                description: Embed the PostHog key; only release builds send analytics.
+                type: boolean
+                default: false
+        secrets:
+            HAPPY_POSTHOG_API_KEY:
+                description: PostHog project key, embedded only when release_analytics is true.
+                required: false
 
 permissions:
     contents: read
@@ -66,7 +74,28 @@ jobs:
                   client-id: ${{ vars.AZURE_CLIENT_ID }}
                   tenant-id: ${{ vars.AZURE_TENANT_ID }}
                   subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+            # electron-builder installs TrustedSigning itself, but a PowerShell Gallery
+            # hiccup can let that install exit cleanly without the module, failing the
+            # first signature. Install a pinned version up front and prove it loads.
+            - name: Install the Trusted Signing PowerShell module
+              shell: pwsh
+              run: |
+                  $version = '0.5.8'
+                  for ($attempt = 1; ; $attempt++) {
+                      try {
+                          Install-Module -Name TrustedSigning -RequiredVersion $version -Repository PSGallery -Scope CurrentUser -Force -ErrorAction Stop
+                          Import-Module -Name TrustedSigning -RequiredVersion $version -ErrorAction Stop
+                          break
+                      } catch {
+                          if ($attempt -ge 5) { throw }
+                          Write-Warning "TrustedSigning install attempt $attempt failed: $_"
+                          Start-Sleep -Seconds (10 * $attempt)
+                      }
+                  }
+                  Get-Command Invoke-TrustedSigning -ErrorAction Stop | Out-Null
             - name: Build NSIS installer and update metadata
+              env:
+                  HAPPY_POSTHOG_API_KEY: ${{ inputs.release_analytics && secrets.HAPPY_POSTHOG_API_KEY || '' }}
               run: pnpm desktop:win:release ${{ matrix.flavor }}
             - name: Install the actual release package
               shell: pwsh

@@ -1,5 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { connectHappyAgent } from "./connectHappyAgent.js";
+import { happyAgentChatStoreCreate } from "../happyAgent/happyAgentChatStore.js";
+import { happyAgentModelCatalogProject } from "../happyAgent/happyAgentProject.js";
+import type { HappyAgentSessionId } from "../happyAgent/happyAgentTypes.js";
 import { MINIMUM_HAPPY_AGENT_VERSION } from "./compatibility.js";
 import { HAPPY_AGENT_PROTOCOL_VERSION, HappyAgentApiError } from "@slopus/happy-agent-client";
 import type {
@@ -32,10 +35,14 @@ afterEach(() => {
     for (const connection of openConnections.splice(0)) connection.close();
 });
 
-function harnessOpen(daemon = fakeHappyAgentDaemonCreate()): Harness {
+function harnessOpen(
+    daemon = fakeHappyAgentDaemonCreate(),
+    options: { readonly memberProfileRequired?: boolean } = {},
+): Harness {
     const waits: number[] = [];
     const rejections: MutationRejectedDelta[] = [];
     const connection = connectHappyAgent({
+        ...options,
         endpoint: "http://happy-agent.test/",
         token: "token",
         client: daemon.client,
@@ -126,7 +133,164 @@ async function liveHarness(): Promise<
     return { ...harness, groups, chat, sessionId: agent.id };
 }
 
+it("shows a delegated session's own speed choices while history and activity are still loading", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const config = daemon.configGet();
+    const selectedModel = config.defaults.modelId;
+    const selectedProvider = config.defaults.providerId;
+    daemon.configSet({
+        ...config,
+        defaults: { ...config.defaults, modelId: "regular-only" },
+        models: {
+            ...config.models,
+            [selectedModel]: {
+                ...config.models[selectedModel]!,
+                serviceTierOptions: [
+                    { id: null, label: "Regular" },
+                    { id: "priority", label: "Fast" },
+                ],
+            },
+            "regular-only": {
+                ...config.models[selectedModel]!,
+                name: "Regular only",
+                serviceTierOptions: [{ id: null, label: "Regular" }],
+            },
+        },
+        providers: {
+            ...config.providers,
+            [selectedProvider]: {
+                ...config.providers[selectedProvider]!,
+                models: [
+                    ...config.providers[selectedProvider]!.models,
+                    { id: "regular-only", enabled: true },
+                ],
+            },
+        },
+    });
+    const project = daemon.projectSeed({ id: "project-speed" });
+    const parent = daemon.agentSeed(project.id, { id: "parent-speed" });
+    const child = daemon.agentSeed(project.id, {
+        id: "child-speed",
+        parentAgentId: parent.id,
+    });
+    daemon.modeSeed(child.id, {
+        ...config.defaults,
+        modelId: selectedModel,
+        providerId: selectedProvider,
+        serviceTier: "priority",
+    });
+    const releaseHistory = daemon.pause("getMessages");
+    const releaseActivity = daemon.pause("getAgentActivity");
+    const releaseQuestion = daemon.pause("getPendingQuestion");
+    const { connection } = harnessOpen(daemon);
+    const groups = groupsWatch(connection);
+    const chat = happyAgentChatStoreCreate(child.id as HappyAgentSessionId, {
+        catalog: happyAgentModelCatalogProject(daemon.configGet()),
+        connectActions: connection,
+        connectMutationSubscribe: () => () => undefined,
+        transcriptConnect: ({ sessionId, onChange, onError }) => {
+            const transcript = connection.connectSession({
+                sessionId,
+                onChange: (elements, session) => onChange(elements, session, []),
+                onError,
+            });
+            return {
+                close: () => transcript.close(),
+                loadMore: (token) => transcript.loadMore(token),
+            };
+        },
+    });
+    const unsubscribe = chat.subscribe(() => undefined);
+    try {
+        expect(chat.get().menus).toBeUndefined();
+        await vi.waitFor(() => {
+            expect(chat.get().menus?.currentModelId).toBe(selectedModel);
+            expect(chat.get().menus?.serviceTierOptions).toEqual([
+                { tier: null, label: "Regular", current: false },
+                { tier: "priority", label: "Fast", current: true },
+            ]);
+        });
+        expect(chat.get().ready).toBe(false);
+        expect(chat.get().modelLocked).toBe(false);
+        expect(chat.get().entries).toEqual([]);
+        expect(chat.get().menus?.currentProviderId).toBe(selectedProvider);
+        expect(chat.get().menus?.currentPermissionMode).toBe(config.defaults.permissionMode);
+        expect(
+            groups.projects[0]?.sessions.find((session) => session.id === child.id)
+                ?.parentSessionId,
+        ).toBe(parent.id);
+        releaseHistory();
+        releaseActivity();
+        releaseQuestion();
+        await vi.waitFor(() => expect(chat.get().ready).toBe(true));
+        expect(chat.get().menus?.currentServiceTier).toBe("priority");
+        expect(chat.get().modelLocked).toBe(false);
+    } finally {
+        releaseHistory();
+        releaseActivity();
+        releaseQuestion();
+        unsubscribe();
+        chat[Symbol.dispose]();
+    }
+});
+
+it("keeps local speed edits through stale bootstrap and deferred history snapshots", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const project = daemon.projectSeed({ id: "project-speed-race" });
+    const agent = daemon.agentSeed(project.id, { id: "agent-speed-race" });
+    const getBootstrap = daemon.client.getAgentBootstrap.bind(daemon.client);
+    let releaseBootstrap!: () => void;
+    const bootstrapGate = new Promise<void>((resolve) => {
+        releaseBootstrap = resolve;
+    });
+    let bootstrapCaptured!: () => void;
+    const captured = new Promise<void>((resolve) => {
+        bootstrapCaptured = resolve;
+    });
+    vi.spyOn(daemon.client, "getAgentBootstrap").mockImplementation(async (...args) => {
+        const snapshot = await getBootstrap(...args);
+        bootstrapCaptured();
+        await bootstrapGate;
+        return snapshot;
+    });
+    const releaseHistory = daemon.pause("getMessages");
+    const { connection } = harnessOpen(daemon);
+    const groups = groupsWatch(connection);
+    const chat = sessionWatch(connection, agent.id);
+    await captured;
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    connection.setServiceTier(agent.id, "ultrafast");
+    await vi.waitFor(() => {
+        expect(chat.session?.serviceTier).toBe("ultrafast");
+        expect(daemon.callCount("saveAgentDraft")).toBe(1);
+    });
+    releaseBootstrap();
+    await vi.waitFor(() => expect(chat.session?.selectionKnown).toBe(true));
+    expect(chat.session?.historyLoading).toBe(true);
+    expect(chat.session?.serviceTier).toBe("ultrafast");
+    releaseHistory();
+    await vi.waitFor(() => expect(chat.session?.historyLoading).not.toBe(true));
+    expect(chat.session?.serviceTier).toBe("ultrafast");
+});
+
 // --- startup and SSE reconnection ---------------------------------------
+
+it("sends the selected Ultrafast wire tier with the user message, then clears it for Regular", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    connection.setServiceTier(sessionId, "ultrafast");
+    expect(chat.session?.serviceTier).toBe("ultrafast");
+    connection.sendMessage(sessionId, "first");
+    await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(1));
+    expect(daemon.calls.find((call) => call.method === "sendMessage")?.args[1]).toMatchObject({
+        mode: { serviceTier: "ultrafast" },
+    });
+    connection.setServiceTier(sessionId, undefined);
+    connection.sendMessage(sessionId, "second");
+    await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(2));
+    expect(daemon.calls.filter((call) => call.method === "sendMessage")[1]?.args[1]).toMatchObject({
+        mode: { serviceTier: null },
+    });
+});
 
 it("keeps 523 untouched catalog sessions identical when one session changes", async () => {
     const { connection, daemon } = harnessOpen();
@@ -279,6 +443,39 @@ it("polls health until the daemon is ready before opening the stream", async () 
 
     daemon.healthSet({ ready: true });
     await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+});
+
+const freshMachineOnboarding = {
+    completed: false,
+    steps: {
+        profile: { done: false },
+        project: { done: false },
+        providers: { done: true, signedIn: ["claude"] },
+    },
+};
+
+it("holds a team member without a profile before bootstrap and the stream", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    daemon.onboardingSet(freshMachineOnboarding);
+    const { connection } = harnessOpen(daemon);
+    const groups = groupsWatch(connection);
+
+    await vi.waitFor(() => expect(daemon.callCount("getOnboarding")).toBeGreaterThanOrEqual(2));
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(0);
+    expect(daemon.callCount("streamEvents")).toBe(0);
+    expect(groups.state.connection).toBe("connecting");
+});
+
+it("bootstraps a fresh solo machine that has no profile", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    daemon.onboardingSet(freshMachineOnboarding);
+    daemon.projectSeed({ id: "project-a" });
+    const { connection } = harnessOpen(daemon, { memberProfileRequired: false });
+    const groups = groupsWatch(connection);
+
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    expect(groups.projects.map((project) => project.id)).toEqual(["project-a"]);
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(1);
 });
 
 it("accepts a newer additive protocol", async () => {
@@ -435,6 +632,50 @@ it("does not duplicate the session row when agent.created is redelivered", async
 });
 
 // --- sent message reconciliation ------------------------------------------
+
+it("voice acceptance waits for authority and preserves the optimistic row identity", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    const release = daemon.pause("sendMessage");
+    let accepted = false;
+    const sent = connection.sendMessageConfirmed(sessionId, "Reviewed voice text").then(() => {
+        accepted = true;
+    });
+    const optimistic = userMessages(chat.elements)[0]!;
+    expect(optimistic.authority).toBe("local");
+    await Promise.resolve();
+    expect(accepted).toBe(false);
+    release();
+    await sent;
+    expect(accepted).toBe(true);
+    const authoritative = userMessages(chat.elements)[0]!;
+    expect(authoritative.authority).toBe("server");
+    expect(authoritative.id).toBe(optimistic.id);
+    expect(authoritative.messageId).toBe(optimistic.messageId);
+    expect(daemon.callCount("sendMessage")).toBe(1);
+});
+
+it("voice acceptance resolves from an authoritative event before the HTTP response", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    const release = daemon.pause("sendMessage:respond");
+    try {
+        await connection.sendMessageConfirmed(sessionId, "Exact confirmed text");
+        expect(userMessages(chat.elements)).toHaveLength(1);
+        expect(userMessages(chat.elements)[0]?.authority).toBe("server");
+        expect(daemon.callCount("sendMessage")).toBe(1);
+    } finally {
+        release();
+    }
+});
+
+it("voice acceptance rejects a delayed daemon refusal without claiming delivery or retrying", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    daemon.failOnce("sendMessage", new HappyAgentApiError(400, "refused", "invalid_request", null));
+    const sent = connection.sendMessageConfirmed(sessionId, "Do not claim this was sent");
+    expect(userMessages(chat.elements)[0]?.authority).toBe("local");
+    await expect(sent).rejects.toThrow("not accepted");
+    expect(userMessages(chat.elements)).toEqual([]);
+    expect(daemon.callCount("sendMessage")).toBe(1);
+});
 
 it("shows an optimistic message immediately and keeps its identity once the daemon takes it", async () => {
     const { connection, daemon, chat, sessionId } = await liveHarness();

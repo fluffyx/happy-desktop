@@ -17,7 +17,7 @@ import { ComponentPage, DimensionRule, Specimen } from "../kit";
 
 /** The component plan this page documents. The selector and the page header read the same value. */
 export const componentNumber = "C-009";
-const workspaceShortcut = commandShortcut("n");
+const workspaceShortcut = commandShortcut("n", { shift: true });
 const workspaceSections: SidebarSection[] = [
     {
         id: "views",
@@ -118,7 +118,7 @@ const workspaceSections: SidebarSection[] = [
         label: "Humans",
     },
     {
-        action: { icon: "plus", label: "Add agent" },
+        action: { icon: "plus", label: "Add agent", shortcut: commandShortcut("n") },
         id: "agents",
         items: [
             {
@@ -152,6 +152,72 @@ const workspaceSections: SidebarSection[] = [
 /* A tiny inline photo so the blueprint shows the image-avatar row state. */
 const PHOTO =
     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAT0lEQVR4nGPorvk+ufrTrOp3i6perqx8srHiwY6K2wfKrzNgFT1edokBq+j5srMMWEWvlZ5kwCp6r+QIA1bRp8X7GbCKvi3ezYBV9EvRNgD7aoNVazUeBQAAAABJRU5ErkJggg==";
+/*
+ * One Happy Agent as the app lists it: its bots, then the reader's joined tasks
+ * in their own order, then its projects. A task is a bot's row worn by its
+ * owner's face — their photo, their initials without one, and the bot
+ * placeholder when nobody was identified — with Leave as its hover control and
+ * its delegated subtasks nested under it the way a bot's are.
+ */
+const agentSections: SidebarSection[] = [
+    {
+        action: { icon: "plus", label: "New bot", reveal: "always" },
+        id: "agent-bots",
+        items: [{ avatarId: "bot-nova", id: "bot-nova", kind: "project", label: "Nova" }],
+        label: "Bots",
+    },
+    {
+        action: { icon: "search", label: "Browse tasks", reveal: "always" },
+        id: "agent-tasks",
+        items: [
+            {
+                action: { icon: "close", label: "Leave Ship the launch", reveal: "hover" },
+                id: "task-launch",
+                imageUrl: PHOTO,
+                initials: "AL",
+                kind: "project",
+                label: "Ship the launch",
+                status: "working",
+            },
+            {
+                depth: 1,
+                id: "task-launch-checklist",
+                kind: "workspace",
+                label: "Write the checklist",
+            },
+            {
+                action: { icon: "close", label: "Leave Fix invoice rounding", reveal: "hover" },
+                id: "task-billing",
+                initials: "BD",
+                kind: "project",
+                label: "Fix invoice rounding",
+                unread: true,
+            },
+            {
+                action: { icon: "close", label: "Leave Triage nightly failures", reveal: "hover" },
+                avatarId: "task-orphan",
+                id: "task-orphan",
+                kind: "project",
+                label: "Triage nightly failures",
+            },
+        ],
+        label: "Tasks",
+    },
+    {
+        action: { icon: "plus", label: "Add project", reveal: "always" },
+        id: "agent-projects",
+        items: [
+            {
+                action: { icon: "plus", label: "New workspace", reveal: "hover" },
+                id: "agent-project",
+                initials: "H",
+                kind: "project",
+                label: "happy",
+            },
+        ],
+        label: "Projects",
+    },
+];
 /*
  * A project whose worktrees are in every phase of their own life at once. Each
  * row is the same workspace row, so the specimen shows what the reader actually
@@ -592,7 +658,6 @@ function PinnedReorderDemo() {
                     activeItemId=""
                     footer={
                         <SidebarFooter
-                            appearance="light"
                             devMenu={
                                 <DevBuildMenu
                                     branch="feature/sidebar-reorder"
@@ -602,7 +667,6 @@ function PinnedReorderDemo() {
                                     path="/Users/kirilldubovitskiy/Happy/Workspaces/happy-desktop"
                                 />
                             }
-                            onAppearanceToggle={() => {}}
                             onSettingsOpen={() => {}}
                         />
                     }
@@ -1070,8 +1134,6 @@ export function SidebarPage() {
                                     footer={
                                         <SidebarFooter
                                             actions={<SidebarUpdateAction {...update} />}
-                                            appearance="light"
-                                            onAppearanceToggle={() => {}}
                                             onSettingsOpen={() => {}}
                                         />
                                     }
@@ -1106,8 +1168,6 @@ export function SidebarPage() {
                                             actions={
                                                 <SidebarUpdateAction {...update} defaultOpen />
                                             }
-                                            appearance="light"
-                                            onAppearanceToggle={() => {}}
                                             onSettingsOpen={() => {}}
                                         />
                                     }
@@ -1153,9 +1213,7 @@ export function SidebarPage() {
                                     activeItemId=""
                                     footer={
                                         <SidebarFooter
-                                            appearance="light"
                                             connection={connection}
-                                            onAppearanceToggle={() => {}}
                                             onSettingsOpen={() => {}}
                                         />
                                     }
@@ -1324,6 +1382,27 @@ export function SidebarPage() {
             </Specimen>
 
             <Specimen
+                detail="Bots, then the reader's joined tasks in their own order, then projects. A task wears its owner's photo, their initials, or the bot placeholder; Leave waits for hover, and Browse tasks heads the list."
+                label="Bots, tasks, and projects"
+                number="02f"
+                stage="app"
+            >
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                    <Frame height={420}>
+                        <Sidebar
+                            activeItemId="task-billing"
+                            onItemAction={() => {}}
+                            onItemSelect={() => {}}
+                            onSectionAction={() => {}}
+                            sections={agentSections}
+                            title="This Mac"
+                        />
+                    </Frame>
+                    <DimensionRule label="task row = bot row · 32 px · owner face 16 px · leave on hover" />
+                </div>
+            </Specimen>
+
+            <Specimen
                 detail="No subtitle, no footer, unlabelled section — body starts on the 8px pad"
                 label="Minimal"
                 number="03"
@@ -1429,7 +1508,7 @@ export function SidebarPage() {
             </Specimen>
 
             <Specimen
-                detail="rest and held-Command states · the current project's main checkout is Cmd-1, then its workspaces, then other projects; its plus keeps Cmd-N as a delayed floating hover hint"
+                detail="rest and held-Command states · the current project's main checkout is Cmd-1, then its workspaces, then other projects; its plus keeps Shift-Cmd-N as a delayed floating hover hint, and the Agents heading's plus Cmd-N"
                 label="Number shortcuts"
                 number="04b"
                 stage="app"

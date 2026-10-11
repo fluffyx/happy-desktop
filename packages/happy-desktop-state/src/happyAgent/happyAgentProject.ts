@@ -1,12 +1,12 @@
 import type { DaemonConfig, GitFileChange, Project } from "@slopus/happy-agent-client";
-import { happyAgentServiceTiersFromWire } from "../happyAgentServiceTier.js";
 import type {
     HappyAgentChangedFileDocument,
     HappyAgentGitChangedFile,
     HappyAgentModel,
     HappyAgentModelCatalog,
     HappyAgentProjectCompute,
-    HappyAgentProjectComputeState,
+    HappyAgentProjectSettingsInput,
+    HappyAgentProjectSettingsState,
     HappyAgentProjectId,
     HappyAgentThinkingLevel,
 } from "./happyAgentTypes.js";
@@ -23,6 +23,11 @@ function modelProject(
     return {
         id: modelId,
         name: reference?.name ?? definition.name,
+        serviceTierOptions: (
+            reference?.serviceTierOptions ??
+            definition.serviceTierOptions ??
+            []
+        ).map((option) => ({ id: option.id, label: option.label })),
         thinkingLevels: (reference?.efforts ?? definition.efforts) as HappyAgentThinkingLevel[],
         defaultThinkingLevel: (reference?.defaultEffort ??
             definition.defaultEffort) as HappyAgentThinkingLevel,
@@ -50,18 +55,12 @@ export function happyAgentModelCatalogProject(config: DaemonConfig): HappyAgentM
                 const model = modelProject(config, reference.id, reference);
                 return model === undefined ? [] : [model];
             });
-            const serviceTiers = happyAgentServiceTiersFromWire(
-                references.flatMap(
-                    (reference) =>
-                        reference.serviceTiers ?? config.models[reference.id]?.serviceTiers ?? [],
-                ),
-            );
             return {
                 enabled: provider.enabled,
+                hidden: provider.hidden ?? false,
                 id: providerId,
                 type: provider.type,
                 models,
-                serviceTiers,
                 ...(provider.enabled
                     ? models.length === 0
                         ? { disabledReason: "no_models" as const }
@@ -72,19 +71,30 @@ export function happyAgentModelCatalogProject(config: DaemonConfig): HappyAgentM
     };
 }
 
-/** Projects the project-owned default compute selection used by new workspaces. */
-export function happyAgentProjectComputeProject(project: Project): HappyAgentProjectComputeState {
+/** Projects what the host holds about a project's new workspaces: compute, setup, first words. */
+export function happyAgentProjectSettingsProject(project: Project): HappyAgentProjectSettingsState {
     const selected = project.settings.defaultWorkspaceCompute;
+    const initialPrompt = project.settings.workspaceInitialPrompt;
     return {
         projectId: project.id as HappyAgentProjectId,
         // Happy Agent versions the project resource rather than maintaining a
         // second counter for one setting. The UI uses this only as opaque
         // confirmed-state metadata.
         generation: project.initialization.attempt,
-        compute:
-            selected.type === "host"
-                ? { type: "local" }
-                : { type: "docker", image: selected.image },
+        // A runner is a place Happy cannot name or choose yet, so a project on
+        // one states nothing here rather than being shown as this machine.
+        ...(selected.type === "runner"
+            ? {}
+            : {
+                  compute:
+                      selected.type === "host"
+                          ? ({ type: "local" } as const)
+                          : ({ type: "docker", image: selected.image } as const),
+              }),
+        // An older daemon does not report the list; nothing is shown rather than
+        // a guess.
+        setupCommands: project.workspaceSetupCommands ?? [],
+        ...(initialPrompt === undefined || initialPrompt === null ? {} : { initialPrompt }),
     };
 }
 
@@ -92,6 +102,17 @@ export function happyAgentComputeRequest(
     compute: HappyAgentProjectCompute | undefined,
 ): { readonly type: "host" } | { readonly type: "docker"; readonly image: string } {
     return compute?.type === "docker" ? { type: "docker", image: compute.image } : { type: "host" };
+}
+
+/** The whole settings body the host replaces: compute, and the first message or `null` for none. */
+export function happyAgentProjectSettingsRequest(settings: HappyAgentProjectSettingsInput): {
+    readonly defaultWorkspaceCompute: ReturnType<typeof happyAgentComputeRequest>;
+    readonly workspaceInitialPrompt: string | null;
+} {
+    return {
+        defaultWorkspaceCompute: happyAgentComputeRequest(settings.compute),
+        workspaceInitialPrompt: settings.initialPrompt ?? null,
+    };
 }
 
 export function happyAgentGitChangeProject(change: GitFileChange): HappyAgentGitChangedFile {

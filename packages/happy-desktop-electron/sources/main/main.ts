@@ -5,6 +5,8 @@ import {
     ipcMain,
     Menu,
     nativeTheme,
+    powerSaveBlocker,
+    protocol,
     screen,
     session as electronSession,
     shell,
@@ -16,6 +18,7 @@ import {
     type WebContents,
 } from "electron";
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DesktopRuntime } from "./desktopRuntime";
@@ -38,8 +41,10 @@ import {
     buildIdentityArgument,
     debugMetricsArgument,
     desktopIpc,
+    happyArtifactPartition,
     happyHtmlPreviewPartition,
     mediaPreviewArgument,
+    liveWindowArgument,
     mediaPreviewView,
     type DesktopBrowserProxyTarget,
     type DesktopBrowserStatus,
@@ -67,11 +72,21 @@ import {
 import { localHappyAgentConnectorCreate, localRuntimeProbe } from "./localHappyAgent";
 import { LocalOnboarding } from "./localOnboarding";
 import { legacyCliConnectorCreate } from "./legacyCliConnect";
+import { legacyCliManagementCreate } from "./legacyCliManagement";
 import {
     desktopBrowserCommandValidate,
     desktopBrowserProxyTargetValidate,
 } from "./happyAgentIpcValidation";
 import { htmlPreviewProxyCreate, type HtmlPreviewProxyHandle } from "./htmlPreviewProxy";
+import { artifactSiteScheme, artifactSitesCreate, type ArtifactSiteHandle } from "./artifactSite";
+import { artifactNetworkProxyCreate, type ArtifactNetworkProxyHandle } from "./artifactNetwork";
+import {
+    ArtifactGuests,
+    artifactGuestAttach,
+    artifactSessionConfigure,
+    artifactWebPreferencesEnforce,
+    artifactWebviewAdmitted,
+} from "./artifactBrowser";
 import { happyAgentRendererOrigin } from "./happyAgentRendererProxy";
 import {
     happyAgentRendererSessionCreate,
@@ -263,7 +278,8 @@ nativeTheme.themeSource = "system";
 // Keep them from exhausting Chromium's per-host sockets and starving API requests.
 // Only that origin: lifting the limit for 127.0.0.1 also unthrottles the Vite
 // development server, whose cold module graph then overflows the loopback
-// listen backlog and resets connections, leaving the window blank.
+// listen backlog and resets connections, leaving the window blank. CORS
+// preflights never get this exemption, so the main window sends none.
 app.commandLine.appendSwitch("ignore-connections-limit", "happy-agent");
 // The exact virtual origin is local to Electron's authenticated proxy. Unlike
 // localhost, this requested hostname is not inherently trustworthy to Chromium;
@@ -275,6 +291,15 @@ app.commandLine.appendSwitch(
 // Never resolve this private origin through DNS, including if proxy setup fails.
 app.commandLine.appendSwitch("host-resolver-rules", "MAP happy-agent ~NOTFOUND");
 app.commandLine.appendSwitch("disable-quic");
+// An artifact version is served as a site of its own, so its page's relative
+// references resolve and its storage is its own origin's. Only the artifact
+// partition's session answers the scheme; everywhere else it is unknown.
+protocol.registerSchemesAsPrivileged([
+    {
+        scheme: artifactSiteScheme,
+        privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+    },
+]);
 app.commandLine.appendSwitch("force-webrtc-ip-handling-policy", "disable_non_proxied_udp");
 if (desktopDebugEnabled) {
     // This branch is unavailable in packaged builds. Chromium's raw CDP server
@@ -308,6 +333,9 @@ let desktopUpdater: DesktopUpdater | undefined;
 /** Each workspace keeps its own network profile, including while its tabs are hidden. */
 const browserProxies = new Map<string, HappyAgentServiceBrowser>();
 let htmlPreviewProxy: HtmlPreviewProxyHandle | undefined;
+let artifactSites: ArtifactSiteHandle | undefined;
+let artifactGuests: ArtifactGuests | undefined;
+let artifactNetworkProxy: ArtifactNetworkProxyHandle | undefined;
 let browserProxyConnectionId: number | undefined;
 let browserProxyOperation = Promise.resolve();
 // Automation needs a real laid-out window without taking focus from the work
@@ -512,6 +540,7 @@ function onboardingSenderRequire(sender: Electron.WebContents): void {
 }
 
 const legacyCli = legacyCliConnectorCreate(() => daemonController.launchEnvironment());
+const legacyCliManagement = legacyCliManagementCreate(() => daemonController.launchEnvironment());
 
 function legacyCliSenderCurrent(event: Electron.IpcMainInvokeEvent): () => boolean {
     onboardingSenderRequire(event.sender);
@@ -690,8 +719,43 @@ function htmlPreviewUrl(candidate: string): string | undefined {
     }
 }
 
+function artifactSessionGet() {
+    return electronSession.fromPartition(happyArtifactPartition, { cache: false });
+}
+
+/**
+ * Starts serving HTML artifacts. Without its network proxy the partition still
+ * serves the artifact's own files and simply has no route to the web.
+ */
+async function artifactSessionStart(): Promise<void> {
+    const sites = artifactSitesCreate();
+    artifactNetworkProxy = await artifactNetworkProxyCreate().catch(() => undefined);
+    artifactGuests = new ArtifactGuests(sites);
+    await artifactSessionConfigure(
+        artifactSessionGet(),
+        sites,
+        artifactGuests,
+        artifactNetworkProxy?.port,
+    );
+    artifactSites = sites;
+}
+
+app.on("select-client-certificate", (event, webContents, _url, _list, callback) => {
+    // An artifact page never presents one of this machine's certificates.
+    if (webContents.session !== artifactSessionGet()) return;
+    event.preventDefault();
+    callback();
+});
+
 app.on("login", (event, _webContents, _details, authInfo, callback) => {
     if (!authInfo.isProxy || authInfo.host !== "127.0.0.1") return;
+    if (authInfo.port === artifactNetworkProxy?.port) {
+        event.preventDefault();
+        if (_webContents?.session === artifactSessionGet())
+            callback(artifactNetworkProxy.username, artifactNetworkProxy.password);
+        else callback();
+        return;
+    }
     // Chromium's ws:// CONNECT uses proxy login before its inner Upgrade can
     // carry request-bound admission. Only the exact owning guest may obtain it.
     for (const browser of browserProxies.values()) {
@@ -710,6 +774,14 @@ app.on("login", (event, _webContents, _details, authInfo, callback) => {
 
 function browserGuestAttach(window: BrowserWindow): void {
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+        if (params.partition === happyArtifactPartition) {
+            if (!artifactSites || !artifactWebviewAdmitted(params, artifactSites)) {
+                event.preventDefault();
+                return;
+            }
+            artifactWebPreferencesEnforce(webPreferences);
+            return;
+        }
         const previewGuest = params.partition === happyHtmlPreviewPartition;
         const allowed = previewGuest
             ? htmlPreviewUrl(params.src) !== undefined
@@ -753,6 +825,15 @@ function browserGuestAttach(window: BrowserWindow): void {
                 type,
             } satisfies DesktopGuestKeyEvent);
         });
+        if (guest.session === artifactSessionGet()) {
+            if (!artifactGuests) {
+                guest.close();
+                return;
+            }
+            artifactGuestAttach(guest, artifactGuests, (url) => void shell.openExternal(url));
+            htmlPreviewLifecyclePublish(window, guest);
+            return;
+        }
         if (guest.session === htmlPreviewSessionGet()) {
             // A preview is one page of one file. Following a link out of it, or
             // opening a window from it, is browsing, and browsing is the browser
@@ -926,32 +1007,43 @@ function localWindowCreate(bounds?: DesktopWindowBounds) {
     const rendererPath = join(dirname, "renderer", "index.html");
     const hostedUrl = hostedOrigin ? `${hostedOrigin}/?desktop=1&mode=local` : undefined;
     const rendererUrl = hostedUrl ?? developmentUrl ?? pathToFileURL(rendererPath).toString();
+    const liveWindowId = randomUUID();
     const window = new BrowserWindow({
         ...windowOptions(bounds, {
             // The build a window runs is fixed for its whole life, so the preload
             // is handed it as a launch argument rather than made to ask for it:
             // the shell can then render its identity in the first frame.
-            ...(buildIdentity
-                ? {
-                      additionalArguments: [
-                          `${buildIdentityArgument}${JSON.stringify(buildIdentity)}`,
-                          ...(desktopDebugEnabled ? [debugMetricsArgument] : []),
-                      ],
-                  }
-                : desktopDebugEnabled
-                  ? { additionalArguments: [debugMetricsArgument] }
-                  : {}),
+            additionalArguments: [
+                `${liveWindowArgument}${liveWindowId}`,
+                ...(buildIdentity
+                    ? [`${buildIdentityArgument}${JSON.stringify(buildIdentity)}`]
+                    : []),
+                ...(desktopDebugEnabled ? [debugMetricsArgument] : []),
+            ],
             contextIsolation: true,
             nodeIntegration: false,
             preload: join(dirname, "preload.cjs"),
             sandbox: true,
             webviewTag: true,
+            // Each Happy Agent connection holds an update stream open on
+            // happy-agent, and Chromium gives one host six sockets.
+            // ignore-connections-limit lifts that for this window's requests,
+            // but not for the CORS preflights in front of them, so six
+            // connections left every preflighted request waiting for another to
+            // free a socket: seconds after a click, minutes when idle. Without
+            // web security there are no preflights. That holds for every origin
+            // in this window, not just happy-agent; guests keep web security
+            // (will-attach-webview), and insecure content stays blocked.
+            webSecurity: false,
+            allowRunningInsecureContent: false,
         }),
     });
     happyAgentRendererSession?.windowRegister(
         window.webContents,
         rendererUrl,
         developmentUrl !== undefined || hostedOrigin !== undefined,
+        false,
+        liveWindowId,
     );
     if (desktopDebugEnabled) {
         desktopDebugLog(`renderer window created; loading ${rendererUrl}`);
@@ -989,9 +1081,16 @@ function localWindowCreate(bounds?: DesktopWindowBounds) {
     }
     windowTitleHold(window);
     windowGeometryRemember(window);
+    // Where a plain click on a web link goes is the reader's choice, read here
+    // because this is the one door every such click passes through — a message,
+    // a sidebar link, an MCP app asking for one. A link's own menu bypasses it
+    // by naming its destination outright.
     window.webContents.setWindowOpenHandler(({ url }) => {
-        if (browserWebUrl(url)) browserOpenPublish(window, url);
-        else if (url.startsWith("mailto:")) void shell.openExternal(url);
+        const web = browserWebUrl(url);
+        if (web !== undefined) {
+            if (desktopConfigStore.get().linkOpen === "browser") void shell.openExternal(web);
+            else browserOpenPublish(window, web);
+        } else if (url.startsWith("mailto:")) void shell.openExternal(url);
         return { action: "deny" };
     });
     browserGuestAttach(window);
@@ -1403,6 +1502,11 @@ void app
         );
         htmlPreviewProxy = await htmlPreviewProxyCreate();
         await htmlPreviewSessionConfigure();
+        // An artifact the host cannot serve is still shown as a static preview,
+        // so this can never be what keeps the window from opening.
+        await artifactSessionStart().catch((error: unknown) =>
+            desktopDebugError("HTML artifacts will be shown as static previews", error),
+        );
         const desktopRoot = join(app.getPath("userData"), "desktop");
         desktopWindowStateStore = await DesktopWindowStateStore.create(
             join(desktopRoot, "window-state.json"),
@@ -1454,6 +1558,7 @@ void app
                 // build-owned origin receives CORS access.
                 ...(rendererOrigin ? { rendererOrigin } : {}),
                 ...(htmlPreviewProxy ? { htmlPreview: htmlPreviewProxy } : {}),
+                ...(artifactSites ? { artifactSite: artifactSites } : {}),
                 ...(desktopDebugEnabled ? { debug: desktopDebugLog } : {}),
             },
         );
@@ -1550,6 +1655,14 @@ void app
         });
         daemonController.runtimeSet(runtime.get());
         ipcMain.handle(desktopIpc.runtimeGet, () => runtime.get());
+        ipcMain.handle(desktopIpc.liveMicrophoneStart, (event, input: unknown) => {
+            if (!happyAgentRendererSession)
+                throw new Error("Native GPT-Live audio is unavailable.");
+            happyAgentRendererSession.liveMicrophoneStart(event.sender, event.senderFrame, input);
+        });
+        ipcMain.handle(desktopIpc.liveMicrophoneRevoke, (event) => {
+            happyAgentRendererSession?.liveMicrophoneRevoke(event.sender, event.senderFrame);
+        });
         ipcMain.handle(desktopIpc.desktopConfigGet, () => desktopConfigStore.get());
         ipcMain.handle(desktopIpc.desktopConfigWrite, async (_event, config: unknown) => {
             await desktopConfigStore.write(config);
@@ -1603,7 +1716,7 @@ void app
         });
         ipcMain.handle(desktopIpc.daemonCheck, (event) => {
             desktopDaemonSenderRequire(event.sender);
-            return daemonController.checkForUpdate();
+            return daemonController.checkForUpdate("full");
         });
         ipcMain.handle(desktopIpc.daemonInstall, (event) => {
             desktopDaemonSenderRequire(event.sender);
@@ -1732,6 +1845,25 @@ void app
             const count = dockUnreadCountRead(raw);
             if (count !== undefined) dockBadgeApply(count);
         });
+        // One-way like the Dock mark: the window says whether the machine should
+        // stay up and the shell holds or releases the sleep assertion. Only the
+        // presented window may say so, and a non-boolean is dropped rather than
+        // guessed. `prevent-app-suspension` keeps the system running while
+        // letting the display sleep, which is what "keep the computer awake"
+        // means on every platform Electron runs on; the assertion dies with the
+        // process, so quitting never leaves a machine that cannot sleep.
+        let keepAwakeBlocker: number | undefined;
+        ipcMain.on(desktopIpc.keepAwakeSet, (event, raw: unknown) => {
+            const presenting = windowLifecycle.get();
+            if (!presenting || presenting.webContents !== event.sender) return;
+            if (typeof raw !== "boolean") return;
+            if (raw && keepAwakeBlocker === undefined)
+                keepAwakeBlocker = powerSaveBlocker.start("prevent-app-suspension");
+            else if (!raw && keepAwakeBlocker !== undefined) {
+                powerSaveBlocker.stop(keepAwakeBlocker);
+                keepAwakeBlocker = undefined;
+            }
+        });
         ipcMain.handle(desktopIpc.mediaPreviewOpen, (event, raw: unknown) => {
             // Only the window this shell is presenting opens a preview window, so
             // a superseded renderer still shutting down cannot put one on screen
@@ -1783,6 +1915,12 @@ void app
         ipcMain.handle(desktopIpc.legacyCliConnect, (event) =>
             legacyCli.connect(legacyCliSenderCurrent(event)),
         );
+        ipcMain.handle(desktopIpc.legacyCliStatus, (event) =>
+            legacyCliManagement.read(legacyCliSenderCurrent(event)),
+        );
+        ipcMain.handle(desktopIpc.legacyCliReset, (event, request) =>
+            legacyCliManagement.reset(request, legacyCliSenderCurrent(event)),
+        );
         ipcMain.handle(desktopIpc.onboardingProjectChoose, (event) => {
             onboardingSenderRequire(event.sender);
             return onboarding.projectChoose();
@@ -1799,21 +1937,9 @@ void app
         });
         ipcMain.handle(desktopIpc.onboardingStepBack, (event, step: unknown) => {
             onboardingSenderRequire(event.sender);
-            if (step !== "setup" && step !== "subscriptions" && step !== "profile")
+            if (step !== "setup" && step !== "subscriptions")
                 throw new Error("That is not a first-run setup step.");
             onboarding.stepBack(step);
-        });
-        ipcMain.handle(desktopIpc.onboardingProfileCreate, (event, input: unknown) => {
-            onboardingSenderRequire(event.sender);
-            if (
-                !input ||
-                typeof input !== "object" ||
-                typeof (input as { name?: unknown }).name !== "string" ||
-                typeof (input as { email?: unknown }).email !== "string"
-            )
-                throw new Error("That profile is invalid.");
-            const profile = input as { readonly email: string; readonly name: string };
-            return onboarding.profileCreate({ email: profile.email, name: profile.name });
         });
         ipcMain.handle(desktopIpc.runtimeStart, (_event, request: unknown) =>
             runtime.start(desktopStartRequestValidate(request)),
@@ -1873,6 +1999,9 @@ app.on("before-quit", (event) => {
         browserProxies.clear();
         htmlPreviewProxy?.close();
         htmlPreviewProxy = undefined;
+        artifactNetworkProxy?.close();
+        artifactNetworkProxy = undefined;
+        artifactSites?.close();
         happyAgentRendererSession?.close();
         happyAgentRendererSession = undefined;
         onboarding?.[Symbol.dispose]();

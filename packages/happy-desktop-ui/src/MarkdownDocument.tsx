@@ -16,6 +16,12 @@ import Markdown, {
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { CodeBlock } from "./CodeBlock";
+import {
+    fileReferenceFragment,
+    fileReferenceSplit,
+    type FileOpenHandler,
+    type FileReference,
+} from "./fileReference";
 import { markdownFence, markdownFenceIsMermaid } from "./markdownFence";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { ScrollArea } from "./Scrollbar";
@@ -43,7 +49,26 @@ export type MarkdownDocumentProps = {
      * links render inert, because a document viewer that cannot open its
      * neighbours should say so by not offering the click.
      */
-    onFileOpen?: (path: string) => void;
+    onFileOpen?: FileOpenHandler;
+    /**
+     * Resolves the document's own relative references, for a document that is
+     * one file of a bundle whose other files it can show — an artifact's entry
+     * beside its pictures. Without it a picture stays its label and a relative
+     * link is read as a workspace path.
+     */
+    references?: MarkdownDocumentReferences;
+};
+
+/**
+ * How a document that is one file of a bundle reaches the rest of it. Both
+ * answer `undefined` for a reference that names nothing in the bundle, which
+ * leaves it inert rather than letting it reach anywhere else.
+ */
+export type MarkdownDocumentReferences = {
+    /** The address a picture the document shows loads from. */
+    readonly image: (src: string) => string | undefined;
+    /** The file of the bundle a link names, as `onFileOpen` receives it. */
+    readonly link: (href: string) => string | undefined;
 };
 
 /** Schemes a document link may navigate the browser to. */
@@ -65,24 +90,17 @@ function webHref(value: unknown): string | undefined {
 }
 
 /**
- * A `path:line` or `path:line:column` target, reduced to the file it names.
+ * The file this link points at and the lines it points at within it, for a link
+ * that is not a web address: a relative path, an absolute path, or a `file:`
+ * URL. A bare `#fragment` is in-document navigation and names no file, and a
+ * path ending in `/` names a directory rather than something to open.
  *
- * Naming a line is how everything that writes about code refers to it, and a
- * reader who clicks one is asking for that file. Carrying the position through
- * as part of the name left the whole reference pointing at nothing openable, so
- * the position is dropped here — the file is what a viewer can show.
+ * Naming a line is how everything that writes about code refers to it, so
+ * `Store.ts:120-148` and a pasted `Store.ts#L120-L148` both resolve to the file
+ * and the region. The position is split off the name rather than dropped: what
+ * a viewer opens is the file, and what it scrolls to is the region.
  */
-function withoutPosition(path: string): string {
-    return path.replace(/:\d+(?::\d+)?$/u, "");
-}
-
-/**
- * The file this link points at, for a link that is not a web address: a
- * relative path, an absolute path, or a `file:` URL. A bare `#fragment` is
- * in-document navigation and names no file, and a path ending in `/` names a
- * directory rather than something to open.
- */
-export function markdownDocumentLinkPath(value: unknown): string | undefined {
+export function markdownDocumentLinkTarget(value: unknown): FileReference | undefined {
     if (typeof value !== "string") return undefined;
     const trimmed = value.trim();
     if (trimmed.length === 0 || trimmed.startsWith("#") || trimmed.startsWith("//"))
@@ -93,26 +111,27 @@ export function markdownDocumentLinkPath(value: unknown): string | undefined {
         try {
             const url = new URL(trimmed);
             if (url.hostname !== "" && url.hostname !== "localhost") return undefined;
-            const file = withoutPosition(decodeURIComponent(url.pathname)).replace(
-                /^\/([a-z]:\/)/iu,
-                "$1",
+            const reference = fileReferenceSplit(
+                decodeURIComponent(url.pathname).replace(/^\/([a-z]:\/)/iu, "$1"),
             );
-            return file.length > 0 && !file.endsWith("/") ? file : undefined;
+            if (reference.path.length === 0 || reference.path.endsWith("/")) return undefined;
+            return referenceWithFragment(reference, url.hash.slice(1));
         } catch {
             return undefined;
         }
     }
-    // A link's own fragment and query are addressing within the target
-    // document; the file itself is what a viewer can open.
-    let path: string;
+    // A link's own query is addressing within the target document; its fragment
+    // may still be naming lines, which is what a copied code-host address does.
+    const [addressed = "", fragment = ""] = splitFragment(trimmed);
+    let reference: FileReference;
     try {
-        path = withoutPosition(decodeURIComponent(trimmed.split(/[#?]/u)[0] ?? "")).replaceAll(
-            "\\",
-            "/",
+        reference = fileReferenceSplit(
+            decodeURIComponent(addressed.split("?")[0] ?? "").replaceAll("\\", "/"),
         );
     } catch {
         return undefined;
     }
+    const path = reference.path;
     // eslint-disable-next-line no-control-regex -- Control characters are deliberately rejected in local file links.
     if (path.startsWith("//") || /[\u0000-\u001f]/u.test(path)) return undefined;
     // A colon before a line number is not a scheme separator, so the position
@@ -121,7 +140,30 @@ export function markdownDocumentLinkPath(value: unknown): string | undefined {
     // still prefixed by a scheme after that really is one, and no viewer here
     // opens it.
     if (!/^[a-z]:\//iu.test(path) && /^[a-z][a-z0-9+.-]*:/iu.test(path)) return undefined;
-    return path.length > 0 && !path.endsWith("/") ? path : undefined;
+    if (path.length === 0 || path.endsWith("/")) return undefined;
+    return referenceWithFragment(reference, fragment);
+}
+
+/** The address and its fragment, split at the first `#`. */
+function splitFragment(value: string): [string, string] {
+    const cut = value.indexOf("#");
+    return cut === -1 ? [value, ""] : [value.slice(0, cut), value.slice(cut + 1)];
+}
+
+/**
+ * The reference with a code-host fragment applied. A region already written
+ * into the path wins: it is the more specific thing the author typed, and a
+ * link can only mean one region.
+ */
+function referenceWithFragment(reference: FileReference, fragment: string): FileReference {
+    if (reference.selection !== undefined || fragment.length === 0) return reference;
+    const selection = fileReferenceFragment(fragment);
+    return selection === undefined ? reference : { ...reference, selection };
+}
+
+/** The file a link points at, for callers with nowhere to put a region. */
+export function markdownDocumentLinkPath(value: unknown): string | undefined {
+    return markdownDocumentLinkTarget(value)?.path;
 }
 
 // Preserve file targets for our explicit viewer callback. react-markdown's
@@ -133,8 +175,9 @@ export const markdownFileUrlTransform: UrlTransform = (url, key, node) =>
         ? url
         : defaultUrlTransform(url);
 
-const FileOpenContext = createContext<((path: string) => void) | undefined>(undefined);
+const FileOpenContext = createContext<FileOpenHandler | undefined>(undefined);
 const MarkdownCacheKeyContext = createContext<string | undefined>(undefined);
+const MarkdownReferencesContext = createContext<MarkdownDocumentReferences | undefined>(undefined);
 
 /**
  * A link in a document. A web address opens in a fresh browsing context severed
@@ -143,6 +186,7 @@ const MarkdownCacheKeyContext = createContext<string | undefined>(undefined);
  */
 const DocumentLink = ({ children, href }: ComponentPropsWithoutRef<"a"> & ExtraProps) => {
     const onFileOpen = useContext(FileOpenContext);
+    const references = useContext(MarkdownReferencesContext);
     const web = webHref(href);
     if (web !== undefined)
         return (
@@ -156,8 +200,34 @@ const DocumentLink = ({ children, href }: ComponentPropsWithoutRef<"a"> & ExtraP
                 {children}
             </a>
         );
-    const path = markdownDocumentLinkPath(href);
-    if (path === undefined || onFileOpen === undefined)
+    // A document that is one file of a bundle names its neighbours relative to
+    // itself, so the bundle decides what a link means; nothing it does not
+    // recognize is read as a path on this machine instead.
+    if (references !== undefined) {
+        const path = typeof href === "string" ? references.link(href) : undefined;
+        if (path === undefined || onFileOpen === undefined)
+            return (
+                <span
+                    className="happy-markdown-document__link"
+                    data-happy-desktop-ui="markdown-document-link"
+                >
+                    {children}
+                </span>
+            );
+        return (
+            <button
+                className="happy-markdown-document__link happy-markdown-document__link--file"
+                data-happy-desktop-ui="markdown-document-file-link"
+                data-path={path}
+                onClick={() => onFileOpen(path)}
+                type="button"
+            >
+                {children}
+            </button>
+        );
+    }
+    const target = markdownDocumentLinkTarget(href);
+    if (target === undefined || onFileOpen === undefined)
         return (
             <span
                 className="happy-markdown-document__link"
@@ -170,8 +240,8 @@ const DocumentLink = ({ children, href }: ComponentPropsWithoutRef<"a"> & ExtraP
         <button
             className="happy-markdown-document__link happy-markdown-document__link--file"
             data-happy-desktop-ui="markdown-document-file-link"
-            data-path={path}
-            onClick={() => onFileOpen(path)}
+            data-path={target.path}
+            onClick={() => onFileOpen(target.path, target.selection)}
             type="button"
         >
             {children}
@@ -183,9 +253,24 @@ const DocumentLink = ({ children, href }: ComponentPropsWithoutRef<"a"> & ExtraP
  * A document image renders as a labelled link rather than an `<img>`: the bytes
  * of a relative image live in a workspace this viewer has no reader for, and a
  * remote one would make merely opening a document fetch from its author's host.
+ * A document whose bundle is readable shows the pictures that are part of it,
+ * and only those.
  */
 const DocumentImage = ({ alt, src }: ComponentPropsWithoutRef<"img"> & ExtraProps) => {
+    const references = useContext(MarkdownReferencesContext);
     const label = alt?.trim() || (typeof src === "string" ? src : "") || "image";
+    const url =
+        references !== undefined && typeof src === "string" ? references.image(src) : undefined;
+    if (url !== undefined)
+        return (
+            <img
+                alt={alt ?? ""}
+                className="happy-markdown-document__picture"
+                data-happy-desktop-ui="markdown-document-picture"
+                loading="lazy"
+                src={url}
+            />
+        );
     return (
         <span
             className="happy-markdown-document__image"
@@ -299,6 +384,7 @@ export function MarkdownDocument(props: MarkdownDocumentProps) {
         "text",
         "cacheKey",
         "onFileOpen",
+        "references",
     ]);
     return (
         <ScrollArea
@@ -314,15 +400,17 @@ export function MarkdownDocument(props: MarkdownDocumentProps) {
                 data-happy-desktop-ui="markdown-document-body"
             >
                 <MarkdownCacheKeyContext.Provider value={local.cacheKey}>
-                    <FileOpenContext.Provider value={local.onFileOpen}>
-                        <MemoMarkdown
-                            components={documentComponents}
-                            urlTransform={markdownFileUrlTransform}
-                            remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-                        >
-                            {local.text}
-                        </MemoMarkdown>
-                    </FileOpenContext.Provider>
+                    <MarkdownReferencesContext.Provider value={local.references}>
+                        <FileOpenContext.Provider value={local.onFileOpen}>
+                            <MemoMarkdown
+                                components={documentComponents}
+                                urlTransform={markdownFileUrlTransform}
+                                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                            >
+                                {local.text}
+                            </MemoMarkdown>
+                        </FileOpenContext.Provider>
+                    </MarkdownReferencesContext.Provider>
                 </MarkdownCacheKeyContext.Provider>
             </article>
         </ScrollArea>

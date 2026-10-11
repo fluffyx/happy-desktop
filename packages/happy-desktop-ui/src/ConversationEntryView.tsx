@@ -1,10 +1,14 @@
 import { type CSSProperties, type ReactNode } from "react";
+import type { FileOpenHandler } from "./fileReference";
+import type { LinkOpenHandler, LinkOpenPlacement } from "./MessageMarkdown";
+import type { MessageReferences } from "./messageReferences";
 import { thumbhashDataUrl } from "./thumbhashDataUrl";
 import type {
     AgentTurnTraceSummary,
     ConversationAttachment,
     ConversationAuthor,
     ConversationEntry,
+    ConversationErrorAssistance,
     ConversationToolCall,
     UserError,
 } from "happy-desktop-state";
@@ -28,6 +32,8 @@ type ConversationLinkedAttachment = Extract<ConversationAttachment, { kind: "lin
 
 export type ConversationEntryViewProps = {
     entry: ConversationEntry;
+    errorAssistance?: ConversationErrorAssistance;
+    onErrorAssistanceRequest?: (entryId: string) => void;
     /** Identity heading for the first activity in an agent turn. */
     activityAuthor?: ConversationAuthor;
     /** Identity id of the reader, so their own messages take the own treatment. */
@@ -65,7 +71,13 @@ export type ConversationEntryViewProps = {
     /** Reference epoch millis used by live delegated-agent timers. */
     now?: number;
     /** Opens a workspace file named by a tool call or linked from a message. */
-    onFileOpen?: (path: string) => void;
+    onFileOpen?: FileOpenHandler;
+    /** Opens a web link from a message where its context menu asked for it. */
+    onLinkOpen?: LinkOpenHandler;
+    /** Which of the two places a plain click on a link goes, marked in its menu. */
+    linkOpenDefault?: LinkOpenPlacement;
+    /** What the Happy references a message names read as, and where opening one goes. */
+    references?: MessageReferences;
     /** Disables request controls while a prior submission is in flight. */
     requestPending?: boolean;
     /** Last failed submission for this request. */
@@ -317,6 +329,12 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
         const notice =
             entry.level === "error" || entry.retry !== undefined ? (
                 <ConversationErrorCard
+                    assistance={props.errorAssistance}
+                    onAssistanceRequest={
+                        props.onErrorAssistanceRequest
+                            ? () => props.onErrorAssistanceRequest!(entry.id)
+                            : undefined
+                    }
                     className={props.activityAuthor ? undefined : props.className}
                     data-testid={props["data-testid"]}
                     reason={entry.text}
@@ -427,6 +445,9 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
                     : undefined
             }
             {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+            {...(props.onLinkOpen ? { onLinkOpen: props.onLinkOpen } : {})}
+            {...(props.linkOpenDefault ? { linkOpenDefault: props.linkOpenDefault } : {})}
+            {...(props.references ? { references: props.references } : {})}
             own={own}
             style={props.style}
             time={messageTime(message.createdAt)}

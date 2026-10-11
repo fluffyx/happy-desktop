@@ -18,8 +18,14 @@ export {
     type HappyAgentVersionProviderProps,
 } from "./HappyAgentVersionProvider";
 export {
+    type AppHappyAgentUpdateProgress,
+    type AppHappyAgentUpdateSnapshot,
+    type AppHappyAgentUpdateStore,
+} from "./agentUpdate";
+export {
     type AppHappyAgentDaemonInstall,
     type AppHappyAgentDaemonRestartReason,
+    type AppHappyAgentDaemonRestartStep,
     type AppHappyAgentDaemonSnapshot,
     type AppHappyAgentDaemonStore,
     type AppHappyAgentDaemonVersion,
@@ -42,7 +48,9 @@ export {
     happyAgentMemoryHistoryCreate,
     happyAgentRouterConversationOpen,
     happyAgentRouterGroupOpen,
+    happyAgentRouterWorkspaceVisible,
     happyAgentRouterGroupForget,
+    happyAgentRouterSubtasksForget,
     happyAgentRouterCreate,
     type HappyAgentRouter,
     type HappyAgentRouterContext,
@@ -56,3 +64,6 @@ export {
 export { terminalDriverCreate } from "./terminalDriver";
 export { ghosttyEmulatorCreate, type TerminalEmulator } from "./ghosttyTerminal";
 export { happyAgentWelcomeSlides } from "./onboarding/happyAgentWelcomeSlides";
+export { AppGptLivePhone } from "./gptLive/AppGptLivePhone";
+export { gptLiveMediaOpen } from "./gptLive/gptLiveMedia";
+export { gptLiveBrowserTransport } from "./gptLive/gptLiveBrowserTransport";

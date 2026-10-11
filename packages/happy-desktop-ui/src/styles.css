@@ -50,6 +50,7 @@
 @import "./styles/segmented-control.css";
 @import "./styles/audience-toggle.css";
 @import "./styles/dev-build-menu.css";
+@import "./styles/sidebar-keep-awake-menu.css";
 @import "./styles/live-performance.css";
 @import "./styles/banner.css";
 @import "./styles/empty-state.css";
@@ -75,6 +76,7 @@
 @import "./styles/shortcut-sheet.css";
 @import "./styles/lightbox.css";
 @import "./styles/form-row.css";
+@import "./styles/data-disclosure.css";
 @import "./styles/data-table.css";
 @import "./styles/stat-tile.css";
 @import "./styles/status-picker.css";
@@ -83,6 +85,12 @@
 @import "./styles/file-tree.css";
 @import "./styles/file-panel.css";
 @import "./styles/file-browser.css";
+@import "./styles/diff-surface.css";
+@import "./styles/file-family.css";
+@import "./styles/diff-file-title.css";
+@import "./styles/review-file-actions.css";
+@import "./styles/review-comment.css";
+@import "./styles/review-stream.css";
 @import "./styles/file-path-label.css";
 @import "./styles/markdown-document.css";
 @import "./styles/mermaid-diagram.css";
@@ -111,7 +119,7 @@
 @import "./styles/setup-choice.css";
 @import "./styles/setup-assistants.css";
 @import "./styles/setup-command.css";
-@import "./styles/agent-install.css";
+@import "./styles/agent-update-card.css";
 @import "./styles/setup-option-card.css";
 @import "./styles/default-agent-form.css";
 @import "./styles/build-progress-panel.css";
@@ -133,14 +141,19 @@
 @import "./styles/happy-agent-usage.css";
 @import "./styles/happy-agent-activity.css";
 @import "./styles/happy-agent-settings.css";
+@import "./styles/mobile-access-confirmation.css";
 @import "./styles/happy-agent-secret-settings.css";
 @import "./styles/happy-agent-debug-log.css";
 @import "./styles/happy-agent-raw-state.css";
 @import "./styles/happy-agent-usage-settings.css";
 @import "./styles/happy-agent-inbox.css";
+@import "./styles/happy-agent-artifacts.css";
 @import "./styles/happy-agent-project-settings.css";
 @import "./styles/happy-agent-create-bot.css";
+@import "./styles/happy-agent-create-task.css";
 @import "./styles/happy-agent-project-clone-dialog.css";
+@import "./styles/happy-agent-task-browse-dialog.css";
 @import "./styles/workspace-lifecycle-notice.css";
 @import "./styles/connections.css";
 @import "./styles/window-chrome.css";
+@import "./styles/gpt-live-phone.css";

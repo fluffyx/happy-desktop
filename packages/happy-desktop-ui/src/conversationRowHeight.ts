@@ -2,6 +2,7 @@ import {
     entryKey,
     type AgentTurnTraceSummary,
     type ConversationEntry,
+    type ConversationErrorAssistance,
     type ConversationRequest,
 } from "happy-desktop-state";
 import {
@@ -26,9 +27,15 @@ import {
     uiTextNaturalWidth,
     type MessageTextLayoutCache,
 } from "./messageTextLayout";
+import {
+    messageReferencesResolve,
+    messageReferencesSignature,
+    type MessageReferences,
+} from "./messageReferences";
 import { SYSTEM_NOTIFICATION_HEIGHT } from "./systemNotification";
 import { agentTraceMetaStats, agentTraceMetaTitle } from "./agentTraceMeta";
 import { conversationErrorTitle } from "./conversationErrorTitle";
+import { conversationErrorAssistanceText } from "./conversationErrorAssistanceText";
 
 /**
  * Height of one conversation row, computed from the entry and the list's measure
@@ -64,6 +71,13 @@ export type ConversationRowContext = {
     readonly expanded?: boolean;
     /** A live status footer follows the final agent message. */
     readonly liveStatus?: boolean;
+    readonly errorAssistance?: ConversationErrorAssistance;
+    /**
+     * What the Happy references in message bodies read as now. A reference is
+     * laid out as its live title, the words the reader sees, so the row is
+     * sized from the same resolution the body renders.
+     */
+    readonly references?: MessageReferences;
 };
 type CachedRowHeight = { readonly value: number | undefined };
 type Dictionary<T> = Record<string, T | undefined>;
@@ -196,8 +210,8 @@ export const DIVIDER_HEIGHT = 60;
 /** Centered `.happy-system-notice`: 16px padding above and below. */
 const NOTICE_CHROME_CENTER = 32;
 const NOTICE_INSET = 50;
-/** Error card: 14px icon + 20px copy button + two 8px gaps beside the text. */
-const ERROR_TEXT_INSET = 50;
+/** Error card: 14px icon and the 8px gap beside the text. */
+const ERROR_TEXT_INSET = 22;
 /** Error card: 6px vertical padding per side, plus 4px between heading and reason. */
 const ERROR_TEXT_CHROME = 16;
 /* A steering notice keeps the notice row's 16px lead but closes to 4px above the
@@ -350,6 +364,7 @@ export function messageRowHeight(input: {
     readonly bodyVisible: boolean;
     readonly grouped: boolean;
     readonly mermaidEnabled?: boolean;
+    readonly references?: MessageReferences;
     readonly streaming?: boolean;
     readonly trailingExtraWidth: number;
     readonly surface: ConversationSurface;
@@ -368,7 +383,10 @@ export function messageRowHeight(input: {
     return (
         chrome +
         markdownBodyHeight(
-            input.body,
+            /* Rendered from the same resolution `renderMessageMarkdown` makes:
+               every reference as the words it reads as, and a tag still
+               arriving held back. */
+            messageReferencesResolve(input.body, input.references, input.streaming === true),
             measure,
             input.textCache,
             input.trailingExtraWidth,
@@ -537,7 +555,7 @@ export function conversationRowHeight(
                 : entry.activity.kind === "reasoning" && expanded
                   ? REASONING_ACTIVITY_CHROME +
                     markdownBodyHeight(
-                        entry.activity.text,
+                        messageReferencesResolve(entry.activity.text, undefined, false),
                         width - activityInset - 16,
                         cache?.text,
                         0,
@@ -547,7 +565,7 @@ export function conversationRowHeight(
                   : entry.activity.kind === "agentMessage" && expanded
                     ? AGENT_MESSAGE_ACTIVITY_CHROME +
                       markdownBodyHeight(
-                          entry.activity.text,
+                          messageReferencesResolve(entry.activity.text, undefined, false),
                           width - activityInset - 16,
                           cache?.text,
                       )
@@ -608,15 +626,25 @@ export function conversationRowHeight(
                 : 0;
         if (entry.level === "error" || entry.retry !== undefined) {
             const measure = width - (lead > 0 ? AGENT_INSET : 126) - ERROR_TEXT_INSET;
+            const assistance = context.errorAssistance
+                ? conversationErrorAssistanceText(context.errorAssistance)
+                : undefined;
             return rowHeightCached(
                 cache,
                 entry,
-                `error:${String(width)}:${String(lead)}`,
+                `error:${String(width)}:${String(lead)}:${assistance?.label ?? ""}:${assistance?.detail ?? ""}`,
                 () =>
                     lead +
                     ERROR_TEXT_CHROME +
                     errorTextHeight(conversationErrorTitle(entry), measure, cache?.text, true) +
-                    errorTextHeight(entry.text, measure, cache?.text),
+                    errorTextHeight(entry.text, measure, cache?.text) +
+                    (assistance
+                        ? 4 +
+                          errorTextHeight(assistance.label, measure, cache?.text) +
+                          (assistance.detail
+                              ? 4 + errorTextHeight(assistance.detail, measure, cache?.text)
+                              : 0)
+                        : 0),
             );
         }
         return rowHeightCached(
@@ -676,6 +704,8 @@ export function conversationRowHeight(
         traceCollapsible ? "trace" : "plain",
         resumesAfterActivity ? "resumed" : "continuous",
         precedesActivity ? "continues" : closedByStatus ? "closing" : "open",
+        // What the body's references read as: a title changing re-sizes the row.
+        messageReferencesSignature(message.text, context.references),
     ].join(":");
     return rowHeightCached(cache, entry, cacheKey, () => {
         const time = messageTimeSample(message.createdAt);
@@ -684,6 +714,7 @@ export function conversationRowHeight(
             bodyVisible: hasBody || message.generationStatus !== undefined || traceCollapsible,
             grouped,
             mermaidEnabled: message.generationStatus !== "streaming",
+            ...(context.references ? { references: context.references } : {}),
             streaming: message.generationStatus === "streaming",
             surface: context.surface,
             textCache: cache?.text,

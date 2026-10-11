@@ -17,7 +17,7 @@ import { compactCount, changeCountLabel } from "./countText";
 import { haptic } from "./haptics";
 import { CountBadge, KeyCap } from "./Badge";
 import { Button } from "./Button";
-import { happyLogoBlackUrl } from "./assets";
+import { happyWordmarkLightUrl } from "./assets";
 import { Icon, type IconName } from "./Icon";
 import {
     commandShortcut,
@@ -37,7 +37,7 @@ export type SidebarItemAction = {
     /** Keeps the control visible in its lane while refusing an unavailable action. */
     disabled?: boolean;
     reveal?: "hover";
-    /** Command-N discovery for the current project's new-workspace control. */
+    /** Shift-Command-N discovery for the current project's new-workspace control. */
     shortcut?: KeyboardShortcut;
 };
 export type SidebarItem = {
@@ -208,13 +208,25 @@ export type SidebarSectionAction = {
      * default because that is what a heading control has always done here.
      */
     reveal?: "hover" | "always";
+    /** The window chord that does the same thing, shown under the control on hover. */
+    shortcut?: KeyboardShortcut;
 };
 
-/** Which control in a section reported an act: its heading, or its empty state. */
-export type SidebarSectionActionSource = "heading" | "empty";
+/**
+ * Which control in a section reported an act: its heading, the heading's
+ * secondary control, or its empty state.
+ */
+export type SidebarSectionActionSource = "heading" | "secondary" | "empty";
 
 export type SidebarSection = {
     action?: SidebarSectionAction;
+    /**
+     * A second heading control, drawn just before `action` and reported as
+     * `secondary`. A hover-revealed one shows while the pointer is anywhere over
+     * the section rather than only its heading, and while keyboard focus is
+     * inside it, so it can be found from the rows it acts on.
+     */
+    secondaryAction?: SidebarSectionAction;
     empty?: {
         /**
          * The one act an empty section offers, reported through
@@ -2025,12 +2037,12 @@ export function Sidebar(props: SidebarProps) {
                     <div className="happy-sidebar__heading" data-happy-desktop-ui="sidebar-heading">
                         {local.brand ? (
                             <img
-                                alt=""
-                                aria-hidden="true"
-                                className="happy-brand-logo happy-sidebar__brand-logo"
+                                alt="Happy Engineering"
+                                aria-label="Happy Engineering"
+                                className="happy-wordmark happy-sidebar__brand-logo"
                                 data-happy-desktop-ui="sidebar-brand-logo"
                                 draggable={false}
-                                src={happyLogoBlackUrl}
+                                src={happyWordmarkLightUrl}
                             />
                         ) : local.title !== undefined ? (
                             <span className="happy-sidebar__title-row">
@@ -2210,32 +2222,74 @@ export function Sidebar(props: SidebarProps) {
                                         >
                                             {section.label}
                                         </span>
-                                        {section.action
-                                            ? ((action) => (
-                                                  <button
-                                                      aria-busy={action.busy ? true : undefined}
-                                                      aria-label={action.label}
-                                                      className="happy-sidebar__section-action"
-                                                      data-busy={action.busy ? "" : undefined}
-                                                      data-happy-desktop-ui="sidebar-section-action"
-                                                      data-reveal={action.reveal ?? "hover"}
-                                                      disabled={action.busy || action.disabled}
-                                                      onClick={() =>
-                                                          local.onSectionAction?.(
-                                                              section.id,
-                                                              "heading",
-                                                          )
-                                                      }
-                                                      type="button"
-                                                  >
-                                                      {action.busy ? (
-                                                          <Spinner size={12} tone="muted" />
-                                                      ) : (
-                                                          <Icon name={action.icon} size={12} />
-                                                      )}
-                                                  </button>
-                                              ))(section.action)
-                                            : null}
+                                        {section.action || section.secondaryAction ? (
+                                            // The controls share one lane, a row's
+                                            // control gap apart, and the lane rather
+                                            // than either control hangs into the padding.
+                                            <span
+                                                className="happy-sidebar__section-actions"
+                                                data-happy-desktop-ui="sidebar-section-actions"
+                                                style={{ columnGap: SIDEBAR_CONTROL_GAP }}
+                                            >
+                                                {(
+                                                    [
+                                                        ["secondary", section.secondaryAction],
+                                                        ["heading", section.action],
+                                                    ] as const
+                                                ).map(([source, action]) =>
+                                                    action ? (
+                                                        <button
+                                                            aria-busy={
+                                                                action.busy ? true : undefined
+                                                            }
+                                                            aria-keyshortcuts={
+                                                                action.shortcut?.aria
+                                                            }
+                                                            aria-label={action.label}
+                                                            className="happy-sidebar__section-action"
+                                                            data-busy={action.busy ? "" : undefined}
+                                                            data-shortcut-hint={
+                                                                action.shortcut ? "" : undefined
+                                                            }
+                                                            data-happy-desktop-ui={
+                                                                source === "heading"
+                                                                    ? "sidebar-section-action"
+                                                                    : "sidebar-section-secondary-action"
+                                                            }
+                                                            data-reveal={action.reveal ?? "hover"}
+                                                            data-slot={source}
+                                                            disabled={
+                                                                action.busy || action.disabled
+                                                            }
+                                                            key={source}
+                                                            onClick={() =>
+                                                                local.onSectionAction?.(
+                                                                    section.id,
+                                                                    source,
+                                                                )
+                                                            }
+                                                            type="button"
+                                                        >
+                                                            {action.busy ? (
+                                                                <Spinner size={12} tone="muted" />
+                                                            ) : (
+                                                                <Icon
+                                                                    name={action.icon}
+                                                                    size={12}
+                                                                />
+                                                            )}
+                                                            {action.shortcut ? (
+                                                                <KeyCap
+                                                                    className="happy-shortcut-hint--floating"
+                                                                    decorative
+                                                                    keys={action.shortcut.caps}
+                                                                />
+                                                            ) : null}
+                                                        </button>
+                                                    ) : null,
+                                                )}
+                                            </span>
+                                        ) : null}
                                     </div>
                                 ) : null}
                                 {section.error !== undefined ? (

@@ -21,18 +21,20 @@ import {
     desktopTopologyTarget,
 } from "./runtimeValidation";
 import {
+    HappyAgentStartTimeoutError,
     localHappyAgentConnectorCreate,
     type LocalHappyAgentConnection,
     type LocalHappyAgentConnector,
 } from "./localHappyAgent";
 import { HappyAgentClient } from "@slopus/happy-agent-client";
-import type { LocalHappyAgentOnboardingState, LocalHappyAgentProfile } from "./localOnboarding";
+import type { LocalHappyAgentOnboardingState } from "./localOnboarding";
 import {
     happyAgentDaemonConnectionUnavailable,
     type HappyAgentDaemonInspectorResponse,
     type HappyAgentDaemonInspectorStopResponse,
 } from "./happyAgentDaemonClient";
 import type { HtmlPreviewProxyHandle } from "./htmlPreviewProxy";
+import type { ArtifactSiteHandle } from "./artifactSite";
 import { happyAgentRendererOrigin, type HappyAgentRendererProxy } from "./happyAgentRendererProxy";
 import { happyAgentHttpProxyCreate, type HappyAgentHttpProxyHandle } from "./happyAgentHttpProxy";
 import type { Duplex } from "node:stream";
@@ -71,6 +73,8 @@ export interface DesktopRuntimeOptions {
     readonly rendererOrigin?: string;
     /** The window's HTML preview proxy, so a Happy Agent's documents can be published. */
     readonly htmlPreview?: HtmlPreviewProxyHandle;
+    /** The artifact partition's sites, so a Happy Agent's HTML artifacts can be served. */
+    readonly artifactSite?: ArtifactSiteHandle;
     readonly debug?: (message: string) => void;
 }
 
@@ -115,6 +119,7 @@ export class DesktopRuntime implements AsyncDisposable {
                     ...(options.rendererProxy ? { rendererProxy: options.rendererProxy } : {}),
                     ...(options.rendererOrigin ? { allowedOrigin: options.rendererOrigin } : {}),
                     ...(options.htmlPreview ? { htmlPreview: options.htmlPreview } : {}),
+                    ...(options.artifactSite ? { artifactSite: options.artifactSite } : {}),
                     ...(options.debug ? { debug: options.debug } : {}),
                 }));
         const configuredActive = settings?.topologies.find(
@@ -199,32 +204,6 @@ export class DesktopRuntime implements AsyncDisposable {
         )
             throw new Error("The local Happy Agent changed while Happy was examining it.");
         return state;
-    }
-
-    async localOnboardingProfileCreate(
-        expectedConnectionId: number,
-        input: { readonly email: string; readonly name: string },
-    ): Promise<LocalHappyAgentProfile> {
-        return this.serial(async () => {
-            this.localConnectionRequire(expectedConnectionId);
-            const client = this.localHappyAgentClient();
-            if (!client) throw new Error("The local Happy Agent daemon is unavailable.");
-            const current = await client.getProfile();
-            return (
-                await client.updateProfile(input, {
-                    ifMatch: current.profile.version,
-                })
-            ).profile;
-        });
-    }
-
-    localOnboardingProfileRead(expectedConnectionId: number): Promise<LocalHappyAgentProfile> {
-        return this.serial(async () => {
-            this.localConnectionRequire(expectedConnectionId);
-            const client = this.localHappyAgentClient();
-            if (!client) throw new Error("The local Happy Agent daemon is unavailable.");
-            return (await client.getProfile()).profile;
-        });
     }
 
     localOnboardingFreshness(expectedConnectionId: number): Promise<"fresh" | "used"> {
@@ -563,6 +542,9 @@ export class DesktopRuntime implements AsyncDisposable {
             this.publish({
                 phase: "error",
                 message: displayError(error),
+                ...(error instanceof HappyAgentStartTimeoutError
+                    ? { code: "start_timeout" as const }
+                    : {}),
                 request,
                 retryable: true,
                 targets: this.targets(),
@@ -635,10 +617,9 @@ async function connectedHappyAgentOnboardingResolve(
         const state = await client.getOnboarding({
             signal: AbortSignal.timeout(onboardingRequestTimeoutMs),
         });
-        const profileDone = state.steps.profile.done;
-        if (!state.steps.providers.done) return { profileDone, state: "provider_setup" };
-        if (!profileDone) return { profileDone, state: "profile_required" };
-        return { profileDone, state: "complete" };
+        // A profile is not asked for here: a solo machine runs without one, and a
+        // team deployment sets it up as part of joining the team.
+        return { state: state.steps.providers.done ? "complete" : "provider_setup" };
     } catch (error) {
         return happyAgentUnreachableState(error);
     }

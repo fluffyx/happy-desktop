@@ -7,6 +7,7 @@ import {
     type HappyAgentNodeStore,
 } from "happy-desktop-state";
 import type {
+    HappyAgentActivity,
     HappyAgentBot,
     HappyAgentBotCreating,
     HappyAgentConnectionSnapshot,
@@ -15,6 +16,7 @@ import type {
     HappyAgentCloudHost,
     HappyAgentProjectAddSnapshot,
     HappyAgentProjectGroup,
+    HappyAgentSessionListSnapshot,
     HappyAgentSessionLocation,
     TerminalColorScheme,
 } from "happy-desktop-state";
@@ -29,6 +31,9 @@ import type { DesktopRuntimeStore } from "./runtimeStore";
 
 export const LOCAL_HAPPY_AGENT_ID = "local";
 const PROJECT_ADD_IDLE: HappyAgentProjectAddSnapshot = { pending: false };
+const NO_SUBTASK_FAILURES: HappyAgentSessionListSnapshot["subtaskFailures"] = new Map();
+const NO_TASKS: HappyAgentSessionListSnapshot["tasks"] = [];
+const NO_TASK_FAILURES: HappyAgentSessionListSnapshot["taskFailures"] = new Map();
 
 export interface HappyAgentDirectoryEntry {
     readonly id: string;
@@ -47,6 +52,12 @@ export interface HappyAgentDirectoryEntry {
     readonly botsCreating: readonly HappyAgentBotCreating[];
     readonly projectsStatus: "loading" | "ready" | "error";
     readonly projectAdd: HappyAgentProjectAddSnapshot;
+    /** Bot subtasks whose archive or move the host refused, with the reason to show. */
+    readonly subtaskFailures: HappyAgentSessionListSnapshot["subtaskFailures"];
+    /** This Happy Agent's tasks the reader has joined, in the reader's own order. */
+    readonly tasks: HappyAgentSessionListSnapshot["tasks"];
+    /** Task acts the host refused, with the reason to show. */
+    readonly taskFailures: HappyAgentSessionListSnapshot["taskFailures"];
     readonly session?: HappyAgentSession;
     readonly setup?: HappyAgentConnectionHandle["setup"];
 }
@@ -67,8 +78,12 @@ export interface HappyAgentDirectoryStore {
 }
 
 export interface HappyAgentDirectoryDeps {
-    readonly prepareLegacyCli?: () => Promise<void>;
-    readonly connectLegacyCli?: () => Promise<void>;
+    readonly readLegacyCli?: () => Promise<
+        import("happy-desktop-state").HappyTerminalCliInspection
+    >;
+    readonly resetLegacyCli?: (
+        request: import("happy-desktop-state").HappyTerminalCliResetRequest,
+    ) => Promise<import("happy-desktop-state").HappyTerminalCliResetOutcome>;
     readonly cloudHostFor: (id: string) => HappyAgentCloudHost;
     readonly conversationOpen: (happyAgentId: string, location: HappyAgentSessionLocation) => void;
     readonly groupOpen: (happyAgentId: string, groupId: string) => void;
@@ -78,6 +93,17 @@ export interface HappyAgentDirectoryDeps {
      * background one reporting a removal must not move the reader.
      */
     readonly groupForget: (happyAgentId: string, groupId: string) => void;
+    /**
+     * Takes bot subtasks the host stopped listing out of the window's
+     * navigation, moving a reader who stood in one to `open`.
+     */
+    readonly subtasksForget: (
+        happyAgentId: string,
+        removed: readonly HappyAgentSessionLocation[],
+        open: HappyAgentSessionLocation | undefined,
+    ) => void;
+    /** A reader-initiated act one Happy Agent's workspace finished. */
+    readonly activity?: (happyAgentId: string, activity: HappyAgentActivity) => void;
     /** Desktop-wide model memory for this window's Happy Agent connection. */
     readonly modelPreferencePersistence: (id: string) => HappyAgentModelPreferencePersistence;
     /**
@@ -113,7 +139,14 @@ function projectsRead(
     session: HappyAgentSession,
 ): Pick<
     HappyAgentDirectoryEntry,
-    "bots" | "botsCreating" | "projects" | "projectsStatus" | "projectAdd"
+    | "bots"
+    | "botsCreating"
+    | "projects"
+    | "projectsStatus"
+    | "projectAdd"
+    | "subtaskFailures"
+    | "tasks"
+    | "taskFailures"
 > {
     const workspace = session.workspace.get();
     const projects = workspace.list.projects;
@@ -124,6 +157,9 @@ function projectsRead(
         projectsStatus:
             projects.type === "ready" ? "ready" : projects.type === "error" ? "error" : "loading",
         projectAdd: workspace.projectAdd,
+        subtaskFailures: workspace.list.subtaskFailures,
+        tasks: workspace.list.tasks,
+        taskFailures: workspace.list.taskFailures,
     };
 }
 
@@ -131,7 +167,14 @@ function projectsMatch(
     entry: HappyAgentDirectoryEntry,
     next: Pick<
         HappyAgentDirectoryEntry,
-        "bots" | "botsCreating" | "projects" | "projectsStatus" | "projectAdd"
+        | "bots"
+        | "botsCreating"
+        | "projects"
+        | "projectsStatus"
+        | "projectAdd"
+        | "subtaskFailures"
+        | "tasks"
+        | "taskFailures"
     >,
 ): boolean {
     return (
@@ -139,7 +182,10 @@ function projectsMatch(
         entry.botsCreating === next.botsCreating &&
         entry.projects === next.projects &&
         entry.projectsStatus === next.projectsStatus &&
-        entry.projectAdd === next.projectAdd
+        entry.projectAdd === next.projectAdd &&
+        entry.subtaskFailures === next.subtaskFailures &&
+        entry.tasks === next.tasks &&
+        entry.taskFailures === next.taskFailures
     );
 }
 
@@ -200,6 +246,9 @@ export function happyAgentDirectoryStoreCreate(
             projects: [],
             projectsStatus: "loading",
             projectAdd: PROJECT_ADD_IDLE,
+            subtaskFailures: NO_SUBTASK_FAILURES,
+            tasks: NO_TASKS,
+            taskFailures: NO_TASK_FAILURES,
             status: "connecting",
         },
     };
@@ -264,6 +313,9 @@ export function happyAgentDirectoryStoreCreate(
             projects: [],
             projectsStatus: "loading",
             projectAdd: PROJECT_ADD_IDLE,
+            subtaskFailures: NO_SUBTASK_FAILURES,
+            tasks: NO_TASKS,
+            taskFailures: NO_TASK_FAILURES,
             session: undefined,
             setup: undefined,
         };
@@ -279,10 +331,14 @@ export function happyAgentDirectoryStoreCreate(
         happyAgent.url = happyAgentHttpUrl;
         happyAgent.connection = happyAgentConnectionOpen({
             cloudHost: deps.cloudHostFor(happyAgent.entry.id),
-            connectLegacyCli:
-                happyAgent.entry.id === LOCAL_HAPPY_AGENT_ID ? deps.connectLegacyCli : undefined,
-            prepareLegacyCli:
-                happyAgent.entry.id === LOCAL_HAPPY_AGENT_ID ? deps.prepareLegacyCli : undefined,
+            guidedMobileSetup: happyAgent.entry.id === LOCAL_HAPPY_AGENT_ID,
+            // The local daemon is the one this app installed and runs solo;
+            // only a remote Happy Agent can be a team that needs a profile.
+            memberProfileRequired: happyAgent.entry.id !== LOCAL_HAPPY_AGENT_ID,
+            readLegacyCli:
+                happyAgent.entry.id === LOCAL_HAPPY_AGENT_ID ? deps.readLegacyCli : undefined,
+            resetLegacyCli:
+                happyAgent.entry.id === LOCAL_HAPPY_AGENT_ID ? deps.resetLegacyCli : undefined,
             host: happyAgent.entry.remoteId
                 ? {
                       projectSource: "repository",
@@ -301,6 +357,9 @@ export function happyAgentDirectoryStoreCreate(
                     deps.conversationOpen(happyAgent.entry.id, location),
                 groupOpen: (groupId) => deps.groupOpen(happyAgent.entry.id, groupId),
                 groupForget: (groupId) => deps.groupForget(happyAgent.entry.id, groupId),
+                subtasksForget: (removed, open) =>
+                    deps.subtasksForget(happyAgent.entry.id, removed, open),
+                activity: (activity) => deps.activity?.(happyAgent.entry.id, activity),
                 compatibility: (mismatch) => {
                     if (happyAgent.protocolMismatch?.message === mismatch?.message) return;
                     happyAgent.protocolMismatch = mismatch;
@@ -401,6 +460,10 @@ export function happyAgentDirectoryStoreCreate(
                 },
             },
         });
+        // Setup stores open nothing until they are watched, so they are
+        // offered at once rather than after the daemon first answers: first-run
+        // mobile pairing must not wait on anything the workspace needs.
+        happyAgent.entry = { ...happyAgent.entry, setup: happyAgent.connection.setup };
         // The installation's own name and picture ride the same sync feed as
         // the rest of this connection, so the rail tile follows a rename or a
         // new picture as soon as the daemon announces it.
@@ -498,6 +561,9 @@ export function happyAgentDirectoryStoreCreate(
                                 projects: [],
                                 projectsStatus: "loading",
                                 projectAdd: PROJECT_ADD_IDLE,
+                                subtaskFailures: NO_SUBTASK_FAILURES,
+                                tasks: NO_TASKS,
+                                taskFailures: NO_TASK_FAILURES,
                                 status: "connecting",
                             },
                         };

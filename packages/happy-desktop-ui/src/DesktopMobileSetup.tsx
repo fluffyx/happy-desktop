@@ -1,30 +1,22 @@
 import type { ReactNode } from "react";
 import { Button } from "./Button";
 import { CopyButton } from "./CopyButton";
-import { OnboardingSteps, type MobileOnboardingStage } from "./OnboardingSteps";
+import {
+    OnboardingSteps,
+    type MobileOnboardingStage,
+    type OnboardingStage,
+} from "./OnboardingSteps";
 import { QRCode } from "./QRCode";
 import { SetupPage } from "./SetupPage";
 import type { ThemeMode } from "./ThemeScope";
 
 export type DesktopMobileSetupStep =
     /** Platform pick and store code; confirming it is the consent that starts setup. */
-    | {
-          readonly kind: "intro";
-          readonly platform: "ios" | "android";
-          readonly alreadyLinked?: boolean;
-      }
-    | {
-          readonly kind: "get-app";
-          readonly platform: "ios" | "android";
-          readonly preparation: "preparing" | "ready" | "failed";
-          readonly message?: string;
-      }
+    | { readonly kind: "intro"; readonly platform: "ios" | "android" }
     | {
           readonly kind: "link";
-          /** Supplied by setup state, including checks before the app-download step. */
-          readonly appReady: boolean;
           readonly phase:
-              | { readonly kind: "checking" | "preparing" | "finishing" }
+              | { readonly kind: "checking" }
               | { readonly kind: "pairing"; readonly data: string; readonly expiresAt: number }
               | { readonly kind: "failed"; readonly message: string };
       }
@@ -36,9 +28,7 @@ export interface DesktopMobileSetupProps {
     /** Pinned bottom-right on every step, the way the rest of setup carries it. */
     readonly help?: ReactNode;
     /** Returns to an earlier onboarding step from the shared step bar. */
-    onStageSelect?(
-        stage: "setup" | "subscriptions" | "profile" | "get-app" | "connect-phone",
-    ): void;
+    onStageSelect?(stage: OnboardingStage): void;
     readonly appearance: ThemeMode;
     readonly step: DesktopMobileSetupStep;
     readonly onContinue: () => void;
@@ -49,49 +39,62 @@ export interface DesktopMobileSetupProps {
 }
 
 const STORE_URLS = {
-    ios: "https://apps.apple.com/us/app/happy-claude-code-client/id6748571505",
+    // The short form of the App Store link: fewer bytes keep the code at a
+    // lower version, so it still decodes at the smallest window.
+    ios: "https://apps.apple.com/app/id6748571505",
     android: "https://play.google.com/store/apps/details?id=com.ex3ndr.happy",
 } as const;
 const ENCRYPTION_DOCS_URL = "https://happy.engineering/docs/security/";
+/**
+ * Drawn blurred while the real code is on its way. It has the real payload's
+ * shape and length, so the stand-in has the same density as what replaces it.
+ */
+const PLACEHOLDER_CODE = "happy://terminal?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 /** The one line every phone screen leads with, and where encryption is explained. */
 export function MobileAppCopy(props: { onExternalOpen?(url: string): void }) {
     return (
         <>
             Download the end-to-end encrypted mobile app.{" "}
-            <a
-                className="happy-desktop-mobile-setup__link"
-                href={ENCRYPTION_DOCS_URL}
-                onClick={(event) => {
-                    if (!props.onExternalOpen) return;
-                    event.preventDefault();
-                    props.onExternalOpen(ENCRYPTION_DOCS_URL);
-                }}
-                rel="noopener noreferrer"
-                target="_blank"
-            >
-                How it works
-            </a>
+            <EncryptionLink onExternalOpen={props.onExternalOpen} />
         </>
+    );
+}
+
+/** What to do with the store code, and where encryption is explained. */
+function GetMobileAppCopy(props: { onExternalOpen?(url: string): void }) {
+    return (
+        <>
+            Scan with your phone’s camera. End-to-end encrypted.{" "}
+            <EncryptionLink onExternalOpen={props.onExternalOpen} />
+        </>
+    );
+}
+
+function EncryptionLink(props: { onExternalOpen?(url: string): void }) {
+    return (
+        <a
+            className="happy-desktop-mobile-setup__link"
+            href={ENCRYPTION_DOCS_URL}
+            onClick={(event) => {
+                if (!props.onExternalOpen) return;
+                event.preventDefault();
+                props.onExternalOpen(ENCRYPTION_DOCS_URL);
+            }}
+            rel="noopener noreferrer"
+            target="_blank"
+        >
+            How it works
+        </a>
     );
 }
 
 /** Optional desktop-to-phone setup. All operations and progress arrive through props. */
 export function DesktopMobileSetup(props: DesktopMobileSetupProps) {
     const { step } = props;
-    const mobile: MobileOnboardingStage | undefined =
-        step.kind === "intro" && step.alreadyLinked
-            ? undefined
-            : step.kind === "intro" ||
-                step.kind === "get-app" ||
-                (step.kind === "link" && !step.appReady)
-              ? "get-app"
-              : step.kind === "link"
-                ? "connect-phone"
-                : "complete";
-    const failed =
-        (step.kind === "get-app" && step.preparation === "failed") ||
-        (step.kind === "link" && step.phase.kind === "failed");
+    const mobile: MobileOnboardingStage =
+        step.kind === "intro" ? "get-app" : step.kind === "link" ? "connect-phone" : "complete";
+    const failed = step.kind === "link" && step.phase.kind === "failed";
     const steps = props.onboarding ? (
         <OnboardingSteps
             scope="desktop"
@@ -101,9 +104,9 @@ export function DesktopMobileSetup(props: DesktopMobileSetupProps) {
             failed={failed}
             {...(props.onStageSelect ? { onStageSelect: props.onStageSelect } : {})}
         />
-    ) : mobile ? (
+    ) : (
         <OnboardingSteps scope="mobile" stage={mobile} failed={failed} />
-    ) : undefined;
+    );
     const frame = {
         backdrop: { appearance: props.appearance, kind: "sky" },
         className: "happy-desktop-mobile-setup",
@@ -111,53 +114,21 @@ export function DesktopMobileSetup(props: DesktopMobileSetupProps) {
         steps,
         "data-testid": "local-onboarding-screen",
         // Approval replaces only the QR body, not the retained linking page or its sticker.
-        transitionKey: `desktop-mobile-${step.kind === "get-app" ? "intro" : step.kind}`,
+        transitionKey: `desktop-mobile-${step.kind}`,
     } as const;
     const skip = { label: "Skip mobile setup", onSelect: props.onSkip };
 
-    if (step.kind === "intro" && step.alreadyLinked)
+    // One screen gets the app onto the phone: what to do with the code, the
+    // platform pick, and the store code. Confirming it asks for the pairing code.
+    if (step.kind === "intro")
         return (
             <SetupPage
                 {...frame}
-                action={{ label: "Finish setup", onSelect: props.onContinue }}
-                copy="Finish setup to use it."
+                action={{ label: "Downloaded and opened", onSelect: props.onContinue }}
+                copy={<GetMobileAppCopy onExternalOpen={props.onExternalOpen} />}
                 scene="closed-lock"
                 secondary={skip}
-                title="Phone already linked"
-            />
-        );
-
-    // One screen gets the app onto the phone: the encrypted-app line, the
-    // platform pick, and the store code. Confirming it starts mobile setup.
-    if (step.kind === "intro" || step.kind === "get-app") {
-        const preparation = step.kind === "get-app" ? step.preparation : undefined;
-        return (
-            <SetupPage
-                {...frame}
-                action={
-                    preparation === "failed"
-                        ? { label: "Try again", onSelect: props.onContinue }
-                        : {
-                              disabled: preparation === "preparing",
-                              label: "I have it",
-                              onSelect: props.onContinue,
-                          }
-                }
-                copy={<MobileAppCopy onExternalOpen={props.onExternalOpen} />}
-                scene="closed-lock"
-                secondary={skip}
-                status={
-                    preparation === "preparing"
-                        ? { label: "Preparing…", progress: { kind: "waiting" } }
-                        : preparation === "failed"
-                          ? {
-                                label:
-                                    (step.kind === "get-app" ? step.message : undefined) ??
-                                    "Mobile setup couldn’t finish. Your sign-in and sessions are unchanged.",
-                            }
-                          : undefined
-                }
-                title="Take Happy with you"
+                title="Get Mobile App"
             >
                 <div className="happy-desktop-mobile-setup__download">
                     <div
@@ -184,14 +155,14 @@ export function DesktopMobileSetup(props: DesktopMobileSetupProps) {
                     </div>
                     <QRCode
                         data={STORE_URLS[step.platform]}
-                        size={136}
-                        label="QR code to download Happy Coder"
                         data-testid="happy-mobile-store-qr"
+                        label="QR code to download Happy mobile app"
+                        mark={step.platform === "ios" ? "app-store" : "google-play"}
+                        size={176}
                     />
                 </div>
             </SetupPage>
         );
-    }
 
     if (step.kind === "link") {
         const { phase } = step;
@@ -203,59 +174,50 @@ export function DesktopMobileSetup(props: DesktopMobileSetupProps) {
                     scene="closed-lock"
                     secondary={skip}
                     status={{ label: phase.message }}
-                    title="Phone didn't connect"
+                    title="Mobile App Didn't Link"
                 />
             );
-        if (phase.kind !== "pairing")
-            return (
-                <SetupPage
-                    {...frame}
-                    scene="closed-lock"
-                    secondary={skip}
-                    status={{
-                        label:
-                            phase.kind === "preparing"
-                                ? "Preparing…"
-                                : phase.kind === "checking"
-                                  ? "Checking…"
-                                  : "Finishing…",
-                        progress: { kind: "waiting" },
-                    }}
-                    title="Connect your phone"
-                />
-            );
+        // One page whether or not the code has arrived. Until it has, a
+        // blurred stand-in holds its exact place, so nothing moves when the
+        // real one replaces it.
         return (
             <SetupPage
                 {...frame}
-                copy="Open Happy Coder and scan."
+                copy="Open Happy mobile app and scan."
                 scene="closed-lock"
                 secondary={skip}
-                status={{
-                    busy: true,
-                    label: `Waiting for phone · expires ${new Intl.DateTimeFormat(undefined, {
-                        hour: "numeric",
-                        minute: "2-digit",
-                    }).format(phase.expiresAt)}`,
-                }}
-                title="Scan this code"
+                title="Link Mobile App"
             >
                 <div className="happy-desktop-mobile-setup__pairing">
-                    <QRCode
-                        data={phase.data}
-                        size={136}
-                        label="QR code to link your devices"
-                        data-testid="happy-mobile-pairing-qr"
-                    />
-                    {/* The payload is opaque by contract: a client either draws it
-                        as a QR code or hands it over as a deep link, and never
-                        reads or rebuilds it. */}
-                    <CopyButton
-                        caption="Copy auth link"
-                        copiedCaption="Link copied"
-                        data-testid="happy-mobile-pairing-copy"
-                        label="Copy auth link"
-                        text={phase.data}
-                    />
+                    {phase.kind === "pairing" ? (
+                        <>
+                            <QRCode
+                                data={phase.data}
+                                data-testid="happy-mobile-pairing-qr"
+                                label="QR code to link your devices"
+                                mark="link"
+                                size={136}
+                            />
+                            {/* The payload is opaque by contract: a client either
+                                draws it as a QR code or hands it over as a deep
+                                link, and never reads or rebuilds it. */}
+                            <CopyButton
+                                caption="Copy auth link"
+                                copiedCaption="Link copied"
+                                data-testid="happy-mobile-pairing-copy"
+                                label="Copy auth link"
+                                text={phase.data}
+                            />
+                        </>
+                    ) : (
+                        <div
+                            aria-hidden
+                            className="happy-desktop-mobile-setup__code-placeholder"
+                            data-testid="happy-mobile-pairing-placeholder"
+                        >
+                            <QRCode data={PLACEHOLDER_CODE} mark="link" size={136} />
+                        </div>
+                    )}
                 </div>
             </SetupPage>
         );
@@ -275,7 +237,7 @@ export function DesktopMobileSetup(props: DesktopMobileSetupProps) {
                               "Remote control resumes when your computer is online.",
                       },
                   })}
-            title={step.online ? "Phone connected" : "Phone linked"}
+            title="Mobile App Linked"
         />
     );
 }

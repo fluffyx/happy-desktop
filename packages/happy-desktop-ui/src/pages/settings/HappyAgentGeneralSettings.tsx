@@ -2,19 +2,24 @@ import { Banner } from "../../Banner";
 import { Box } from "../../Box";
 import { Button } from "../../Button";
 import { FormRow } from "../../FormRow";
-import { GptLiveSettings } from "../../GptLiveSettings";
 import { SegmentedControl } from "../../SegmentedControl";
 import { Select, type SelectOption } from "../../Select";
 import { Spinner } from "../../Spinner";
+import { SIDEBAR_THEME_OPTIONS } from "../../SidebarFooter";
+import { SIDEBAR_KEEP_AWAKE_OPTIONS, type SidebarKeepAwakeMode } from "../../SidebarKeepAwakeMenu";
 import { Switch } from "../../Switch";
+import { HappyAgentProductAnalyticsSettings } from "./HappyAgentProductAnalyticsSettings";
 import { HappyAgentSettingsSection } from "./HappyAgentSettingsShell";
 
 export type HappyAgentAppearanceChoice = "system" | "light" | "dark";
 export type HappyAgentScrollbarVisibilityChoice = "always" | "automatic";
+/** Where a clicked web link opens: the side panel's browser tab, or the machine's browser. */
+export type HappyAgentLinkOpenPlacementChoice = "panel" | "browser";
 
 export type HappyAgentGeneralSettingsProps = {
     appearance: HappyAgentAppearanceChoice;
     scrollbarVisibility: HappyAgentScrollbarVisibilityChoice;
+    linkOpenPlacement: HappyAgentLinkOpenPlacementChoice;
     /** The default a new session starts on, keyed `${providerId}:${modelId}`. */
     defaultModelKey?: string;
     /** Every model the enabled providers offer, already labelled for display. */
@@ -31,11 +36,27 @@ export type HappyAgentGeneralSettingsProps = {
     unavailable?: string;
     /** Whether this window offers the features that are not finished yet. */
     experimentalFeaturesEnabled: boolean;
-    /** Separate, default-off GPT-Live voice preference; enabling never starts a call. */
-    gptLiveEnabled?: boolean;
-    onGptLiveEnabledChange?: (enabled: boolean) => void;
     /** Whether active session, project, and workspace titles shimmer. */
     titleShimmerEnabled: boolean;
+    /**
+     * Whether the sidebar leaves out every connection's Projects section. Absent
+     * where the host keeps no such choice, which offers no control.
+     */
+    projectsHidden?: boolean;
+    onProjectsHiddenChange?: (hidden: boolean) => void;
+    /** "Show in status bar" switches; absent where the host keeps no such choice. */
+    statusBar?: {
+        themeShown: boolean;
+        keepAwakeShown: boolean;
+        onThemeShownChange: (shown: boolean) => void;
+        onKeepAwakeShownChange: (shown: boolean) => void;
+    };
+    /** When the computer is kept from sleeping; absent where the host cannot. */
+    keepAwake?: SidebarKeepAwakeMode;
+    onKeepAwakeChange?: (mode: SidebarKeepAwakeMode) => void;
+    /** Whether this window sends product analytics events. Absent where the host sends none. */
+    usageAnalyticsEnabled?: boolean;
+    onUsageAnalyticsChange?: (enabled: boolean) => void;
     /** Absent where the host does not manage updates. */
     previewUpdatesEnabled?: boolean;
     onPreviewUpdatesChange?: (enabled: boolean) => void;
@@ -65,6 +86,7 @@ export type HappyAgentGeneralSettingsProps = {
     };
     onAppearanceChange: (appearance: HappyAgentAppearanceChoice) => void;
     onScrollbarVisibilityChange: (visibility: HappyAgentScrollbarVisibilityChoice) => void;
+    onLinkOpenPlacementChange: (placement: HappyAgentLinkOpenPlacementChoice) => void;
     onExperimentalFeaturesChange: (enabled: boolean) => void;
     onTitleShimmerChange: (enabled: boolean) => void;
     onDefaultModelChange: (key: string) => void;
@@ -77,15 +99,40 @@ export type HappyAgentGeneralSettingsProps = {
     onAgentRestart?: () => void;
 };
 
-const appearanceSegments = [
-    { value: "system", label: "System" },
-    { value: "light", label: "Light" },
-    { value: "dark", label: "Dark" },
-];
+const appearanceSegments = SIDEBAR_THEME_OPTIONS.map(({ mode, label }) => ({ value: mode, label }));
+
+const keepAwakeOptions = SIDEBAR_KEEP_AWAKE_OPTIONS.map(({ mode, label }) => ({
+    value: mode,
+    label,
+}));
+
+function statusBarRow(id: string, shown: boolean, onChange: (shown: boolean) => void) {
+    return (
+        <FormRow
+            control={
+                <Switch
+                    aria-label={`Show ${id} in status bar`}
+                    checked={shown}
+                    id={`happy-agent-settings-status-bar-${id}`}
+                    onChange={onChange}
+                    size="small"
+                />
+            }
+            description="Adds this control to the bar under the sidebar"
+            htmlFor={`happy-agent-settings-status-bar-${id}`}
+            label="Show in status bar"
+        />
+    );
+}
 
 const scrollbarSegments = [
     { value: "automatic", label: "Automatic" },
     { value: "always", label: "Always visible" },
+];
+
+const linkOpenSegments = [
+    { value: "panel", label: "Side panel" },
+    { value: "browser", label: "Browser" },
 ];
 
 /**
@@ -125,6 +172,13 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                     description="Applies to this window immediately"
                     label="Theme"
                 />
+                {props.statusBar
+                    ? statusBarRow(
+                          "theme",
+                          props.statusBar.themeShown,
+                          props.statusBar.onThemeShownChange,
+                      )
+                    : null}
                 <FormRow
                     control={
                         <SegmentedControl
@@ -154,6 +208,78 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                     description="Animates running session, project, and workspace names"
                     htmlFor="happy-agent-settings-title-shimmer"
                     label="Shimmer active titles"
+                />
+                {props.onProjectsHiddenChange ? (
+                    <FormRow
+                        control={
+                            <Switch
+                                aria-label="Hide projects"
+                                checked={props.projectsHidden === true}
+                                id="happy-agent-settings-projects-hidden"
+                                onChange={props.onProjectsHiddenChange}
+                                size="small"
+                            />
+                        }
+                        description="Leaves the Projects section out of the sidebar for every connection, team and local. Bots and tasks stay listed."
+                        htmlFor="happy-agent-settings-projects-hidden"
+                        label="Hide projects"
+                    />
+                ) : null}
+            </HappyAgentSettingsSection>
+            {props.keepAwake && props.onKeepAwakeChange ? (
+                <HappyAgentSettingsSection
+                    description="Stops this computer from sleeping so agents keep working. The display can still turn off."
+                    title="Keep awake"
+                >
+                    <FormRow
+                        control={
+                            <Box width={280}>
+                                <Select
+                                    aria-label="Keep computer awake"
+                                    fullWidth
+                                    id="happy-agent-settings-keep-awake"
+                                    onValueChange={(value) =>
+                                        props.onKeepAwakeChange?.(value as SidebarKeepAwakeMode)
+                                    }
+                                    options={keepAwakeOptions}
+                                    size="small"
+                                    value={props.keepAwake}
+                                />
+                            </Box>
+                        }
+                        description="Only agents on this computer count"
+                        htmlFor="happy-agent-settings-keep-awake"
+                        label="Keep computer awake"
+                    />
+                    {props.statusBar
+                        ? statusBarRow(
+                              "keep-awake",
+                              props.statusBar.keepAwakeShown,
+                              props.statusBar.onKeepAwakeShownChange,
+                          )
+                        : null}
+                </HappyAgentSettingsSection>
+            ) : null}
+            <HappyAgentSettingsSection
+                description="Where a web link goes when it is clicked. A link's own menu can always choose the other."
+                title="Links"
+            >
+                <FormRow
+                    control={
+                        <SegmentedControl
+                            aria-label="Open links in"
+                            onChange={(value) =>
+                                props.onLinkOpenPlacementChange(
+                                    value as HappyAgentLinkOpenPlacementChoice,
+                                )
+                            }
+                            segments={linkOpenSegments}
+                            size="small"
+                            value={props.linkOpenPlacement}
+                        />
+                    }
+                    description="Side panel keeps the page beside the conversation; Browser hands it to the machine's own"
+                    label="Open links in"
                 />
             </HappyAgentSettingsSection>
             <HappyAgentSettingsSection
@@ -394,15 +520,15 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                             size="small"
                         />
                     }
-                    description="Shows Inbox and Folders in the sidebar. Kept on this machine only."
+                    description="Reveals Experimental settings, Inbox, and Folders. Kept on this machine only."
                     htmlFor="happy-agent-settings-experimental-features"
                     label="Enable experimental features"
                 />
             </HappyAgentSettingsSection>
-            {props.onGptLiveEnabledChange ? (
-                <GptLiveSettings
-                    enabled={props.gptLiveEnabled === true}
-                    onEnabledChange={props.onGptLiveEnabledChange}
+            {props.usageAnalyticsEnabled !== undefined && props.onUsageAnalyticsChange ? (
+                <HappyAgentProductAnalyticsSettings
+                    enabled={props.usageAnalyticsEnabled}
+                    onChange={props.onUsageAnalyticsChange}
                 />
             ) : null}
         </>

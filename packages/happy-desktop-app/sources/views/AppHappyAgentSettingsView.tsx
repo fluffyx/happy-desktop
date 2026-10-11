@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import type {
     AppearanceStore,
     ExperimentsStore,
+    ProjectsVisibilityStore,
     GptLiveStore,
     HappyAgentInstructionsSnapshot,
     HappyAgentDebugLogSnapshot,
@@ -14,8 +15,12 @@ import type {
     HappyAgentSettingsSnapshot,
     HappyAgentSettingsStore,
     HappyAgentThinkingLevel,
+    HappyAgentSidebarVisibilityStore,
     HappyAgentWindowStore,
+    KeepAwakeStore,
+    StatusBarStore,
     TitleShimmerStore,
+    UsageAnalyticsStore,
 } from "happy-desktop-state";
 import {
     HAPPY_AGENT_INSTRUCTIONS_MAX_BYTES,
@@ -24,15 +29,21 @@ import {
     happyAgentPermissionLabel,
     happyAgentThinkingLabel,
     experimentsStoreNoop,
+    projectsVisibilityStoreNoop,
     gptLiveStoreNoop,
     happyAgentCloudStoreNoop,
     happyAgentAvailabilityProject,
     happyAgentIntegrationStoreNoop,
+    happyAgentIntegrationRemovalIncomplete,
+    happyAgentVersionAtLeast,
+    HAPPY_AGENT_COMPUTER_REMOVAL_VERSION,
     happyAgentProfileStoreNoop,
     happyAgentProviderUsageStoreNoop,
     happyAgentProvidersStoreNoop,
     happyAgentSecretsStoreNoop,
     happyAgentWindowStoreNoop,
+    keepAwakeStoreCreate,
+    statusBarStoreNoop,
     titleShimmerStoreNoop,
 } from "happy-desktop-state";
 import {
@@ -48,6 +59,7 @@ import {
     HappyAgentProfileSettings,
     HappyAgentSecretSettings,
     HappyAgentSettingsShell,
+    GptLiveSettings,
     HappyAgentStateSettings,
     HappyAgentUsageSettings,
     providerAccountName,
@@ -72,14 +84,21 @@ export const HAPPY_AGENT_SETTINGS_CATEGORIES: readonly HappyAgentSettingsCategor
     // way round: which of them exist, then what each has spent.
     { icon: "zap", id: "usage", label: "Usage" },
     { icon: "mobile", id: "mobile-access", label: "Mobile Access" },
+    { icon: "zap", id: "experimental", label: "Experimental" },
     { icon: "code", id: "debug", label: "Dev Tools" },
 ];
 
 export const HAPPY_AGENT_SETTINGS_DEFAULT_CATEGORY = "general";
 
 /** True when `section` addresses a category this window actually has. */
-export function happyAgentSettingsCategoryExists(section: string): boolean {
-    return HAPPY_AGENT_SETTINGS_CATEGORIES.some((category) => category.id === section);
+export function happyAgentSettingsCategoryExists(
+    section: string,
+    experimentalFeaturesEnabled = false,
+): boolean {
+    return (
+        (section !== "experimental" || experimentalFeaturesEnabled) &&
+        HAPPY_AGENT_SETTINGS_CATEGORIES.some((category) => category.id === section)
+    );
 }
 
 export interface AppHappyAgentDebugTargetSnapshot {
@@ -253,6 +272,7 @@ export interface AppHappyAgentProfilerStore {
 }
 
 const CATEGORY_DESCRIPTIONS: Record<string, string> = {
+    experimental: "Features that are still being built",
     debug: "Inspect live state, Happy and Happy Agent debugger endpoints, and renderer profiles",
     general: "How this window looks and what a new session starts with",
     "mobile-access": "This Happy Agent's connection to Happy Mobile",
@@ -270,6 +290,17 @@ const PERMISSION_MODES: readonly HappyAgentPermissionMode[] = [
     "full_access",
 ];
 
+/** Stands in where the host cannot hold the machine awake, keeping hook order fixed. */
+const keepAwakeStoreNone = keepAwakeStoreCreate({ mode: "off" });
+
+/** Stands in where the host sends no usage events, so the view subscribes unconditionally. */
+const usageAnalyticsAbsentSnapshot = { usageAnalyticsEnabled: false } as const;
+const usageAnalyticsAbsent: UsageAnalyticsStore = {
+    get: () => usageAnalyticsAbsentSnapshot,
+    subscribe: () => () => undefined,
+    usageAnalyticsUpdate: () => undefined,
+};
+
 export interface AppHappyAgentSettingsViewProps {
     appearance: AppearanceStore;
     /** Managed Happy Agent controls, present only in the native desktop shell. */
@@ -279,7 +310,19 @@ export interface AppHappyAgentSettingsViewProps {
      * in a host that remembers no such choice, which withholds them.
      */
     experiments?: ExperimentsStore;
+    /**
+     * Whether this window hides every connection's Projects section. Absent in a
+     * host that remembers no such choice, which offers no control for it.
+     */
+    projectsVisibility?: ProjectsVisibilityStore;
+    /** Whether this window sends product analytics events. Absent where it sends none. */
+    usageAnalytics?: UsageAnalyticsStore;
     gptLive?: GptLiveStore;
+    /** Absent where the host cannot hold the machine awake. */
+    keepAwake?: KeepAwakeStore;
+    statusBar?: StatusBarStore;
+    /** The window's sidebar, whose width the category column matches. */
+    sidebarVisibility?: HappyAgentSidebarVisibilityStore;
     /** Every Happy Agent in this window, including the one whose catalog is read. */
     debug?: AppHappyAgentDebugStore;
     profiler?: AppHappyAgentProfilerStore;
@@ -304,7 +347,6 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
     // Dev Tools prints every store snapshot verbatim, so the stores an ordinary
     // category would materialize only while it is open are materialized there
     // too. Reading raw state means reading the live thing, not a stale copy.
-    const stateOpen = props.section === "debug";
     const appearance = useSyncExternalStore(
         props.appearance.subscribe,
         props.appearance.get,
@@ -322,11 +364,43 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
         experimentsStore.get,
         experimentsStore.get,
     );
+    const projectsVisibilityStore = props.projectsVisibility ?? projectsVisibilityStoreNoop;
+    const projectsVisibility = useSyncExternalStore(
+        projectsVisibilityStore.subscribe,
+        projectsVisibilityStore.get,
+        projectsVisibilityStore.get,
+    );
+    const usageAnalyticsStore = props.usageAnalytics ?? usageAnalyticsAbsent;
+    const usageAnalytics = useSyncExternalStore(
+        usageAnalyticsStore.subscribe,
+        usageAnalyticsStore.get,
+        usageAnalyticsStore.get,
+    );
+    const section =
+        props.section === "experimental" && !experiments.experimentalFeaturesEnabled
+            ? "general"
+            : props.section;
+    const stateOpen = section === "debug";
+    const categories = HAPPY_AGENT_SETTINGS_CATEGORIES.filter(
+        (category) => category.id !== "experimental" || experiments.experimentalFeaturesEnabled,
+    );
     const titleShimmerStore = props.titleShimmer ?? titleShimmerStoreNoop;
     const titleShimmer = useSyncExternalStore(
         titleShimmerStore.subscribe,
         titleShimmerStore.get,
         titleShimmerStore.get,
+    );
+    const keepAwakeStore = props.keepAwake ?? keepAwakeStoreNone;
+    const keepAwake = useSyncExternalStore(
+        keepAwakeStore.subscribe,
+        keepAwakeStore.get,
+        keepAwakeStore.get,
+    );
+    const statusBarStore = props.statusBar ?? statusBarStoreNoop;
+    const statusBar = useSyncExternalStore(
+        statusBarStore.subscribe,
+        statusBarStore.get,
+        statusBarStore.get,
     );
     const directory = useSyncExternalStore(
         props.happyAgents.subscribe,
@@ -369,7 +443,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
         props.settings.get,
     );
     const profileStore =
-        (props.section === "account" || stateOpen ? host?.session?.profile?.() : undefined) ??
+        (section === "account" || stateOpen ? host?.session?.profile?.() : undefined) ??
         happyAgentProfileStoreNoop;
     const profile = useSyncExternalStore(
         profileStore.subscribe,
@@ -379,11 +453,11 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
     // The connection keeps both identities synchronized. This category only
     // observes their already-warm snapshots while it is visible.
     const cloudStore =
-        (props.section === "account" || stateOpen ? host?.session?.cloud?.() : undefined) ??
+        (section === "account" || stateOpen ? host?.session?.cloud?.() : undefined) ??
         happyAgentCloudStoreNoop;
     const cloud = useSyncExternalStore(cloudStore.subscribe, cloudStore.get, cloudStore.get);
     const happyIntegrationStore =
-        (props.section === "mobile-access" || stateOpen
+        (section === "mobile-access" || stateOpen
             ? host?.session?.happyIntegration?.()
             : undefined) ?? happyAgentIntegrationStoreNoop;
     const happyIntegration = useSyncExternalStore(
@@ -409,7 +483,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
     // this category (or raw Dev Tools state) watches it and stops immediately
     // when the surface leaves.
     const secretsStore =
-        (props.section === "secrets" || stateOpen ? host?.session?.secrets?.() : undefined) ??
+        (section === "secrets" || stateOpen ? host?.session?.secrets?.() : undefined) ??
         happyAgentSecretsStoreNoop;
     const secrets = useSyncExternalStore(
         secretsStore.subscribe,
@@ -420,7 +494,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
     // is what starts the work: the daemon's configuration is read, and re-read
     // every few seconds, only while that category is the one on screen.
     const providersStore =
-        (props.section === "providers" || stateOpen ? host?.session?.providers : undefined) ??
+        (section === "providers" || stateOpen ? host?.session?.providers : undefined) ??
         happyAgentProvidersStoreNoop;
     const providers = useSyncExternalStore(
         providersStore.subscribe,
@@ -431,7 +505,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
     // what starts the work: the daemon is asked what its accounts have spent,
     // and the clock ticks the time left until each reset, only while that
     // category is the one on screen.
-    const usageOpen = props.section === "usage";
+    const usageOpen = section === "usage";
     const usageStore =
         (usageOpen || stateOpen ? host?.session?.providerUsage : undefined) ??
         happyAgentProviderUsageStoreNoop;
@@ -450,22 +524,21 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
         windowStateStore.get,
         windowStateStore.get,
     );
-    const debugStore = (props.section === "debug" ? props.debug : undefined) ?? debugStoreNoop;
+    const debugStore = (section === "debug" ? props.debug : undefined) ?? debugStoreNoop;
     const debug = useSyncExternalStore(debugStore.subscribe, debugStore.get, debugStore.get);
-    const debugLogStore = props.section === "debug" ? host?.session?.debugLog : undefined;
+    const debugLogStore = section === "debug" ? host?.session?.debugLog : undefined;
     const debugLog = useSyncExternalStore(
         debugLogStore?.subscribe ?? noSubscribe,
         debugLogStore?.get ?? debugLogEmpty,
         debugLogStore?.get ?? debugLogEmpty,
     );
-    const profilerStore =
-        (props.section === "debug" ? props.profiler : undefined) ?? profilerStoreNoop;
+    const profilerStore = (section === "debug" ? props.profiler : undefined) ?? profilerStoreNoop;
     const profiler = useSyncExternalStore(
         profilerStore.subscribe,
         profilerStore.get,
         profilerStore.get,
     );
-    const daemonStore = (props.section === "general" ? props.daemon : undefined) ?? daemonStoreNoop;
+    const daemonStore = (section === "general" ? props.daemon : undefined) ?? daemonStoreNoop;
     const daemon = useSyncExternalStore(daemonStore.subscribe, daemonStore.get, daemonStore.get);
     const daemonView: AppHappyAgentDaemonSnapshot = {
         ...daemon,
@@ -489,11 +562,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
         model?.model && !model.model.thinkingLevels.includes(settings.defaultEffort)
             ? model.model.defaultThinkingLevel
             : settings.defaultEffort;
-    if (
-        props.section === "mobile-access" &&
-        happyIntegration.setup &&
-        happyIntegrationStore.mobileSetup
-    )
+    if (section === "mobile-access" && happyIntegration.setup && happyIntegrationStore.mobileSetup)
         return (
             <HappyAgentVersionProvider lastKnownVersion={host?.version}>
                 <DesktopMobileSetup
@@ -507,26 +576,64 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
         );
     const content = (
         <HappyAgentSettingsShell
-            activeCategoryId={props.section}
-            categories={HAPPY_AGENT_SETTINGS_CATEGORIES}
-            description={CATEGORY_DESCRIPTIONS[props.section]}
+            activeCategoryId={section}
+            categories={categories}
+            description={CATEGORY_DESCRIPTIONS[section]}
             onCategorySelect={props.onCategorySelect}
             onClose={props.onClose}
-            title={
-                HAPPY_AGENT_SETTINGS_CATEGORIES.find((category) => category.id === props.section)
-                    ?.label ?? "Settings"
-            }
+            title={categories.find((category) => category.id === section)?.label ?? "Settings"}
             windowControls={props.platform === "desktop"}
             windowFullScreen={windowState.fullScreen}
             connectionRail={windowState.connectionRail}
+            sidebarWidth={props.sidebarVisibility?.get().width}
         >
-            {props.section === "mobile-access" ? (
+            {section === "experimental" ? (
+                props.gptLive ? (
+                    <GptLiveSettings
+                        enabled={gptLive.gptLiveEnabled}
+                        accounts={gptLive.availability?.accounts}
+                        accountId={gptLive.accountId}
+                        checking={gptLive.status === "checking"}
+                        onAccountSelect={gptLiveStore.accountSelect}
+                        onAccountsRead={gptLiveStore.availabilityRead}
+                        onEnabledChange={(enabled) => {
+                            if (experimentsStore.get().experimentalFeaturesEnabled)
+                                gptLiveStore.gptLiveEnabledUpdate(enabled);
+                        }}
+                    />
+                ) : null
+            ) : section === "mobile-access" ? (
                 <HappyAgentMobileSettings
                     configured={happyIntegration.configured}
+                    updatedAt={happyIntegration.updatedAt}
+                    terminal={happyIntegration.terminalCli}
+                    terminalSetupSupport={happyIntegration.terminalSetupSupport}
+                    terminalReadError={happyIntegration.terminalCliReadError}
+                    management={happyIntegration.management}
+                    onTerminalReset={happyIntegrationStore.terminalCliResetRequest}
+                    onManagementCancel={happyIntegrationStore.mobileManagementCancel}
+                    onManagementConfirm={happyIntegrationStore.mobileManagementConfirm}
+                    onTerminalRegistrationRemovalChange={
+                        happyIntegrationStore.terminalCliRegistrationRemovalUpdate
+                    }
                     onSetup={happyIntegrationStore.mobileSetup?.start}
+                    // What Disconnect does depends on the running Agent: from
+                    // this version it deletes the computer from the account.
+                    removesComputer={happyAgentVersionAtLeast(
+                        host?.version,
+                        HAPPY_AGENT_COMPUTER_REMOVAL_VERSION,
+                    )}
+                    removalIncomplete={happyAgentIntegrationRemovalIncomplete(happyIntegration)}
+                    onRemovalRetry={() => {
+                        if (happyAgentOnline()) happyIntegrationStore.happyIntegrationDisconnect();
+                    }}
+                    onReconnect={() => {
+                        if (happyAgentOnline()) happyIntegrationStore.happyIntegrationReconnect();
+                    }}
                     disconnecting={happyIntegration.disconnecting}
                     onDisconnect={() => {
-                        if (happyAgentOnline()) happyIntegrationStore.happyIntegrationDisconnect();
+                        if (happyAgentOnline())
+                            happyIntegrationStore.happyIntegrationDisconnectRequest();
                     }}
                     onPair={() => {
                         if (happyAgentOnline()) happyIntegrationStore.happyIntegrationPair();
@@ -550,7 +657,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                     {...(happyIntegration.message ? { message: happyIntegration.message } : {})}
                     {...(unavailable === undefined ? {} : { unavailable })}
                 />
-            ) : props.section === "debug" ? (
+            ) : section === "debug" ? (
                 <>
                     <HappyAgentStateSettings
                         documents={stateDocuments({
@@ -602,7 +709,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                         supported={profiler.status !== "unavailable"}
                     />
                 </>
-            ) : props.section === "account" ? (
+            ) : section === "account" ? (
                 // The local author identity and optional WorkOS connection.
                 <>
                     <HappyAgentProfileSettings
@@ -640,7 +747,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                         {...(unavailable === undefined ? {} : { unavailable })}
                     />
                 </>
-            ) : props.section === "instructions" ? (
+            ) : section === "instructions" ? (
                 <HappyAgentInstructionsSettings
                     documents={[
                         {
@@ -699,7 +806,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                         },
                     ]}
                 />
-            ) : props.section === "providers" ? (
+            ) : section === "providers" ? (
                 <HappyAgentProviderSettings
                     loading={providers.loading}
                     onModelEnabledChange={(id, enabled) =>
@@ -715,7 +822,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                     {...(providers.saveError ? { saveError: providers.saveError.message } : {})}
                     {...(unavailable === undefined ? {} : { unavailable })}
                 />
-            ) : props.section === "secrets" ? (
+            ) : section === "secrets" ? (
                 <HappyAgentSecretSettings
                     loading={secrets.loading}
                     onSecretCreate={(input) =>
@@ -729,7 +836,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                     {...(secrets.error ? { error: secrets.error.message } : {})}
                     {...(unavailable === undefined ? {} : { unavailable })}
                 />
-            ) : props.section === "usage" ? (
+            ) : section === "usage" ? (
                 <HappyAgentUsageSettings
                     loading={usage.loading}
                     providers={usage.providers}
@@ -763,24 +870,48 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                     }))}
                     error={models.type === "error" ? models.error.message : undefined}
                     experimentalFeaturesEnabled={experiments.experimentalFeaturesEnabled}
-                    {...(props.gptLive
+                    {...(props.usageAnalytics
                         ? {
-                              gptLiveEnabled: gptLive.gptLiveEnabled,
-                              onGptLiveEnabledChange: gptLiveStore.gptLiveEnabledUpdate,
+                              usageAnalyticsEnabled: usageAnalytics.usageAnalyticsEnabled,
+                              onUsageAnalyticsChange: usageAnalyticsStore.usageAnalyticsUpdate,
                           }
                         : {})}
                     loading={models.type !== "ready" && models.type !== "error"}
-                    modelOptions={modelOptions(catalog, settings)}
+                    modelOptions={modelOptions(catalog, settings, selection)}
                     onAppearanceChange={(mode) => props.appearance.appearanceSelect(mode)}
+                    {...(props.statusBar
+                        ? {
+                              statusBar: {
+                                  ...statusBar,
+                                  onThemeShownChange: statusBarStore.themeShownUpdate,
+                                  onKeepAwakeShownChange: statusBarStore.keepAwakeShownUpdate,
+                              },
+                          }
+                        : {})}
+                    {...(props.keepAwake
+                        ? {
+                              keepAwake: keepAwake.mode,
+                              onKeepAwakeChange: keepAwakeStore.modeSelect,
+                          }
+                        : {})}
                     onScrollbarVisibilityChange={(visibility) =>
                         props.appearance.scrollbarVisibilitySelect(visibility)
                     }
+                    linkOpenPlacement={settings.linkOpenPlacement}
+                    onLinkOpenPlacementChange={props.settings.linkOpenPlacementUpdate}
                     onExperimentalFeaturesChange={(enabled) =>
                         experimentsStore.experimentalFeaturesUpdate(enabled)
                     }
                     onTitleShimmerChange={(enabled) =>
                         titleShimmerStore.titleShimmerUpdate(enabled)
                     }
+                    {...(props.projectsVisibility
+                        ? {
+                              projectsHidden: projectsVisibility.projectsHidden,
+                              onProjectsHiddenChange: (hidden: boolean) =>
+                                  projectsVisibilityStore.projectsHiddenUpdate(hidden),
+                          }
+                        : {})}
                     onDefaultModelChange={(key) => {
                         const [providerId, ...rest] = key.split(":");
                         const modelId = rest.join(":");
@@ -1068,15 +1199,23 @@ function defaultSelection(
     };
 }
 
-/** Every model a usable provider offers, labelled "Provider · Model" for one flat picker. */
+/**
+ * Every model a usable provider offers, labelled "Provider · Model" for one flat
+ * picker. A hidden account is not offered, as in the composer's picker, except
+ * the model already configured as the default, which stays shown as selected.
+ */
 function modelOptions(
     catalog: HappyAgentModelCatalog | undefined,
     settings: HappyAgentSettingsSnapshot,
+    selection: { readonly providerId: string; readonly modelId: string },
 ): readonly SelectOption[] {
     return (catalog?.providers ?? []).flatMap((provider) =>
         provider.models
             .filter(
-                (model) => !settings.disabledModels.has(happyAgentModelKey(provider.id, model.id)),
+                (model) =>
+                    !settings.disabledModels.has(happyAgentModelKey(provider.id, model.id)) &&
+                    (!provider.hidden ||
+                        (provider.id === selection.providerId && model.id === selection.modelId)),
             )
             .map((model) => ({
                 disabled: provider.disabledReason !== undefined,
@@ -1105,7 +1244,15 @@ function providerRows(
         })),
         name: providerAccountName(provider.id),
         saving: provider.saving,
-        serviceTiers: provider.serviceTiers.map((tier) => (tier === "fast" ? "Fast" : tier)),
+        serviceTiers: [
+            ...new Set(
+                provider.models.flatMap((model) =>
+                    model.serviceTierOptions
+                        .filter((option) => option.id !== null)
+                        .map((option) => option.label),
+                ),
+            ),
+        ],
         status: provider.disabledReason ?? "ready",
     }));
 }

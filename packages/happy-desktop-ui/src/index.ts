@@ -1,12 +1,33 @@
 import "./styles.css";
 
 export { happyLogoBlackUrl, happyLogoWhiteUrl } from "./assets";
+export {
+    ChangedFileDiff,
+    type ChangedFileDiffComment,
+    type ChangedFileDiffCommentDraft,
+    type ChangedFileDiffCommentSide,
+    type ChangedFileDiffProps,
+} from "./ChangedFileDiff";
+export {
+    ReviewComment,
+    reviewCommentPlace,
+    type ReviewCommentProps,
+    type ReviewCommentSide,
+} from "./ReviewComment";
+export {
+    ReviewStream,
+    type ReviewStreamComment,
+    type ReviewStreamCommentDraft,
+    type ReviewStreamFile,
+    type ReviewStreamProps,
+    type ReviewStreamSingleFile,
+} from "./ReviewStream";
 export { GptLiveSettings, type GptLiveSettingsProps } from "./GptLiveSettings";
-export { ChangedFileDiff, type ChangedFileDiffProps } from "./ChangedFileDiff";
+export { GptLivePhone, type GptLivePhoneProps } from "./GptLivePhone";
 export { CompactActivityRow, type CompactActivityRowProps } from "./CompactActivityRow";
 export { compactCount } from "./countText";
 export { CodeBlock, codeBlockLanguage, type CodeBlockProps } from "./CodeBlock";
-export { CodeEditor, type CodeEditorProps } from "./CodeEditor";
+export { CodeEditor, type CodeEditorProps, type CodeEditorReveal } from "./CodeEditor";
 export {
     ScrollArea,
     ScrollbarTrack,
@@ -114,7 +135,7 @@ export {
     type LivePerformanceStore,
 } from "./LivePerformanceIndicator";
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
-export { QRCode, type QRCodeProps } from "./QRCode";
+export { QRCode, type QRCodeMark, type QRCodeProps } from "./QRCode";
 export { ChannelHeader, type ChannelHeaderProps, type ChannelMember } from "./ChannelHeader";
 export { PanelHeader, type PanelHeaderProps } from "./PanelHeader";
 export { AudienceToggle, type AudienceToggleProps, type AudienceValue } from "./AudienceToggle";
@@ -206,8 +227,16 @@ export { HtmlPreviewError, type HtmlPreviewErrorProps } from "./HtmlPreviewError
 export {
     MarkdownDocument,
     markdownDocumentLinkPath,
+    markdownDocumentLinkTarget,
     type MarkdownDocumentProps,
+    type MarkdownDocumentReferences,
 } from "./MarkdownDocument";
+export {
+    fileReferenceFragment,
+    fileReferenceSplit,
+    type FileOpenHandler,
+    type FileReference,
+} from "./fileReference";
 export { MermaidDiagram, type MermaidDiagramProps } from "./MermaidDiagram";
 export { Icon, type IconName, iconNames, type IconProps } from "./Icon";
 export {
@@ -235,7 +264,12 @@ export {
     SystemNotice,
     type SystemNoticeSegment,
 } from "./Message";
-export { type MessageGenerationStatus } from "./MessageMarkdown";
+export {
+    type LinkOpenHandler,
+    type LinkOpenPlacement,
+    type MessageGenerationStatus,
+} from "./MessageMarkdown";
+export { type MessageReferences, type MessageReferenceView } from "./messageReferences";
 export { Lightbox, type LightboxProps } from "./Lightbox";
 export { Rail, type RailItem, type RailProps } from "./Rail";
 export {
@@ -260,6 +294,11 @@ export {
     type SidebarFooterConnection,
     type SidebarFooterProps,
 } from "./SidebarFooter";
+export {
+    SidebarKeepAwakeMenu,
+    type SidebarKeepAwakeMenuProps,
+    type SidebarKeepAwakeMode,
+} from "./SidebarKeepAwakeMenu";
 export {
     SIDEBAR_SPACES_BAR_HEIGHT,
     SIDEBAR_SPACES_DOT_SIZE,
@@ -287,15 +326,18 @@ export {
 } from "./AgentActivityRow";
 export { ConversationEntryView, type ConversationEntryViewProps } from "./ConversationEntryView";
 export { DelegatedAgentActivity, type DelegatedAgentActivityProps } from "./DelegatedAgentActivity";
+export { ContextMenu, type ContextMenuProps } from "./ContextMenu";
 export { ContextMeter, type ContextMeterProps } from "./ContextMeter";
 export {
     fileTreeBuild,
     fileTreeExpanded,
     fileTreeFlatten,
+    fileTreeRanked,
     fileTreeVisibleFiles,
     type FileTreeBuildEntry,
     type FileTreeExpansion,
 } from "./fileTreeBuild";
+export { filePathMatches } from "./fileTreeSearch";
 export { fileEntriesSort, fileNameCompare, filePathCompare } from "./fileTreeSort";
 export {
     ConversationStatus,
@@ -336,6 +378,7 @@ export {
     type HappyAgentProjectComputeMode,
     type HappyAgentProjectComputeSection,
     type HappyAgentProjectSettingsDialogProps,
+    type HappyAgentProjectSetupSection,
 } from "./HappyAgentProjectSettingsDialog";
 export {
     HappyAgentCreateBotPage,
@@ -343,9 +386,18 @@ export {
     type HappyAgentCreateBotPageProps,
 } from "./HappyAgentCreateBotPage";
 export {
+    HappyAgentCreateTaskPage,
+    type HappyAgentCreateTaskPageProps,
+} from "./HappyAgentCreateTaskPage";
+export {
     HappyAgentProjectCloneDialog,
     type HappyAgentProjectCloneDialogProps,
 } from "./HappyAgentProjectCloneDialog";
+export {
+    HappyAgentTaskBrowseDialog,
+    type HappyAgentTaskBrowseDialogProps,
+    type HappyAgentTaskBrowseEntry,
+} from "./HappyAgentTaskBrowseDialog";
 export {
     HappyAgentActivityPanel,
     type HappyAgentActivityPanelProps,
@@ -489,26 +541,32 @@ export {
 } from "./StatTile";
 export {
     LocalOnboardingScreen,
+    localOnboardingInstallCommand,
+    localOnboardingStage,
     type LocalOnboardingAgentSetupPhase,
     type LocalOnboardingAssistant,
     type LocalOnboardingAssistantId,
+    type LocalOnboardingCommandCopy,
+    type LocalOnboardingInstallShell,
+    type LocalOnboardingCustom,
     type LocalOnboardingDownload,
     type LocalOnboardingScreenProps,
     type LocalOnboardingView,
 } from "./LocalOnboardingScreen";
+export { ProfileSetupScreen, type ProfileSetupScreenProps } from "./ProfileSetupScreen";
 export {
     DesktopMobileSetup,
     type DesktopMobileSetupProps,
     type DesktopMobileSetupStep,
 } from "./DesktopMobileSetup";
 export {
-    AgentInstallScreen,
-    type AgentInstallDrainAgent,
-    type AgentInstallDrainComponent,
-    type AgentInstallReason,
-    type AgentInstallScreenProps,
-    type AgentInstallView,
-} from "./AgentInstallScreen";
+    AgentUpdateCard,
+    type AgentUpdateCardAgent,
+    type AgentUpdateCardProps,
+    type AgentUpdateCardView,
+    type AgentUpdateStep,
+} from "./AgentUpdateCard";
+export { SidebarAgentUpdate, type SidebarAgentUpdateProps } from "./SidebarAgentUpdate";
 export {
     WelcomeScreen,
     type WelcomeScreenBackdrop,
@@ -524,6 +582,7 @@ export {
 export { SetupChoice, type SetupChoiceOption, type SetupChoiceProps } from "./SetupChoice";
 export {
     SetupAssistants,
+    type SetupAgentPrompt,
     type SetupAssistantAction,
     type SetupAssistantEntry,
     type SetupAssistantsProps,
@@ -600,6 +659,23 @@ export {
     type HappyAgentInboxPageProps,
 } from "./pages/inbox/HappyAgentInboxPage";
 export {
+    type HappyAgentArtifactLabels,
+    type HappyAgentArtifactSourceChoice,
+} from "./pages/artifacts/artifactPresentation";
+export {
+    HappyAgentArtifactsPage,
+    type HappyAgentArtifactsPageProps,
+} from "./pages/artifacts/HappyAgentArtifactsPage";
+export {
+    HappyAgentArtifactsPanel,
+    type HappyAgentArtifactsPanelProps,
+} from "./pages/artifacts/HappyAgentArtifactsPanel";
+export {
+    HappyAgentArtifactViewer,
+    type HappyAgentArtifactViewerProps,
+} from "./pages/artifacts/HappyAgentArtifactViewer";
+export { artifactHtmlDocument } from "./pages/artifacts/artifactHtmlDocument";
+export {
     HappyAgentSettingsSection,
     HappyAgentSettingsShell,
     type HappyAgentSettingsCategory,
@@ -610,8 +686,13 @@ export {
     HappyAgentGeneralSettings,
     type HappyAgentAppearanceChoice,
     type HappyAgentGeneralSettingsProps,
+    type HappyAgentLinkOpenPlacementChoice,
     type HappyAgentScrollbarVisibilityChoice,
 } from "./pages/settings/HappyAgentGeneralSettings";
+export {
+    HappyAgentProductAnalyticsSettings,
+    type HappyAgentProductAnalyticsSettingsProps,
+} from "./pages/settings/HappyAgentProductAnalyticsSettings";
 export {
     HappyAgentAccountSettings,
     type HappyAgentAccountSettingsProps,
@@ -620,7 +701,15 @@ export {
     HappyAgentMobileSettings,
     type HappyAgentMobileSettingsProps,
     type HappyAgentMobileStatus,
+    type HappyAgentMobileTerminal,
 } from "./pages/settings/HappyAgentMobileSettings";
+export {
+    MobileAccessConfirmation,
+    MobileAccessDetail,
+    type MobileAccessConfirmationProps,
+    type MobileAccessConfirmationState,
+    type MobileAccessTerminalResetPreview,
+} from "./MobileAccessConfirmation";
 export {
     HappyAgentDebugSettings,
     type HappyAgentDebugSettingsProps,
@@ -677,3 +766,8 @@ export {
 export { providerAccountName } from "./pages/settings/providerAccountName";
 export { ConnectionShell, type ConnectionShellItem } from "./ConnectionShell";
 export { ConnectionSurface } from "./ConnectionSurface";
+export {
+    DataDisclosure,
+    type DataDisclosureGroup,
+    type DataDisclosureProps,
+} from "./DataDisclosure";

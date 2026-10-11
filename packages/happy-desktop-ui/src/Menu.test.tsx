@@ -8,7 +8,6 @@ import { Menu, type MenuItem } from "./Menu";
 import { createRenderer } from "./testing";
 
 const FIGTREE = "happy Figtree, system-ui, sans-serif";
-const MONO = "happy Mono, ui-monospace, monospace";
 
 /*
  * The leading glyph fills its 16px slot. The icon font paints the glyph
@@ -76,18 +75,25 @@ it("holds Menu popover geometry, item rows, icons, danger, and shortcuts", async
         "border-top-width": "1px",
         "box-sizing": "border-box",
         color: "rgb(0, 0, 0)",
-        display: "block",
+        display: "flex",
     });
     expect((await menu.visibleMetrics()).pixelCount).toBeGreaterThan(0);
 
     const list = view.$('[data-testid="actions"] [data-happy-desktop-ui="menu-list"]');
     /* The list is inset by exactly the 1px card border on every edge. */
     expect(list.offsets()).toEqual({ top: 1, right: 1, bottom: 1, left: 1 });
+    /* The list is the scrolling column; the rows wrapper inside it carries
+       the 4px inset so the inset scrolls with the rows. */
     expect(list.computedStyles(["display", "flex-direction", "padding"])).toEqual({
         display: "flex",
         "flex-direction": "column",
-        padding: "4px",
+        padding: "0px",
     });
+    expect(
+        view
+            .$('[data-testid="actions"] [data-happy-desktop-ui="menu-rows"]')
+            .computedStyles(["padding"]),
+    ).toEqual({ padding: "4px" });
 
     /* ---- Row grid -------------------------------------------------------- */
 
@@ -286,21 +292,23 @@ it("holds Menu section labels, disabled items, and text-only alignment", async (
     const sortBy = view.$('[data-testid="grouped"] [data-happy-desktop-ui="menu-label"]');
     expect(sortBy.bounds().height).toBe(24);
     expect(sortBy.textMetrics().font).toMatchObject({
-        family: MONO,
-        size: 11,
-        weight: "700",
-        lineHeight: 24,
+        family: FIGTREE,
+        size: 12,
+        weight: "600",
+        lineHeight: 22,
     });
     expect(sortBy.computedStyles(["color", "text-transform"])).toEqual({
         color: "rgb(73, 69, 79)",
-        "text-transform": "uppercase",
+        "text-transform": "none",
     });
-    /* Mono uppercase caps sit optically centered in the 24px label box.
-     * Left-aligned word, so the vertical axis only (measured <=0.3px, the same
-     * treatment as the sidebar section label; contract ceiling 0.75). */
+    /* Mixed case with a descender: centre the full-height ink box, not the
+     * alpha centroid. Vertical axis only (contract ceiling 0.75). */
     const sortInk = await sortBy.visibleMetrics();
     expect(sortInk.pixelCount).toBeGreaterThan(0);
-    expect(Math.abs(sortInk.center.y - 12), "section label optical y").toBeLessThanOrEqual(0.75);
+    expect(
+        Math.abs(sortInk.bounds.y + sortInk.bounds.height / 2 - 12),
+        "section label ink-box y",
+    ).toBeLessThanOrEqual(0.75);
 
     /* ---- Disabled row ---------------------------------------------------- */
 

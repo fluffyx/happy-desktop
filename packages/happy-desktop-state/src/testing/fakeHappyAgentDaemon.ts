@@ -1,11 +1,15 @@
 import {
     HAPPY_AGENT_PROTOCOL_VERSION,
     HappyAgentClient,
+    HappyAgentApiError,
     type Agent,
     type AgentContextUsage,
     type AgentDraftSnapshot,
     type CompactionMessage,
     type DaemonConfig,
+    type CreateLiveSessionRequest,
+    type CloseLiveSessionRequest,
+    type LiveSession,
     type EventStreamFrame,
     type EventStreamOptions,
     type HappyAgentEvent,
@@ -13,14 +17,19 @@ import {
     type Message,
     type MessageHistoryQuery,
     type MessageMode,
+    type Profile,
     type Project,
     type Question,
     type Run,
     type SendMessageRequest,
+    type Task,
+    type TaskMembership,
+    type User,
     type UserMessage,
     type Workspace,
 } from "@slopus/happy-agent-client";
 import { MINIMUM_HAPPY_AGENT_VERSION } from "../happyAgentConnection/compatibility.js";
+import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 
 /**
  * A programmable in-memory Happy Agent daemon for state-package tests.
@@ -52,6 +61,30 @@ export interface FakeHappyAgentDaemon {
     /** Seed one agent inside a workspace (or a project's root workspace). */
     agentSeed(workspaceId: string, overrides?: Partial<Agent>): Agent;
     agentGet(agentId: string): Agent;
+    /**
+     * Add a task with its own agent and workspace. `canArchive` is what the
+     * task routes and the bootstrap answer for the viewer; `joinedKey` makes
+     * the viewer a member at that place in their own list.
+     */
+    taskSeed(
+        overrides?: Partial<Omit<Task, "agent">> & {
+            readonly id?: string;
+            readonly joinedKey?: string;
+        },
+    ): Task;
+    taskGet(taskId: string): Task;
+    /** The viewer's membership in one task, as the task routes answer it. */
+    taskMembershipGet(taskId: string): TaskMembership | null;
+    /** Replace one task wholesale, bumping nothing; the next read serves it. */
+    taskReplace(task: Task): void;
+    /** Add or replace a team member `getUsers` answers for. */
+    userSeed(user: User): void;
+    /** Change what `getProfile` and the desktop bootstrap say about the viewer. */
+    profileSet(changes: Partial<Profile>): void;
+    /** Replace one agent's saved composer draft, served by its bootstrap. */
+    draftSeed(agentId: string, draft: AgentDraftSnapshot): void;
+    /** Replace one agent's stored message mode, served by its bootstrap. */
+    modeSeed(agentId: string, mode: MessageMode | null): void;
     /** Replace an agent snapshot wholesale; the next read serves this object. */
     agentReplace(agent: Agent): void;
     /** Replace one agent's durable history served by `getMessages`. */
@@ -94,7 +127,24 @@ export interface FakeHappyAgentDaemon {
     gapOnNextStream(): void;
 
     /** Toggle daemon health readiness, protocol number, and product version. */
-    healthSet(options: { daemon?: string; ready?: boolean; protocol?: number }): void;
+    healthSet(options: {
+        daemon?: string;
+        ready?: boolean;
+        protocol?: number;
+        desktopLiveControl?: boolean;
+    }): void;
+    /** Replace what `getOnboarding` and the desktop bootstrap report. */
+    onboardingSet(state: {
+        completed: boolean;
+        steps: {
+            profile: { done: boolean };
+            project: { done: boolean };
+            providers: { done: boolean; signedIn: string[] };
+        };
+    }): void;
+    /** Authoritative Live resource state; control frames are supplied by the test's socket port. */
+    liveSessionSet(session: LiveSession): void;
+    liveSessionGet(id: string): LiveSession | undefined;
 
     /** The effective configuration `getConfig` and the desktop bootstrap serve. */
     configGet(): DaemonConfig;
@@ -144,6 +194,7 @@ function configDefault(): DaemonConfig {
                 efforts: ["low", "medium", "high"],
                 name: "Test Model",
                 serviceTiers: [],
+                serviceTierOptions: [{ id: null, label: "Regular" }],
             },
         },
         network: {
@@ -254,7 +305,7 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
     let latestCursor = cursorOf((cursorCounter += 1));
 
     let config = configDefault();
-    const onboarding = {
+    let onboarding: Parameters<FakeHappyAgentDaemon["onboardingSet"]>[0] = {
         completed: true,
         steps: {
             profile: { done: true },
@@ -262,7 +313,10 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
             providers: { done: true, signedIn: [] },
         },
     };
-    const profile = { email: null, name: null, photo: null, updatedAt: 1, version: "v1" };
+    let profile: Profile = { email: null, name: null, photo: null, updatedAt: 1, version: "v1" };
+    const tasks = new Map<string, Task>();
+    const memberships = new Map<string, TaskMembership>();
+    const users = new Map<string, User>();
     const projects: Project[] = [];
     const workspaces: Workspace[] = [];
     const agents = new Map<string, Agent>();
@@ -280,6 +334,9 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
     const streamOpens: (string | undefined)[] = [];
     let nextStreamGap = false;
     let healthReady = true;
+    let desktopLiveControl: boolean | undefined;
+    const liveSessions = new Map<string, LiveSession>();
+    const liveUrls = new HappyAgentClient({ endpoint: "http://fake-happy-agent.test/" });
     let protocol = HAPPY_AGENT_PROTOCOL_VERSION;
     let daemonVersion = MINIMUM_HAPPY_AGENT_VERSION;
     let daemonGeneration = 1;
@@ -331,6 +388,41 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
             agents: [...agents.values()].filter((agent) => agent.workspaceId === project.id),
         }));
 
+    const taskRequired = (taskId: string): Task => {
+        const task = tasks.get(taskId);
+        if (task === undefined)
+            throw new HappyAgentApiError(404, `Unknown task ${taskId}.`, "not_found", null);
+        return task;
+    };
+    const taskResponse = (taskId: string) => ({
+        task: taskRequired(taskId),
+        membership: memberships.get(taskId) ?? null,
+    });
+    const membershipsOrdered = (): TaskMembership[] =>
+        [...memberships.values()].sort((left, right) =>
+            left.orderKey < right.orderKey ? -1 : left.orderKey > right.orderKey ? 1 : 0,
+        );
+    const taskArchivalSet = (taskId: string, ifMatch: string, archived: boolean) => {
+        const current = taskRequired(taskId);
+        if (current.canArchive !== true)
+            throw new HappyAgentApiError(403, "Only the owner can archive.", "forbidden", null);
+        if (current.version !== ifMatch)
+            throw new HappyAgentApiError(409, "The task changed.", "conflict", null);
+        const changes = {
+            archivedAt: archived ? 2 : null,
+            status: archived ? ("archived" as const) : ("active" as const),
+        };
+        const next: Task = { ...current, ...changes, version: versionOf((versionCounter += 1)) };
+        tasks.set(taskId, next);
+        emit("task.updated", {
+            taskId,
+            previousVersion: current.version,
+            version: next.version,
+            changes,
+        });
+        return taskResponse(taskId);
+    };
+
     const emit = <TType extends HappyAgentEvent["type"]>(
         type: TType,
         payload: Extract<HappyAgentEvent, { type: TType }>["payload"],
@@ -351,11 +443,73 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
                 ready: healthReady,
                 status: healthReady ? ("ready" as const) : ("starting" as const),
                 version: { daemon: daemonVersion, protocol },
+                ...(desktopLiveControl === undefined
+                    ? {}
+                    : { capabilities: { desktopLiveControl } }),
             };
         },
         async getConfig(...args: unknown[]) {
             await record("getConfig", args);
             return { config };
+        },
+        async createLiveSession(request: CreateLiveSessionRequest, ...args: unknown[]) {
+            const recording = record("createLiveSession", [request, ...args]);
+            const id = request.id ?? `flive${liveSessions.size + 1}`;
+            const existing = liveSessions.get(id);
+            if (existing) {
+                await recording;
+                throw new HappyAgentApiError(
+                    409,
+                    "This Live resource already exists.",
+                    "conflict",
+                    { session: existing },
+                );
+            }
+            const session: LiveSession = {
+                id,
+                windowId: request.windowId,
+                credential: request.credential,
+                contextRevision: request.contextRevision,
+                status: "starting",
+                usage: { seconds: null, final: false },
+                error: null,
+                createdAt: 1,
+                updatedAt: 1,
+                endedAt: null,
+                version: "live-v1",
+            };
+            liveSessions.set(id, session);
+            await recording;
+            return {
+                session: liveSessions.get(id)!,
+                transport: { type: "webrtc" as const, sdp: "fake-answer" },
+            };
+        },
+        async getLiveSession(id: string, ...args: unknown[]) {
+            await record("getLiveSession", [id, ...args]);
+            const session = liveSessions.get(id);
+            if (!session)
+                throw new HappyAgentApiError(404, "Unknown Live resource.", "not_found", null);
+            return { session };
+        },
+        async closeLiveSession(
+            id: string,
+            request: CloseLiveSessionRequest = {},
+            ...args: unknown[]
+        ) {
+            await record("closeLiveSession", [id, request, ...args]);
+            const session = liveSessions.get(id);
+            if (!session)
+                throw new HappyAgentApiError(404, "Unknown Live resource.", "not_found", null);
+            const next: LiveSession =
+                session.status === "closed" || session.status === "failed"
+                    ? session
+                    : { ...session, status: "closing", updatedAt: 2 };
+            liveSessions.set(id, next);
+            return { session: next };
+        },
+        liveSessionControlUrl(id: string, windowId: string) {
+            return liveUrls.liveSessionControlUrl(id, windowId);
         },
         async getOnboarding(...args: unknown[]) {
             await record("getOnboarding", args);
@@ -374,7 +528,156 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
                 profile,
                 projects: projectsWithAgents(),
                 workspaces: workspacesWithAgents(),
+                tasks: [...tasks.values()],
+                taskMemberships: [...memberships.values()],
             };
+        },
+        async getUsers(ids: readonly string[], ...rest: unknown[]) {
+            await record("getUsers", [ids, ...rest]);
+            return {
+                users: ids.flatMap((id) => {
+                    const user = users.get(id);
+                    return user ? [user] : [];
+                }),
+            };
+        },
+        async getTask(taskId: string, ...rest: unknown[]) {
+            await record("getTask", [taskId, ...rest]);
+            return taskResponse(taskId);
+        },
+        async createTask(
+            request: {
+                readonly id?: string;
+                readonly workspaceId?: string;
+                readonly agentId?: string;
+                readonly name?: string;
+            } = {},
+            ...rest: unknown[]
+        ) {
+            await record("createTask", [request, ...rest]);
+            // Retried with the same id, the task already made is answered again.
+            if (request.id !== undefined && tasks.has(request.id)) return taskResponse(request.id);
+            const id = request.id ?? `task-${String((idCounter += 1))}`;
+            const workspaceId = request.workspaceId ?? `taskws-${id}`;
+            const name = request.name ?? "New Task";
+            const agent = seedAgent(workspaceId, {
+                ...(request.agentId === undefined ? {} : { id: request.agentId }),
+                title: name,
+            });
+            const task: Task = {
+                archivedAt: null,
+                canArchive: profile.userId !== undefined,
+                compute: { path: `/tmp/tasks/${id}`, type: "host" },
+                createdAt: 1,
+                creatorAgentId: null,
+                folderName: id,
+                name,
+                ownerUserId: profile.userId ?? null,
+                status: "active",
+                updatedAt: 1,
+                version: versionOf((versionCounter += 1)),
+                agent,
+                id,
+                workspaceId,
+            };
+            tasks.set(id, task);
+            // The maker joins it, at the top of their own list.
+            const first = membershipsOrdered()[0];
+            const membership: TaskMembership = {
+                joinedAt: 1,
+                orderKey: generateKeyBetween(null, first?.orderKey ?? null),
+                taskId: id,
+                userId: profile.userId ?? null,
+            };
+            memberships.set(id, membership);
+            emit("task.created", { task });
+            emit("agent.created", { agent });
+            emit("task.joined", { membership });
+            return taskResponse(id);
+        },
+        async renameTask(
+            taskId: string,
+            request: { readonly name: string },
+            options: { readonly ifMatch: string },
+        ) {
+            await record("renameTask", [taskId, request, options]);
+            const current = taskRequired(taskId);
+            if (current.version !== options.ifMatch)
+                throw new HappyAgentApiError(409, "The task changed.", "conflict", null);
+            const agent = agentBump(current.agent.id, { title: request.name });
+            const changes = { name: request.name, agent };
+            const next: Task = {
+                ...current,
+                ...changes,
+                version: versionOf((versionCounter += 1)),
+            };
+            tasks.set(taskId, next);
+            emit("task.updated", {
+                taskId,
+                previousVersion: current.version,
+                version: next.version,
+                changes,
+            });
+            return taskResponse(taskId);
+        },
+        async joinTask(taskId: string, ...rest: unknown[]) {
+            await record("joinTask", [taskId, ...rest]);
+            taskRequired(taskId);
+            const existing = memberships.get(taskId);
+            if (existing) return taskResponse(taskId);
+            const first = membershipsOrdered()[0];
+            const membership: TaskMembership = {
+                joinedAt: 1,
+                orderKey: generateKeyBetween(null, first?.orderKey ?? null),
+                taskId,
+                userId: profile.userId ?? null,
+            };
+            memberships.set(taskId, membership);
+            emit("task.joined", { membership });
+            return taskResponse(taskId);
+        },
+        async leaveTask(taskId: string, ...rest: unknown[]) {
+            await record("leaveTask", [taskId, ...rest]);
+            taskRequired(taskId);
+            const membership = memberships.get(taskId);
+            if (membership) {
+                memberships.delete(taskId);
+                emit("task.left", { membership });
+            }
+            return taskResponse(taskId);
+        },
+        async reorderTask(
+            taskId: string,
+            request: { readonly afterId: string | null },
+            ...rest: unknown[]
+        ) {
+            await record("reorderTask", [taskId, request, ...rest]);
+            const current = memberships.get(taskId);
+            if (current === undefined)
+                throw new HappyAgentApiError(404, "Not a member.", "not_found", null);
+            const others = membershipsOrdered().filter((entry) => entry.taskId !== taskId);
+            const index =
+                request.afterId === null
+                    ? -1
+                    : others.findIndex((entry) => entry.taskId === request.afterId);
+            const membership: TaskMembership = {
+                ...current,
+                orderKey: generateKeyBetween(
+                    others[index]?.orderKey ?? null,
+                    others[index + 1]?.orderKey ?? null,
+                ),
+            };
+            memberships.set(taskId, membership);
+            emit("task.reordered", { membership });
+            return taskResponse(taskId);
+        },
+        async archiveTask(taskId: string, options: { readonly ifMatch: string }) {
+            await record("archiveTask", [taskId, options]);
+            return taskArchivalSet(taskId, options.ifMatch, true);
+        },
+        async unarchiveTask(taskId: string, options: { readonly ifMatch: string }) {
+            await record("unarchiveTask", [taskId, options]);
+            return taskArchivalSet(taskId, options.ifMatch, false);
         },
         async watchGit(...args: unknown[]) {
             await record("watchGit", args);
@@ -743,6 +1046,44 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
         return agent;
     }
 
+    function seedTask(
+        overrides: Partial<Omit<Task, "agent">> & {
+            readonly id?: string;
+            readonly joinedKey?: string;
+        } = {},
+    ): Task {
+        const { joinedKey, ...fields } = overrides;
+        const id = fields.id ?? `task-${String((idCounter += 1))}`;
+        const workspaceId = fields.workspaceId ?? `taskws-${id}`;
+        const agent = seedAgent(workspaceId, { title: fields.name ?? id });
+        const task: Task = {
+            archivedAt: null,
+            canArchive: false,
+            compute: { path: `/tmp/tasks/${id}`, type: "host" },
+            createdAt: 1,
+            creatorAgentId: null,
+            folderName: id,
+            name: id,
+            ownerUserId: null,
+            status: "active",
+            updatedAt: 1,
+            version: versionOf((versionCounter += 1)),
+            ...fields,
+            agent,
+            id,
+            workspaceId,
+        };
+        tasks.set(id, task);
+        if (joinedKey !== undefined)
+            memberships.set(id, {
+                joinedAt: 1,
+                orderKey: joinedKey,
+                taskId: id,
+                userId: profile.userId ?? null,
+            });
+        return task;
+    }
+
     return {
         client: client as unknown as HappyAgentClient,
         calls,
@@ -767,6 +1108,24 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
         workspaceSeed: seedWorkspace,
         agentSeed: seedAgent,
         agentGet: agentRequired,
+        taskSeed: seedTask,
+        taskGet: taskRequired,
+        taskMembershipGet: (taskId) => memberships.get(taskId) ?? null,
+        taskReplace(task) {
+            tasks.set(task.id, task);
+        },
+        userSeed(user) {
+            users.set(user.id, user);
+        },
+        profileSet(changes) {
+            profile = { ...profile, ...changes };
+        },
+        draftSeed(agentId, draft) {
+            drafts.set(agentId, draft);
+        },
+        modeSeed(agentId, mode) {
+            modes.set(agentId, mode);
+        },
         agentReplace(agent) {
             agents.set(agent.id, agent);
         },
@@ -799,10 +1158,21 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
         gapOnNextStream() {
             nextStreamGap = true;
         },
+        onboardingSet(state) {
+            onboarding = state;
+        },
         healthSet(options) {
             if (options.ready !== undefined) healthReady = options.ready;
             if (options.protocol !== undefined) protocol = options.protocol;
             if (options.daemon !== undefined) daemonVersion = options.daemon;
+            if (options.desktopLiveControl !== undefined)
+                desktopLiveControl = options.desktopLiveControl;
+        },
+        liveSessionSet(session) {
+            liveSessions.set(session.id, session);
+        },
+        liveSessionGet(id) {
+            return liveSessions.get(id);
         },
         configGet: () => config,
         configSet(next) {
