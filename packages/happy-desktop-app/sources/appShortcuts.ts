@@ -61,6 +61,11 @@ export const APP_SHORTCUT_SECTIONS: readonly ShortcutSheetSection[] = [
                 title: "Show or hide the side panel",
                 shortcut: APP_SHORTCUTS.panelToggle,
             },
+            {
+                id: "panel-alternate",
+                title: "Show or hide the side panel",
+                shortcut: APP_SHORTCUTS.panelToggleAlternate,
+            },
             { id: "sidebar", title: "Show or hide the sidebar", shortcut: commandShortcut("b") },
             { id: "back", title: "Back", shortcut: commandShortcut("[") },
             { id: "forward", title: "Forward", shortcut: commandShortcut("]") },
