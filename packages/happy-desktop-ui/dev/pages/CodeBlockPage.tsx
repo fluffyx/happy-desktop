@@ -76,7 +76,11 @@ export function CodeBlockPage() {
                 number="03"
                 stage="surface"
             >
-                {frame(<CodeBlock lang={codeBlockLanguage("pseudocode")} text={plain} />)}
+                {frame(
+                    <CodeBlockFrame text={plain}>
+                        <CodeBlock lang={codeBlockLanguage("pseudocode")} text={plain} />
+                    </CodeBlockFrame>,
+                )}
             </Specimen>
 
             <Specimen
