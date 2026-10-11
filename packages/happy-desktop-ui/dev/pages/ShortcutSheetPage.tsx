@@ -18,7 +18,10 @@ const sections: ShortcutSheetSection[] = [
             {
                 id: "project",
                 title: "Jump to a project by number",
-                shortcut: { aria: "Meta+1 through Meta+9", caps: "⌘1–9" },
+                shortcut: {
+                    aria: "Meta+1 Meta+2 Meta+3 Meta+4 Meta+5 Meta+6 Meta+7 Meta+8 Meta+9",
+                    caps: "⌘1–9",
+                },
             },
         ],
     },

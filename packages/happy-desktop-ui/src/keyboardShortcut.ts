@@ -12,17 +12,18 @@ export interface CommandShortcut extends KeyboardShortcut {
 
 /**
  * The keys a chord may be built on that are not letters or digits: where each
- * one is, what its cap says, and what a screen reader calls it. A bracket has
- * no `Key…` code the way a letter does, and Shift turns its `key` into another
- * character altogether, so these chords are recognised by where the key is.
- * An arrow is named by its `key` already; it is here for its cap.
+ * one is, what its cap says, and the key value `aria-keyshortcuts` names it
+ * by. A bracket has no `Key…` code the way a letter does, and Shift turns its
+ * `key` into another character altogether, so these chords are recognised by
+ * where the key is. An arrow is named by its `key` already; it is here for
+ * its cap.
  */
 const NAMED_KEYS: Readonly<
     Record<string, { readonly code: string; readonly cap: string; readonly aria: string }>
 > = {
-    "[": { code: "BracketLeft", cap: "[", aria: "BracketLeft" },
-    "]": { code: "BracketRight", cap: "]", aria: "BracketRight" },
-    "/": { code: "Slash", cap: "/", aria: "Slash" },
+    "[": { code: "BracketLeft", cap: "[", aria: "[" },
+    "]": { code: "BracketRight", cap: "]", aria: "]" },
+    "/": { code: "Slash", cap: "/", aria: "/" },
     arrowleft: { code: "ArrowLeft", cap: "←", aria: "ArrowLeft" },
     arrowright: { code: "ArrowRight", cap: "→", aria: "ArrowRight" },
     arrowup: { code: "ArrowUp", cap: "↑", aria: "ArrowUp" },
