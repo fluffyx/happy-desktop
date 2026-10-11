@@ -827,6 +827,21 @@
     background: var(--status-error);
 }
 
+/* A nested place with no mark of its own wears its unread dot where its branch
+   meets it, centred on the elbow's end. It is not the elbow, so the fold that
+   hides the elbow leaves it; and it has no ring, because there is no mark to cut
+   it out of and a ring would paint the wrong fill on a hovered or selected row. */
+.happy-sidebar__item-branch-unread {
+    position: absolute;
+    top: calc(50% - 2.5px);
+    left: calc(50% + 6.5px);
+    width: 6px;
+    height: 6px;
+    border-radius: var(--happy-radius-pill);
+    background: var(--status-error);
+    pointer-events: none;
+}
+
 /* The compose pencil's ink is bottom-heavy; lift it to the row's optical center. */
 .happy-sidebar__compose .happy-sidebar__item-leading {
     transform: translateY(-1px);
