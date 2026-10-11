@@ -4745,6 +4745,10 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
         const toolIds = new Set<string>(
             panelNow.tabs.filter((tab) => tab.placement === "main").map((tab) => tab.id),
         );
+        // The review is known by its checkout rather than by a strip id, so a
+        // sweep that includes it closes it by name.
+        const review = current.reviews.get(currentGroup.id);
+        if (review && tabIds.includes(review.id)) props.workspace.reviewClose(currentGroup.id);
         const closeableIds = tabIds.filter(
             (tabId) =>
                 fileIds.has(tabId) ||
