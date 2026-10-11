@@ -38,12 +38,14 @@ const items: SidebarItem[] = [
         kind: "workspace",
         label: "Reconcile invoices",
         status: "waiting",
+        unread: true,
     },
     {
         id: "receipts",
         depth: 2,
         kind: "workspace",
         label: "Collect receipts",
+        unread: true,
     },
     { id: "builder", kind: "project", label: "Builder", avatarId: "builder" },
     {
@@ -123,6 +125,7 @@ export function BotSubtasksPage() {
                                         depth: 1,
                                         label: "changes-comparison-base",
                                         changeStats: { added: 40, deleted: 2 },
+                                        unread: true,
                                     },
                                 ],
                             },
