@@ -26,7 +26,13 @@ export { GptLiveSettings, type GptLiveSettingsProps } from "./GptLiveSettings";
 export { GptLivePhone, type GptLivePhoneProps } from "./GptLivePhone";
 export { CompactActivityRow, type CompactActivityRowProps } from "./CompactActivityRow";
 export { compactCount } from "./countText";
-export { CodeBlock, codeBlockLanguage, type CodeBlockProps } from "./CodeBlock";
+export {
+    CodeBlock,
+    CodeBlockFrame,
+    codeBlockLanguage,
+    type CodeBlockFrameProps,
+    type CodeBlockProps,
+} from "./CodeBlock";
 export { CodeEditor, type CodeEditorProps, type CodeEditorReveal } from "./CodeEditor";
 export {
     ScrollArea,

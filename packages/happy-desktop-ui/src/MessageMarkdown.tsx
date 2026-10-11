@@ -9,10 +9,11 @@ import {
     type ReactNode,
 } from "react";
 import Markdown, { type Components, type ExtraProps, type UrlTransform } from "react-markdown";
+import { CodeBlockFrame } from "./CodeBlock";
 import { ContextMenu } from "./ContextMenu";
 import { filePreviewKind } from "./FilePreview";
 import { type MenuItem } from "./Menu";
-import { markdownFence, markdownFenceIsMermaid } from "./markdownFence";
+import { markdownCodeText, markdownFence, markdownFenceIsMermaid } from "./markdownFence";
 import { type FileOpenHandler } from "./fileReference";
 import { markdownDocumentLinkTarget, markdownFileUrlTransform } from "./MarkdownDocument";
 import { MermaidDiagram } from "./MermaidDiagram";
@@ -367,15 +368,20 @@ const MarkdownPre = ({
             />
         );
     return (
-        <ScrollArea
-            axes="horizontal"
+        <CodeBlockFrame
             className="happy-message__code-block"
             data-happy-desktop-ui="message-code-block"
-            placement="overlay"
-            viewportClassName="happy-message__code-block-viewport"
+            text={fence?.text ?? markdownCodeText(node) ?? ""}
         >
-            <pre {...props}>{children}</pre>
-        </ScrollArea>
+            <ScrollArea
+                axes="horizontal"
+                data-happy-desktop-ui="message-code-scroll"
+                placement="overlay"
+                viewportClassName="happy-message__code-block-viewport"
+            >
+                <pre {...props}>{children}</pre>
+            </ScrollArea>
+        </CodeBlockFrame>
     );
 };
 const MarkdownTable = ({

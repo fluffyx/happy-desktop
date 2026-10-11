@@ -15,14 +15,14 @@ import Markdown, {
     type UrlTransform,
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CodeBlock } from "./CodeBlock";
+import { CodeBlock, CodeBlockFrame } from "./CodeBlock";
 import {
     fileReferenceFragment,
     fileReferenceSplit,
     type FileOpenHandler,
     type FileReference,
 } from "./fileReference";
-import { markdownFence, markdownFenceIsMermaid } from "./markdownFence";
+import { markdownCodeText, markdownFence, markdownFenceIsMermaid } from "./markdownFence";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { ScrollArea } from "./Scrollbar";
 
@@ -300,9 +300,10 @@ const DocumentPre = ({
     if (markdownFenceIsMermaid(fence))
         return <MermaidDiagram source={fence!.text} variant="document" />;
     return (
-        <div
+        <CodeBlockFrame
             className="happy-markdown-document__code"
             data-happy-desktop-ui="markdown-document-code"
+            text={fence?.text ?? markdownCodeText(node) ?? ""}
         >
             {fence ? (
                 <CodeBlock
@@ -319,7 +320,7 @@ const DocumentPre = ({
                     <pre {...props}>{children}</pre>
                 </ScrollArea>
             )}
-        </div>
+        </CodeBlockFrame>
     );
 };
 
