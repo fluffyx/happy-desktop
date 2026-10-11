@@ -94,6 +94,9 @@ export function desktopConnectionUiCreate(input: {
             ...(stored?.defaultPermissionMode
                 ? { defaultPermissionMode: stored.defaultPermissionMode }
                 : {}),
+            // A connection shown again in the same run keeps its switches; they
+            // live only in this window's memory, never in storage.
+            ...(stored?.disabledModels ? { disabledModels: stored.disabledModels } : {}),
         });
     const unsubscribeSettings = input.main
         ? undefined
