@@ -34,7 +34,7 @@ export interface ShortcutSheetProps {
 }
 
 /**
- * C-284 ShortcutSheet — every chord the window answers, in one card.
+ * C-290 ShortcutSheet — every chord the window answers, in one card.
  *
  * The held-Command card shows the handful a glance can hold; this is the rest.
  * It is a Modal, hosted on the app's ModalOverlay like any dialog: sections of

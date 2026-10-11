@@ -3,7 +3,7 @@ import { ShortcutSheet, type ShortcutSheetSection } from "../../src/ShortcutShee
 import { ComponentPage, DimensionRule, Specimen } from "../kit";
 
 /** The component plan this page documents. The selector and the page header read the same value. */
-export const componentNumber = "C-284";
+export const componentNumber = "C-290";
 
 const sections: ShortcutSheetSection[] = [
     {
