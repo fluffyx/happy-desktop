@@ -76,6 +76,7 @@ export const APP_SHORTCUT_SECTIONS: readonly ShortcutSheetSection[] = [
         title: "Tabs",
         items: [
             { id: "chat-new", title: "New chat", shortcut: APP_SHORTCUTS.sessionCreate },
+            { id: "task-new", title: "New task", shortcut: APP_SHORTCUTS.taskCreate },
             {
                 id: "workspace-new",
                 title: "New workspace",
