@@ -257,7 +257,7 @@ function panelParse(value: unknown): HappyAgentPanelMemory | undefined {
     if (typeof value !== "object" || value === null) return undefined;
     const record = value as Record<string, unknown>;
     const browsers = Array.isArray(record.browsers)
-        ? record.browsers.flatMap((entry) => {
+        ? record.browsers.flatMap((entry): HappyAgentPanelBrowserMemory[] => {
               if (typeof entry !== "object" || entry === null) return [];
               const browser = entry as Record<string, unknown>;
               if (typeof browser.url !== "string") return [];
@@ -265,6 +265,10 @@ function panelParse(value: unknown): HappyAgentPanelMemory | undefined {
                   {
                       url: browser.url,
                       label: typeof browser.label === "string" ? browser.label : browser.url,
+                      // Kept, so a page read in the main content returns there.
+                      ...(browser.placement === "main" || browser.placement === "panel"
+                          ? { placement: browser.placement }
+                          : {}),
                   },
               ];
           })
