@@ -100,12 +100,16 @@ export function TabbedPane(props: TabbedPaneProps) {
         if (!element) return;
         const wheel = (event: WheelEvent) => {
             if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-            const delta =
+            // Both axes are in one unit, normalised the way Scrollbar does.
+            const scale =
                 event.deltaMode === WheelEvent.DOM_DELTA_LINE
-                    ? event.deltaY * 16
+                    ? 16
                     : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-                      ? event.deltaY * element.clientWidth
-                      : event.deltaY;
+                      ? element.clientWidth
+                      : 1;
+            // Taking the gesture cancels its native sideways scroll too, so a
+            // diagonal's horizontal part is applied here with the vertical one.
+            const delta = (event.deltaY + event.deltaX) * scale;
             const before = element.scrollLeft;
             element.scrollLeft += delta;
             if (element.scrollLeft !== before) event.preventDefault();
