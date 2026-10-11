@@ -3465,8 +3465,10 @@ function paletteFacts(
     // The most recently closed tab, named the way its tab was: a file by its
     // name, a session by its title as the archive still holds it.
     const closed = workspace.closedTabs[0];
+    // A session comes back by asking the host to restore it, so it is not
+    // offered while the host cannot be asked; files and pages reopen here.
     const closedTab =
-        closed === undefined
+        closed === undefined || (closed.type === "session" && !online)
             ? undefined
             : closed.type === "file"
               ? {
