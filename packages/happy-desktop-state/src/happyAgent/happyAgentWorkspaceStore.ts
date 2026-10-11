@@ -2439,15 +2439,24 @@ export function happyAgentWorkspaceStoreCreate(
     let closedTabs: readonly HappyAgentClosedTab[] = [];
     /** Enough to undo a sweep of "close others"; nobody reopens the fortieth. */
     const CLOSED_TAB_LIMIT = 32;
-    const closedTabKey = (tab: HappyAgentClosedTab): string =>
+    /**
+     * The one entry a session or file can have. A page has none: two tabs on
+     * one address are two closures, each brought back on its own, so a page
+     * matches only its own entry.
+     */
+    const closedTabKey = (tab: HappyAgentClosedTab): string | undefined =>
         tab.type === "session"
             ? `session\u0000${tab.groupId}\u0000${tab.sessionId}`
             : tab.type === "file"
               ? `file\u0000${tab.groupId}\u0000${tab.path}`
-              : `browser\u0000${tab.groupId}\u0000${tab.url}`;
-    const closedTabRemember = (tab: HappyAgentClosedTab): void => {
+              : undefined;
+    /** Whether an entry stands for the same closed tab as another. */
+    const closedTabSame = (entry: HappyAgentClosedTab, tab: HappyAgentClosedTab): boolean => {
         const key = closedTabKey(tab);
-        closedTabs = [tab, ...closedTabs.filter((entry) => closedTabKey(entry) !== key)].slice(
+        return key === undefined ? entry === tab : closedTabKey(entry) === key;
+    };
+    const closedTabRemember = (tab: HappyAgentClosedTab): void => {
+        closedTabs = [tab, ...closedTabs.filter((entry) => !closedTabSame(entry, tab))].slice(
             0,
             CLOSED_TAB_LIMIT,
         );
@@ -2492,9 +2501,8 @@ export function happyAgentWorkspaceStoreCreate(
     };
     /** Drops the entry for a tab that is open again, however it was reopened. */
     const closedTabForget = (tab: HappyAgentClosedTab): void => {
-        const key = closedTabKey(tab);
-        if (!closedTabs.some((entry) => closedTabKey(entry) === key)) return;
-        closedTabs = closedTabs.filter((entry) => closedTabKey(entry) !== key);
+        if (!closedTabs.some((entry) => closedTabSame(entry, tab))) return;
+        closedTabs = closedTabs.filter((entry) => !closedTabSame(entry, tab));
     };
     const fileLoadGenerations = new Map<string, number>();
     let filePresentationId = 0;
