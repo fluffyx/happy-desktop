@@ -833,6 +833,9 @@
    it out of and a ring would paint the wrong fill on a hovered or selected row. */
 .happy-sidebar__item-branch-unread {
     position: absolute;
+    /* Over the elbow, whose `::after` would otherwise paint later and cut
+       through the dot it runs into. */
+    z-index: 1;
     top: calc(50% - 2.5px);
     left: calc(50% + 6.5px);
     width: 6px;

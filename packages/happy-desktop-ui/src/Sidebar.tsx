@@ -1323,12 +1323,13 @@ function SidebarRow({
                 ) : (
                     item().label
                 )}
+                {/* The branch is hidden from assistive technology, so the dot
+                    drawn in it is said here instead — inside the label, which
+                    is the one part of the row the ⌘-number hints never hide. */}
+                {unreadOnBranch() ? (
+                    <span className="happy-visually-hidden">Unread activity</span>
+                ) : null}
             </span>
-            {/* The branch is hidden from assistive technology, so the dot drawn
-                in it is said here instead. */}
-            {unreadOnBranch() ? (
-                <span className="happy-visually-hidden">Unread activity</span>
-            ) : null}
             {props.shortcut ? (
                 <KeyCap
                     className="happy-sidebar__item-shortcut"
