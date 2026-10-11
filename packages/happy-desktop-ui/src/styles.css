@@ -73,6 +73,7 @@
 @import "./styles/command-palette-results.css";
 @import "./styles/command-picker.css";
 @import "./styles/quick-actions.css";
+@import "./styles/shortcut-sheet.css";
 @import "./styles/lightbox.css";
 @import "./styles/form-row.css";
 @import "./styles/data-disclosure.css";
