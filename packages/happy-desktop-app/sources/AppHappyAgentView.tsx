@@ -1274,11 +1274,24 @@ function closedTabReopen(
     online: () => boolean,
     route: {
         readonly chatSelect: (groupId: string, chatId?: string) => void;
-        readonly fileSelect: (groupId: string, path: string, kind: HappyAgentFileTabKind) => void;
+        readonly fileSelect: (
+            groupId: string,
+            chatId: string | undefined,
+            path: string,
+            kind: HappyAgentFileTabKind,
+        ) => void;
     },
 ): void {
     if (closed.type === "file") {
-        route.fileSelect(closed.groupId, closed.path, closed.fileKind);
+        // The file is addressed over a chat of its own group: the one on
+        // screen when it is this group, otherwise the one that group would
+        // resume, the way its sidebar row does.
+        const current = workspace.get();
+        const chatId =
+            current.address.groupId === closed.groupId
+                ? current.address.conversationId
+                : current.groupResume.get(closed.groupId);
+        route.fileSelect(closed.groupId, chatId, closed.path, closed.fileKind);
         return;
     }
     if (closed.type === "browser") {
@@ -3952,8 +3965,8 @@ function paletteCommandRun(
             closedTabReopen(closed, workspace, props.happyAgentOnline, {
                 chatSelect: (groupId, chatId) =>
                     props.onChatSelect(props.happyAgentId, groupId, chatId),
-                fileSelect: (groupId, path, kind) =>
-                    props.onFileSelect(props.happyAgentId, groupId, props.chatId, path, kind),
+                fileSelect: (groupId, chatId, path, kind) =>
+                    props.onFileSelect(props.happyAgentId, groupId, chatId, path, kind),
             });
             return;
         }
@@ -5530,8 +5543,8 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                                     closedTabReopen(closed, props.workspace, happyAgentOnline, {
                                         chatSelect: (groupId, chatId) =>
                                             props.onChatSelect(groupId, chatId),
-                                        fileSelect: (groupId, path, kind) =>
-                                            props.onFileSelect(groupId, props.chatId, path, kind),
+                                        fileSelect: (groupId, chatId, path, kind) =>
+                                            props.onFileSelect(groupId, chatId, path, kind),
                                     });
                                 },
                                 shortcut: APP_SHORTCUTS.tabReopen,
