@@ -4827,10 +4827,15 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
         else props.workspace.panel.tabClose(viewId as HappyAgentPanelTabId);
     };
     // Selecting a tab in the main strip, whether by a click on it or by the
-    // keyboard stepping onto it: a file is addressed beside the session, a tool
-    // moved here is shown, and anything else is a session of this group.
+    // keyboard stepping onto it: the review is opened, a file is addressed
+    // beside the session, a tool moved here is shown, and anything else is a
+    // session of this group.
     const groupTabSelect = (tabId: string) => {
         if (!openGroup) return;
+        if (openReview?.id === tabId) {
+            props.workspace.reviewOpen(openGroup.id);
+            return;
+        }
         const file = groupFileTabs.find((tab) => tab.id === tabId);
         if (file) {
             props.onFileSelect(file.groupId, props.chatId, file.path, file.kind);
