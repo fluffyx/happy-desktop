@@ -51,9 +51,10 @@ function questionCreate(daemon: FakeHappyAgentDaemon): happyAgentProtocol.Questi
  * Opens the desktop's real connection to a fake daemon with one agent that asks
  * and one that never does, and watches the inbox the way the sidebar count does.
  * `waiting` starts the asking agent already paused on its question, as a window
- * opened onto a machine with work blocked would find it.
+ * opened onto a machine with work blocked would find it. `readHeld` holds the
+ * daemon's answer to that question's read after the daemon has decided it.
  */
-async function fixture(options: { readonly waiting?: boolean } = {}) {
+async function fixture(options: { readonly waiting?: boolean; readonly readHeld?: boolean } = {}) {
     const daemon = fakeHappyAgentDaemonCreate();
     const project = daemon.projectSeed({ id: "project-inbox", name: "Inbox project" });
     const agent = daemon.agentSeed(project.id, {
@@ -63,6 +64,10 @@ async function fixture(options: { readonly waiting?: boolean } = {}) {
     });
     if (options.waiting) daemon.questionSet(agent.id, questionCreate(daemon));
     daemon.agentSeed(project.id, { id: "agent-quiet", title: "Quiet work" });
+    const readRelease = options.readHeld
+        ? daemon.pause("getPendingQuestion:respond")
+        : () => undefined;
+    subscriptions.push(readRelease);
     const handle = happyAgentConnectionOpen({
         client: daemon.client,
         cloudHost: {
@@ -90,7 +95,8 @@ async function fixture(options: { readonly waiting?: boolean } = {}) {
     const session = handle.get()!;
     const inbox = session.inbox;
     if (!inbox) throw new Error("expected the connection to offer an inbox");
-    subscriptions.push(inbox.subscribe(() => {}));
+    const inboxUnsubscribe = inbox.subscribe(() => {});
+    subscriptions.push(inboxUnsubscribe);
     await vi.waitFor(() => expect(inbox.get().loading).toBe(false));
 
     const openChat = async () => {
@@ -110,6 +116,8 @@ async function fixture(options: { readonly waiting?: boolean } = {}) {
         ask: () => daemon.questionAsk(agent.id, questionCreate(daemon)),
         daemon,
         inbox,
+        inboxUnsubscribe,
+        readRelease,
         openChat,
     };
 }
@@ -192,4 +200,42 @@ it("drops a question whose run was aborted without calling it answered", async (
     await vi.waitFor(() => expect(f.inbox.get().pending).toEqual([]));
     expect(f.inbox.get().answered).toEqual([]);
     expect(f.daemon.callCount("answerQuestion")).toBe(0);
+});
+
+it("keeps an answer that arrived while the question was still being read", async () => {
+    const f = await fixture({ waiting: true, readHeld: true });
+    await vi.waitFor(() => expect(f.daemon.callCount("getPendingQuestion")).toBe(1));
+
+    // Another client answers after the read captured the question pending but
+    // before its response arrives.
+    await f.daemon.client.answerQuestion(AGENT_ID, QUESTION_ID, {
+        answers: { "prompt-migration": ["Piecemeal"] },
+    });
+    // Let the resolution reach the feed ahead of the held read.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    f.readRelease();
+
+    await vi.waitFor(() =>
+        expect(f.inbox.get().answered.map((item) => [item.id, item.answers])).toEqual([
+            [ITEM_ID, { "prompt-migration": ["Piecemeal"] }],
+        ]),
+    );
+    expect(f.inbox.get().pending).toEqual([]);
+});
+
+it("keeps the answered list when the inbox is followed again", async () => {
+    const f = await fixture();
+    f.ask();
+    await vi.waitFor(() => expect(f.inbox.get().pending).toHaveLength(1));
+    f.inbox.itemAnswer(ITEM_ID, { "prompt-migration": ["Piecemeal"] });
+    await vi.waitFor(() => expect(f.inbox.get().answered).toHaveLength(1));
+
+    // The sidebar stops following when experimental features are switched off
+    // or another Happy Agent is addressed, and follows again on the way back.
+    f.inboxUnsubscribe();
+    subscriptions.push(f.inbox.subscribe(() => {}));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(f.inbox.get().answered.map((item) => item.id)).toEqual([ITEM_ID]);
+    expect(f.inbox.get().pending).toEqual([]);
 });

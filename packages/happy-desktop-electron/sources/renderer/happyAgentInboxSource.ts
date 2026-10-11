@@ -16,6 +16,7 @@ import {
 } from "happy-desktop-state";
 
 type Question = happyAgentProtocol.Question;
+type QuestionResolution = happyAgentProtocol.QuestionUpdatedPayload;
 
 /**
  * Builds the inbox's question feed from what Happy Agent already states.
@@ -24,25 +25,36 @@ type Question = happyAgentProtocol.Question;
  * on as `pendingQuestionId`, which the connection's catalog already follows,
  * and each named question is read once by id. Which questions are pending is
  * therefore the catalog's call; `question.updated` only adds how a question
- * ended, so one answered while this window watched — here or in its own chat —
- * moves to the answered list. A canceled one, or one resolved while the stream
- * was down, simply leaves: answered questions are not readable afterwards, so
- * the answered list only holds what this window saw resolve.
+ * ended, so one answered while the inbox was followed — here or in its own
+ * chat — moves to the answered list. A canceled one, or one resolved while
+ * nothing followed the inbox or the stream was down, simply leaves: answered
+ * questions are not readable afterwards, so the answered list only holds what
+ * this source saw resolve.
  */
 export function happyAgentInboxSourceCreate(
     client: Pick<HappyAgentClient, "getPendingQuestion">,
     connection: Pick<HappyAgentConnection, "connectGroups" | "sync">,
 ): HappyAgentInboxSource {
+    /**
+     * Every question read or announced, by id. It outlives each subscription so
+     * the answered list survives the inbox being put away and followed again;
+     * only answered questions are kept between subscriptions.
+     */
+    const questions = new Map<string, Question>();
+    /** Where each question's session was last listed, kept for its answered row. */
+    const askers = new Map<string, GroupSession>();
     return {
         subscribe(listener, onError) {
             const controller = new AbortController();
             /** Every session the catalog lists now, by id. */
             let sessions = new Map<string, GroupSession>();
-            /** Every question read or announced while subscribed, by id. */
-            const questions = new Map<string, Question>();
-            /** Where each question's session was last listed, kept for its answered row. */
-            const askers = new Map<string, GroupSession>();
             const reading = new Set<string>();
+            /**
+             * How a question ended, when that arrived while it was still being
+             * read: the read may have captured it pending, and this is the only
+             * word of its answer this source will get.
+             */
+            const resolutions = new Map<string, QuestionResolution>();
             let catalogLoaded = false;
             /**
              * What was last delivered. The catalog changes with every draft and
@@ -85,12 +97,22 @@ export function happyAgentInboxSourceCreate(
                     .then(({ question }) => {
                         // Gone by the time it was read: the catalog has already
                         // stopped naming it, or will.
-                        if (question === null || questions.has(question.id)) return;
-                        questions.set(question.id, question);
+                        if (controller.signal.aborted || question === null) return;
+                        if (questions.has(question.id)) return;
+                        const resolution = resolutions.get(question.id);
+                        questions.set(
+                            question.id,
+                            resolution === undefined
+                                ? question
+                                : questionResolve(question, resolution),
+                        );
                         publish();
                     })
                     .catch(() => undefined)
-                    .finally(() => reading.delete(questionId));
+                    .finally(() => {
+                        reading.delete(questionId);
+                        resolutions.delete(questionId);
+                    });
             };
 
             const groups = connection.connectGroups({
@@ -121,15 +143,16 @@ export function happyAgentInboxSourceCreate(
                         questions.set(question.id, question);
                         publish();
                     } else if (event.type === "question.updated") {
+                        const questionId = event.payload.questionId;
+                        const question = questions.get(questionId);
+                        if (question === undefined) {
+                            if (reading.has(questionId)) resolutions.set(questionId, event.payload);
+                            continue;
+                        }
                         // A question resolves exactly once, so the first update
                         // naming a pending one is how it ended.
-                        const question = questions.get(event.payload.questionId);
-                        if (question?.status !== "pending") continue;
-                        questions.set(question.id, {
-                            ...question,
-                            ...event.payload.changes,
-                            version: event.payload.version,
-                        });
+                        if (question.status !== "pending") continue;
+                        questions.set(questionId, questionResolve(question, event.payload));
                         publish();
                     }
                 }
@@ -138,9 +161,21 @@ export function happyAgentInboxSourceCreate(
             return () => {
                 controller.abort();
                 groups.close();
+                // A question still pending may be answered or abandoned while
+                // nothing follows, so it is read afresh next time; an answer
+                // already seen is history and stays.
+                for (const [questionId, question] of questions) {
+                    if (question.status === "answered") continue;
+                    questions.delete(questionId);
+                    askers.delete(questionId);
+                }
             };
         },
     };
+}
+
+function questionResolve(question: Question, resolution: QuestionResolution): Question {
+    return { ...question, ...resolution.changes, version: resolution.version };
 }
 
 function itemProject(
