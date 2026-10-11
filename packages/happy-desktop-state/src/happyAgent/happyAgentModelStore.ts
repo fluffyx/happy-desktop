@@ -452,7 +452,7 @@ function selectionsFromDocument(
     disabledModels: ReadonlySet<HappyAgentModelKey>,
     current?: HappyAgentModelStoreReadySnapshot,
 ): Pick<HappyAgentModelStoreReadySnapshot, "defaultSelection" | "lastUsedSelection"> {
-    const catalogDefault = happyAgentSessionSelectionDefault(catalog);
+    const catalogDefault = happyAgentSessionSelectionDefault(catalog, disabledModels);
     const catalogDefaultModel = catalog.providers
         .find((provider) => provider.id === catalogDefault.providerId)
         ?.models.find((model) => model.id === catalogDefault.modelId);

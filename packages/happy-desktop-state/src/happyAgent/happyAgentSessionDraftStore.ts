@@ -4,7 +4,7 @@ import {
     happyAgentMenusReferencesPreserve,
     happyAgentMenusSelectionProject,
 } from "./happyAgentMenusStore.js";
-import type { HappyAgentModelKey } from "./happyAgentSettingsStore.js";
+import { happyAgentModelKey, type HappyAgentModelKey } from "./happyAgentSettingsStore.js";
 import type {
     HappyAgentMenusSnapshot,
     HappyAgentModelCatalog,
@@ -53,11 +53,14 @@ export interface HappyAgentSessionDraftWriter {
     /**
      * The daemon changed what it offers, or the reader switched models on or
      * off in Settings. The pickers re-derive from both; a speed tier the
-     * model/account no longer offers is cleared.
+     * model/account no longer offers is cleared. A draft on a model that is
+     * now switched off moves to `fallback`, the selection a new session would
+     * otherwise start with.
      */
     catalogChanged(
         catalog: HappyAgentModelCatalog,
         disabledModels?: ReadonlySet<HappyAgentModelKey>,
+        fallback?: HappyAgentSelection,
     ): void;
 }
 
@@ -93,15 +96,21 @@ const DEFAULT_PERMISSION_MODE: HappyAgentPermissionMode = "auto";
  * catalog, but it is not worth refusing to start a session over — the daemon
  * still applies its own default. The first listed model of the first usable
  * provider stands in, so the pickers open on something real rather than on a
- * model id that does not exist.
+ * model id that does not exist. A declared default the reader switched off in
+ * Settings is passed over the same way, as is every switched-off model.
  */
 export function happyAgentSessionSelectionDefault(
     catalog: HappyAgentModelCatalog,
+    disabledModels?: ReadonlySet<HappyAgentModelKey>,
 ): HappyAgentSelection {
+    const switchedOff = (providerId: string, modelId: string): boolean =>
+        disabledModels?.has(happyAgentModelKey(providerId, modelId)) ?? false;
     const declared = catalog.providers.find(
         (provider) => provider.id === catalog.defaultProviderId,
     );
-    const declaredModel = declared?.models.find((model) => model.id === catalog.defaultModelId);
+    const declaredModel = switchedOff(catalog.defaultProviderId, catalog.defaultModelId)
+        ? undefined
+        : declared?.models.find((model) => model.id === catalog.defaultModelId);
     const provider =
         declaredModel !== undefined
             ? declared
@@ -109,9 +118,11 @@ export function happyAgentSessionSelectionDefault(
                   (candidate) =>
                       candidate.disabledReason === undefined &&
                       !candidate.hidden &&
-                      candidate.models.length > 0,
+                      candidate.models.some((model) => !switchedOff(candidate.id, model.id)),
               );
-    const model = declaredModel ?? provider?.models[0];
+    const model =
+        declaredModel ??
+        provider?.models.find((candidate) => !switchedOff(provider.id, candidate.id));
     return {
         providerId: provider?.id ?? catalog.defaultProviderId,
         modelId: model?.id ?? catalog.defaultModelId,
@@ -255,7 +266,7 @@ export function happyAgentSessionDraftStoreOwnedCreate(options: HappyAgentSessio
     let disabledModels = options.disabledModels;
     const seed = happyAgentSelectionServiceTierReconcile(
         catalog,
-        options.selection ?? happyAgentSessionSelectionDefault(catalog),
+        options.selection ?? happyAgentSessionSelectionDefault(catalog, disabledModels),
     );
     const snapshotOf = (selection: HappyAgentSelection): HappyAgentSessionDraftSnapshot => ({
         selection,
@@ -306,15 +317,26 @@ export function happyAgentSessionDraftStoreOwnedCreate(options: HappyAgentSessio
                 ),
         },
         writer: {
-            catalogChanged(next, nextDisabled) {
+            catalogChanged(next, nextDisabled, fallback) {
                 if (next === catalog && nextDisabled === disabledModels) return;
                 catalog = next;
                 disabledModels = nextDisabled;
                 const previous = store.getState();
-                const selection = happyAgentSelectionServiceTierReconcile(
-                    catalog,
-                    previous.selection,
-                );
+                // No session exists yet, so a model switched off under the
+                // draft is not kept: it moves to the fallback, keeping the
+                // reader's access mode.
+                const moved =
+                    fallback !== undefined &&
+                    disabledModels?.has(
+                        happyAgentModelKey(
+                            previous.selection.providerId,
+                            previous.selection.modelId,
+                        ),
+                    ) &&
+                    !disabledModels.has(happyAgentModelKey(fallback.providerId, fallback.modelId))
+                        ? { ...fallback, permissionMode: previous.selection.permissionMode }
+                        : previous.selection;
+                const selection = happyAgentSelectionServiceTierReconcile(catalog, moved);
                 const menus = happyAgentMenusReferencesPreserve(
                     previous.menus,
                     happyAgentMenusDerive(
