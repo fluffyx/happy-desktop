@@ -51,7 +51,11 @@ export interface FakeHappyAgentDaemon {
 
     /** Queue one failure for the next call of a method. */
     failOnce(method: string, error?: Error): void;
-    /** Hold every call of a method until the returned release runs. */
+    /**
+     * Hold every call of a method until the returned release runs. For
+     * `"getPendingQuestion:respond"` and `"sendMessage:respond"` only the
+     * response is held, after the daemon has already decided it.
+     */
     pause(method: string): () => void;
 
     /** Seed one project together with its root workspace, sharing the project ID. */
@@ -108,6 +112,12 @@ export interface FakeHappyAgentDaemon {
     /** Mark whether `getMessages` reports more history behind the oldest run. */
     historyHasMoreSet(agentId: string, hasMore: boolean): void;
     questionSet(agentId: string, question: Question | null): void;
+    /**
+     * Opens a pending question on an agent as a run asking would: it emits
+     * `question.created`, then `agent.updated` naming it as `pendingQuestionId`.
+     * Answering it or aborting the agent resolves it with the matching events.
+     */
+    questionAsk(agentId: string, question: Question): void;
 
     /** Mint the next journal cursor; strictly increasing under localeCompare. */
     cursorNext(): string;
@@ -339,6 +349,8 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
     const histories = new Map<string, { runs: HistoryRun[]; pending: UserMessage[] }>();
     const hasMore = new Map<string, boolean>();
     const questions = new Map<string, Question | null>();
+    /** Every question ever asked, by its own id, so a late answer finds what it answers. */
+    const questionsById = new Map<string, Question>();
 
     const calls: FakeDaemonCall[] = [];
     const failures = new Map<string, Error[]>();
@@ -484,6 +496,53 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
             stream.push({ kind: "event", event, cursor: event.cursor });
         }
         return event;
+    };
+
+    /** Points the agent at its open question, or at none, announcing it as the daemon does. */
+    const agentPendingQuestionSet = (agentId: string, questionId: string | null): Agent => {
+        const previous = agentRequired(agentId);
+        const agent = agentBump(agentId, { pendingQuestionId: questionId });
+        emit("agent.updated", {
+            agentId,
+            previousVersion: previous.version,
+            version: agent.version,
+            changes: { pendingQuestionId: questionId, updatedAt: agent.updatedAt },
+        });
+        return agent;
+    };
+
+    /**
+     * Ends the agent's open question the way the daemon does: `question.updated`
+     * carries the outcome, then `agent.updated` clears `pendingQuestionId`.
+     */
+    const questionResolve = (
+        agentId: string,
+        resolution:
+            | { readonly status: "answered"; readonly answers: Record<string, string[]> }
+            | { readonly status: "canceled" },
+    ): { question: Question; agent: Agent } | undefined => {
+        const question = questions.get(agentId);
+        if (question == null || question.status !== "pending") return undefined;
+        const resolved: Question = {
+            ...question,
+            answeredAt: resolution.status === "answered" ? 1 : null,
+            answers: resolution.status === "answered" ? resolution.answers : null,
+            status: resolution.status,
+            version: versionOf((versionCounter += 1)),
+        };
+        questions.set(agentId, resolved);
+        questionsById.set(resolved.id, resolved);
+        emit("question.updated", {
+            questionId: question.id,
+            previousVersion: question.version,
+            version: resolved.version,
+            changes: {
+                status: resolved.status,
+                answers: resolved.answers,
+                answeredAt: resolved.answeredAt,
+            },
+        });
+        return { question: resolved, agent: agentPendingQuestionSet(agentId, null) };
     };
 
     const client = {
@@ -862,7 +921,12 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
         },
         async getPendingQuestion(agentId: string, ...rest: unknown[]) {
             await record("getPendingQuestion", [agentId, ...rest]);
-            return { question: questions.get(agentId) ?? null };
+            const question = questions.get(agentId) ?? null;
+            // A held "getPendingQuestion:respond" gate delays only the HTTP
+            // response, letting a test resolve the question it already captured.
+            const respond = gates.get("getPendingQuestion:respond");
+            if (respond !== undefined) await respond;
+            return { question };
         },
         async getAgentUsage(agentId: string, ...rest: unknown[]) {
             await record("getAgentUsage", [agentId, ...rest]);
@@ -937,20 +1001,39 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
         },
         async answerQuestion(agentId: string, questionId: string, ...rest: unknown[]) {
             await record("answerQuestion", [agentId, questionId, ...rest]);
-            const question = questions.get(agentId);
-            if (question == null) throw new Error(`No pending question for ${agentId}.`);
-            const answered: Question = {
-                ...question,
-                answeredAt: 1,
+            const question = questionsById.get(questionId);
+            if (question === undefined || question.agentId !== agentId)
+                throw new HappyAgentApiError(404, "The question was not found.", "not_found", null);
+            // First write wins: a question already answered, or abandoned for
+            // a newer one, answers with how it stands, not with this answer.
+            if (question.status !== "pending" || questions.get(agentId)?.id !== questionId)
+                throw new HappyAgentApiError(
+                    409,
+                    "The question has already been resolved.",
+                    "conflict",
+                    { question },
+                );
+            const answers = (rest[0] as { answers?: Record<string, string[]> } | undefined)
+                ?.answers;
+            if (question.questions.some((prompt) => !answers?.[prompt.id]?.length))
+                throw new HappyAgentApiError(
+                    400,
+                    "Every question in the batch must receive an answer.",
+                    "invalid_request",
+                    null,
+                );
+            const resolved = questionResolve(agentId, {
                 status: "answered",
-                version: versionOf((versionCounter += 1)),
-            };
-            questions.set(agentId, answered);
-            return { question: answered };
+                answers: answers ?? {},
+            });
+            if (resolved === undefined) throw new Error(`No pending question for ${agentId}.`);
+            return { question: resolved.question };
         },
         async abortAgent(agentId: string, ...rest: unknown[]) {
             await record("abortAgent", [agentId, ...rest]);
-            return { agent: agentBump(agentId), cursor: latestCursor };
+            // Aborting the run cancels the question it was waiting on.
+            const canceled = questionResolve(agentId, { status: "canceled" });
+            return { agent: canceled?.agent ?? agentBump(agentId), cursor: latestCursor };
         },
         async compactAgent(agentId: string, ...rest: unknown[]) {
             await record("compactAgent", [agentId, ...rest]);
@@ -1228,6 +1311,13 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
         },
         questionSet(agentId, question) {
             questions.set(agentId, question);
+            if (question !== null) questionsById.set(question.id, question);
+        },
+        questionAsk(agentId, question) {
+            questions.set(agentId, question);
+            questionsById.set(question.id, question);
+            emit("question.created", { question });
+            agentPendingQuestionSet(agentId, question.id);
         },
         cursorNext: () => (latestCursor = cursorOf((cursorCounter += 1))),
         cursorLatest: () => latestCursor,

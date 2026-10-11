@@ -832,6 +832,7 @@ function projectAgent(
         // it never has to be guessed at from where a session did or did not turn
         // up.
         ...(agent.parentAgentId === null ? {} : { parentSessionId: agent.parentAgentId }),
+        ...(agent.pendingQuestionId === null ? {} : { pendingQuestionId: agent.pendingQuestionId }),
         permissionMode: mode.permissionMode,
         scope,
         providerId: mode.providerId,

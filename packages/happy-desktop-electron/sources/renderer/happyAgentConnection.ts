@@ -28,6 +28,7 @@ import {
     type HappyAgentDebugLogInput,
     type HappyAgentDebugLogStore,
     type HappyAgentHost,
+    type HappyAgentInboxStore,
     type HappyAgentIntegrationStore,
     type HappyAgentInstructionsStore,
     type HappyAgentModelPreferencePersistence,
@@ -55,6 +56,7 @@ import {
 } from "./desktopHappyMobileOnboarding";
 import { happyAgentCatalogSourceCreate } from "./happyAgentCatalogSource";
 import { happyAgentHostServicesCreate } from "./happyAgentHostServices";
+import { happyAgentInboxSourceCreate } from "./happyAgentInboxSource";
 import { happyAgentProfileSourceCreate } from "./happyAgentProfileSource";
 import { happyAgentTranscriptConnectCreate } from "./happyAgentTranscriptSource";
 import { happyAgentUsageSourceCreate } from "./happyAgentUsageSource";
@@ -110,6 +112,8 @@ export interface HappyAgentSession {
     readonly models: HappyAgentModelStore;
     readonly happyIntegration: () => HappyAgentIntegrationStore;
     readonly profile: () => HappyAgentProfileStore | undefined;
+    /** Every question this Happy Agent's agents are waiting on. */
+    readonly inbox: HappyAgentInboxStore | undefined;
     readonly providerUsage: HappyAgentProviderUsageStore | undefined;
     readonly providers: HappyAgentProvidersStore;
     readonly workspace: HappyAgentWorkspaceStore;
@@ -400,6 +404,7 @@ export function happyAgentConnectionOpen(input: {
         profileActions: profile.actions,
         profilePhotoCodec: { open: imageCropOpen },
         profileSource: profile.source,
+        inboxSource: happyAgentInboxSourceCreate(directClient, agentConnection),
         providerUsageSource: happyAgentUsageSourceCreate(directClient),
         transcriptConnect: happyAgentTranscriptConnectCreate(agentConnection),
         connectMutationSubscribe: (listener) => {
@@ -515,6 +520,7 @@ export function happyAgentConnectionOpen(input: {
                     happyIntegration: () => client.happyIntegration(),
                     models: client.models,
                     profile: () => profileStore,
+                    inbox: client.inbox(),
                     providerUsage: client.providerUsage(),
                     providers: client.providers(),
                     workspace: preparedWorkspace,
