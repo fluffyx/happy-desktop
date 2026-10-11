@@ -408,16 +408,18 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
     };
 
     /**
-     * Writes the addressed group's arrangement down. Everything restorable is
-     * derived from the tabs themselves, so there is no second copy of the panel
-     * to keep in step with this one.
+     * Writes one group's arrangement down, the addressed group's unless another
+     * is named. Everything restorable is derived from the tabs themselves, so
+     * there is no second copy of the panel to keep in step with this one.
      */
-    const remember = (): void => {
-        if (!groupId || !deps.memoryWrite) return;
-        const browsers = tabs.filter((tab) => tab.groupId === groupId && tab.kind === "browser");
-        const activeIndex = browsers.findIndex((tab) => tab.id === activeViewId);
-        deps.memoryWrite(groupId, {
-            open,
+    const remember = (group: HappyAgentGroupId | undefined = groupId): void => {
+        if (!group || !deps.memoryWrite) return;
+        const addressed = group === groupId;
+        const browsers = tabs.filter((tab) => tab.groupId === group && tab.kind === "browser");
+        const selected = addressed ? activeViewId : activeByGroup.get(group);
+        const activeIndex = browsers.findIndex((tab) => tab.id === selected);
+        deps.memoryWrite(group, {
+            open: addressed ? open : (chromeByGroup.get(group)?.open ?? false),
             browsers: browsers.map((tab) => ({
                 url: tab.url ?? "about:blank",
                 label: tab.label,
@@ -641,16 +643,20 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
         browserRestore(tab) {
             if (disposed) return;
             const before = activeViewId;
+            // The group's remembered arrangement is read back first, so reading
+            // it when the group is addressed cannot replace the page put back.
+            groupRestore(tab.groupId);
             browserTabAdd(tab.groupId, tab.url, tab.label);
             if (tab.groupId === groupId) {
                 open = true;
                 remember();
             } else {
                 // Another group's page: it is selected there for when that
-                // group is addressed, while this panel keeps showing what it
-                // was showing.
+                // group is addressed, and written down there, while this panel
+                // keeps showing what it was showing.
                 activeViewId = before;
                 chromeByGroup.set(tab.groupId, { open: true });
+                remember(tab.groupId);
             }
             recompute();
         },
