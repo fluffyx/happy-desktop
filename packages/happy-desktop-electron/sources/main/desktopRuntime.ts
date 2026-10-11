@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type {
+    DesktopBrowserProxyTarget,
     DesktopRuntimeSnapshot,
     DesktopStartRequest,
     DesktopTopology,
@@ -20,18 +21,21 @@ import {
     desktopTopologyTarget,
 } from "./runtimeValidation";
 import {
+    HappyAgentStartTimeoutError,
     localHappyAgentConnectorCreate,
     type LocalHappyAgentConnection,
     type LocalHappyAgentConnector,
 } from "./localHappyAgent";
 import { HappyAgentClient } from "@slopus/happy-agent-client";
-import type { LocalHappyAgentOnboardingState, LocalHappyAgentProfile } from "./localOnboarding";
+import type { LocalHappyAgentOnboardingState } from "./localOnboarding";
 import {
     happyAgentDaemonConnectionUnavailable,
     type HappyAgentDaemonInspectorResponse,
     type HappyAgentDaemonInspectorStopResponse,
 } from "./happyAgentDaemonClient";
 import type { HtmlPreviewProxyHandle } from "./htmlPreviewProxy";
+import type { ArtifactSiteHandle } from "./artifactSite";
+import { happyAgentRendererOrigin, type HappyAgentRendererProxy } from "./happyAgentRendererProxy";
 import { happyAgentHttpProxyCreate, type HappyAgentHttpProxyHandle } from "./happyAgentHttpProxy";
 import type { Duplex } from "node:stream";
 
@@ -59,6 +63,7 @@ export interface DesktopRuntimePaths {
 }
 
 export interface DesktopRuntimeOptions {
+    readonly rendererProxy?: HappyAgentRendererProxy;
     readonly localHappyAgentConnector?: LocalHappyAgentConnector;
     readonly happyAgentHttpProxyStart?: HappyAgentHttpProxyStart;
     /**
@@ -68,6 +73,9 @@ export interface DesktopRuntimeOptions {
     readonly rendererOrigin?: string;
     /** The window's HTML preview proxy, so a Happy Agent's documents can be published. */
     readonly htmlPreview?: HtmlPreviewProxyHandle;
+    /** The artifact partition's sites, so a Happy Agent's HTML artifacts can be served. */
+    readonly artifactSite?: ArtifactSiteHandle;
+    readonly debug?: (message: string) => void;
 }
 
 /** Owns the active local-Happy Agent topology and one immutable renderer snapshot. */
@@ -92,6 +100,7 @@ export class DesktopRuntime implements AsyncDisposable {
     private snapshotValue: DesktopRuntimeSnapshot;
     private readonly connector: LocalHappyAgentConnector;
     private readonly proxyStart: HappyAgentHttpProxyStart;
+    private readonly rendererHttpUrl: string | undefined;
 
     private constructor(
         private readonly paths: DesktopRuntimePaths,
@@ -99,6 +108,7 @@ export class DesktopRuntime implements AsyncDisposable {
         options: DesktopRuntimeOptions,
     ) {
         this.settings = settings;
+        this.rendererHttpUrl = options.rendererProxy ? happyAgentRendererOrigin : undefined;
         this.connector = options.localHappyAgentConnector ?? localHappyAgentConnectorCreate();
         this.proxyStart =
             options.happyAgentHttpProxyStart ??
@@ -106,8 +116,11 @@ export class DesktopRuntime implements AsyncDisposable {
                 happyAgentHttpProxyCreate({
                     client: connection.client,
                     onConnectionError,
+                    ...(options.rendererProxy ? { rendererProxy: options.rendererProxy } : {}),
                     ...(options.rendererOrigin ? { allowedOrigin: options.rendererOrigin } : {}),
                     ...(options.htmlPreview ? { htmlPreview: options.htmlPreview } : {}),
+                    ...(options.artifactSite ? { artifactSite: options.artifactSite } : {}),
+                    ...(options.debug ? { debug: options.debug } : {}),
                 }));
         const configuredActive = settings?.topologies.find(
             ({ id }) => id === settings.activeTopologyId,
@@ -193,23 +206,6 @@ export class DesktopRuntime implements AsyncDisposable {
         return state;
     }
 
-    async localOnboardingProfileCreate(
-        expectedConnectionId: number,
-        input: { readonly email: string; readonly name: string },
-    ): Promise<LocalHappyAgentProfile> {
-        return this.serial(async () => {
-            this.localConnectionRequire(expectedConnectionId);
-            const client = this.localHappyAgentClient();
-            if (!client) throw new Error("The local Happy Agent daemon is unavailable.");
-            const current = await client.getProfile();
-            return (
-                await client.updateProfile(input, {
-                    ifMatch: current.profile.version,
-                })
-            ).profile;
-        });
-    }
-
     localOnboardingFreshness(expectedConnectionId: number): Promise<"fresh" | "used"> {
         return this.serial(async () => {
             this.localConnectionRequire(expectedConnectionId);
@@ -270,15 +266,44 @@ export class DesktopRuntime implements AsyncDisposable {
         return endpoint ? endpoint.replace(/\/$/u, "") : undefined;
     }
 
-    /** Opens one authenticated browser-proxy tunnel for a local session. */
-    openHttpProxy(sessionId: string): Promise<Duplex> {
+    /** Opens a workspace tunnel through its owning host-published connection. */
+    openHttpProxy(target: DesktopBrowserProxyTarget): Promise<Duplex> {
+        return this.browserClient(target).openWorkspaceHttpProxy(target.workspaceId);
+    }
+
+    browserServiceResolve(
+        target: DesktopBrowserProxyTarget,
+        selector: { readonly id: string } | { readonly port: number },
+        signal: AbortSignal,
+    ): Promise<string> {
+        return this.browserClient(target).browserServiceResolve(
+            target.workspaceId,
+            selector,
+            signal,
+        );
+    }
+
+    openServiceHttpProxy(
+        target: DesktopBrowserProxyTarget,
+        serviceId: string,
+        signal: AbortSignal,
+    ): Promise<Duplex> {
+        return this.browserClient(target).openWorkspaceServiceProxy(
+            target.workspaceId,
+            serviceId,
+            signal,
+        );
+    }
+
+    private browserClient(target: DesktopBrowserProxyTarget) {
         if (
             this.snapshotValue.phase !== "ready" ||
             this.snapshotValue.mode !== "local" ||
             !this.happyAgentConnection
         )
             throw new Error("The local Happy Agent daemon is unavailable.");
-        return this.happyAgentConnection.client.openHttpProxy(sessionId);
+        const host = this.happyAgentConnection.client;
+        return target.connectionId === null ? host : host.connection(target.connectionId);
     }
 
     start(request: DesktopStartRequest): Promise<void> {
@@ -333,7 +358,9 @@ export class DesktopRuntime implements AsyncDisposable {
                 this.happyAgentProxy !== proxy
             )
                 return;
-            const replacement = await this.connector.connect();
+            // Reconnect may attach to a replacement, but must respect a user who stopped the
+            // daemon from its tray or CLI. Initial startup and explicit retry still start it.
+            const replacement = await this.connector.connect({ startIfMissing: false });
             if (
                 this.closed ||
                 this.activationGeneration !== generation ||
@@ -346,7 +373,7 @@ export class DesktopRuntime implements AsyncDisposable {
                 return;
             }
             try {
-                proxy.replace({
+                await proxy.replace({
                     client: replacement.client,
                 });
             } catch (replaceError) {
@@ -484,7 +511,7 @@ export class DesktopRuntime implements AsyncDisposable {
             }
             this.happyAgentProxy = proxy;
             const happyAgentVersion = connection.version;
-            const happyAgentHttpUrl = proxy.url;
+            const happyAgentHttpUrl = this.rendererHttpUrl ?? proxy.url;
             if (this.persistOnSuccess) {
                 const settings = desktopSettingsActivate(this.settings, topology);
                 await desktopSettingsWrite(
@@ -515,6 +542,9 @@ export class DesktopRuntime implements AsyncDisposable {
             this.publish({
                 phase: "error",
                 message: displayError(error),
+                ...(error instanceof HappyAgentStartTimeoutError
+                    ? { code: "start_timeout" as const }
+                    : {}),
                 request,
                 retryable: true,
                 targets: this.targets(),
@@ -587,10 +617,9 @@ async function connectedHappyAgentOnboardingResolve(
         const state = await client.getOnboarding({
             signal: AbortSignal.timeout(onboardingRequestTimeoutMs),
         });
-        const profileDone = state.steps.profile.done;
-        if (!state.steps.providers.done) return { profileDone, state: "provider_setup" };
-        if (!profileDone) return { profileDone, state: "profile_required" };
-        return { profileDone, state: "complete" };
+        // A profile is not asked for here: a solo machine runs without one, and a
+        // team deployment sets it up as part of joining the team.
+        return { state: state.steps.providers.done ? "complete" : "provider_setup" };
     } catch (error) {
         return happyAgentUnreachableState(error);
     }

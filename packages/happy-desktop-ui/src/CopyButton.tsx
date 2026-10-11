@@ -7,9 +7,18 @@ export interface CopyButtonProps {
     readonly "data-testid"?: string;
     /** What the button offers to copy, for example "Copy command". */
     readonly label: string;
+    /**
+     * Written beside the glyph, for a copy action that is the whole control
+     * rather than a quiet affordance on a row that already says what it holds.
+     */
+    readonly caption?: string;
+    /** Said instead of the caption for the moment after a copy lands. */
+    readonly copiedCaption?: string;
     readonly style?: CSSProperties;
     /** Exact text handed to the clipboard, read lazily when deriving it is expensive. */
     readonly text: string | (() => string);
+    /** Told once the clipboard has taken the text; never told what the text was. */
+    readonly onCopy?: () => void;
 }
 
 /** How long the copied check stays before the button offers the copy again. */
@@ -31,6 +40,7 @@ export function CopyButton(props: CopyButtonProps) {
             const text = typeof props.text === "function" ? props.text() : props.text;
             await navigator.clipboard.writeText(text);
             setCopied(true);
+            props.onCopy?.();
             if (copiedTimer.current !== undefined) clearTimeout(copiedTimer.current);
             copiedTimer.current = setTimeout(() => {
                 copiedTimer.current = undefined;
@@ -44,6 +54,7 @@ export function CopyButton(props: CopyButtonProps) {
         <button
             aria-label={copied ? "Copied" : props.label}
             className={["happy-copy-button", props.className].filter(Boolean).join(" ")}
+            data-captioned={props.caption === undefined ? undefined : ""}
             data-copied={copied ? "" : undefined}
             data-happy-desktop-ui={props["data-happy-desktop-ui"] ?? "copy-button"}
             data-testid={props["data-testid"]}
@@ -56,6 +67,11 @@ export function CopyButton(props: CopyButtonProps) {
             type="button"
         >
             <Icon name={copied ? "check" : "copy"} size={14} />
+            {props.caption === undefined ? null : (
+                <span className="happy-copy-button__caption">
+                    {copied ? (props.copiedCaption ?? props.caption) : props.caption}
+                </span>
+            )}
         </button>
     );
 }

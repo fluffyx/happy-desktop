@@ -1,3 +1,4 @@
+import { gitSnapshotProject, type GitSnapshotState } from "./gitSnapshotState.js";
 import type {
     Agent,
     AgentActivityResponse,
@@ -5,7 +6,6 @@ import type {
     AgentDraftSnapshot,
     Bot,
     DaemonConfig,
-    GitState,
     Message,
     MessageBlock,
     MessageMode,
@@ -14,21 +14,23 @@ import type {
     Question,
     Run,
     SlashCommand,
+    Task,
+    TaskMembership,
     UsageBreakdown,
     Workspace,
 } from "@slopus/happy-agent-client";
-import {
-    happyAgentServiceTierFromWire,
-    happyAgentServiceTiersFromWire,
-} from "../happyAgentServiceTier.js";
+import { happyAgentServiceTierFromWire } from "../happyAgentServiceTier.js";
+import type { UserProfile } from "./userProfiles.js";
 import type {
     BotGroup,
+    BotSubtaskGroup,
     ChatElement,
-    GitChangeSnapshot,
     GroupSession,
     ProjectGroup,
     SessionState,
     SessionUsage,
+    TaskGroup,
+    TaskOwner,
     ToolPresentation,
     UserInputRequest,
     WorkspaceGroup,
@@ -48,6 +50,8 @@ export interface SessionProjectionInput {
     endpoint: string;
     hasMore: boolean;
     messages: readonly TranscriptMessage[];
+    userProfiles?: ReadonlyMap<string, UserProfile>;
+    currentUserId?: string;
     intendedMode?: MessageMode;
     mode?: MessageMode | null;
     draft?: AgentDraftSnapshot;
@@ -146,6 +150,11 @@ export function projectSession(input: SessionProjectionInput): SessionState {
               }),
         modelId: mode.modelId,
         providerId: mode.providerId,
+        selectionKnown:
+            input.intendedMode !== undefined ||
+            input.draft?.value != null ||
+            input.mode != null ||
+            (input.mode === null && agent.parentAgentId === null),
         ...(agent.title === null ? {} : { title: agent.title }),
         titleStatus: agent.titleStatus,
         effort: mode.effort,
@@ -268,6 +277,8 @@ export function projectElements(input: SessionProjectionInput): readonly ChatEle
     const reader: TranscriptReader = {
         agentId: input.agent.id,
         parentAgentId: input.agent.parentAgentId,
+        userProfiles: input.userProfiles,
+        currentUserId: input.currentUserId,
     };
     const messagesByRun = new Map<string, TranscriptMessage[]>();
     const pending: TranscriptMessage[] = [];
@@ -356,7 +367,7 @@ export function projectGroups(
     workspaces: readonly Workspace[],
     endpoint: string,
     config: DaemonConfig,
-    gitStates: ReadonlyMap<string, GitState> = new Map(),
+    gitStates: ReadonlyMap<string, GitSnapshotState> = new Map(),
     drafts: ReadonlyMap<string, AgentDraftSnapshot> = new Map(),
     modes: ReadonlyMap<string, MessageMode | null> = new Map(),
 ): readonly ProjectGroup[] {
@@ -395,7 +406,7 @@ export function projectGroups(
             // filter on the explicit `archived` field; unread counts do not.
             const agents = root?.agents ?? project.agents;
             const activeAgents = agents.filter((agent) => agent.archivedAt === null);
-            const git = projectGit(gitStates.get(project.id));
+            const git = gitSnapshotProject(gitStates.get(project.id));
             return {
                 id: project.id,
                 kind: project.avatar?.kind === "home" ? "home" : "regular",
@@ -457,6 +468,64 @@ export function applyChanges<T extends object>(resource: T, changes: Partial<T>)
 }
 
 /**
+ * Replaces one project or workspace while keeping the archived agents it cannot carry.
+ *
+ * The daemon's owner resources hold only active agents: a project or workspace object, whether
+ * read whole, received in an update, or returned by a mutation, never lists an archived one.
+ * Archived agents reach this connection separately — through bootstrap's `archivedAgents` and
+ * through the agent events of a chat archived while connected — and live in the owner's
+ * `agents` beside the active ones, marked by `archivedAt`. So an incoming owner resource is a
+ * statement about the active series only; the archived agents already held are carried over,
+ * and only a later bootstrap says which of them the daemon still remembers.
+ */
+export function ownerResourceReplace<T extends { id: string; agents: Agent[] }>(
+    resources: readonly T[],
+    resource: T,
+): readonly T[] {
+    const current = resources.find((candidate) => candidate.id === resource.id);
+    if (current === undefined) return replaceResource(resources, resource);
+    const kept = current.agents.filter(
+        (agent) =>
+            agent.archivedAt !== null &&
+            !resource.agents.some((candidate) => candidate.id === agent.id),
+    );
+    return replaceResource(
+        resources,
+        kept.length === 0 ? resource : { ...resource, agents: [...resource.agents, ...kept] },
+    );
+}
+
+/**
+ * Places bootstrap's archived agents beside the active ones of their owners, so every later
+ * projection sees one series per owner with archival as a field rather than as absence.
+ * An archived agent names its owner by `workspaceId`; a project's root workspace shares the
+ * project's ID, so a root-owned agent lands in both the project and its root workspace copy,
+ * exactly as an active one does.
+ */
+export function archivedAgentsMerge(
+    projects: readonly Project[],
+    workspaces: readonly Workspace[],
+    archivedAgents: readonly Agent[],
+): { readonly projects: readonly Project[]; readonly workspaces: readonly Workspace[] } {
+    if (archivedAgents.length === 0) return { projects, workspaces };
+    const byOwner = new Map<string, Agent[]>();
+    for (const agent of archivedAgents) {
+        const owned = byOwner.get(agent.workspaceId) ?? [];
+        owned.push(agent);
+        byOwner.set(agent.workspaceId, owned);
+    }
+    const merge = <T extends { id: string; agents: Agent[] }>(owner: T): T => {
+        const owned = byOwner.get(owner.id);
+        if (owned === undefined) return owner;
+        const missing = owned.filter(
+            (agent) => !owner.agents.some((candidate) => candidate.id === agent.id),
+        );
+        return missing.length === 0 ? owner : { ...owner, agents: [...owner.agents, ...missing] };
+    };
+    return { projects: projects.map(merge), workspaces: workspaces.map(merge) };
+}
+
+/**
  * The bot catalog, in the order the daemon keeps it.
  *
  * A bot carries its one agent inline, so no workspace lookup is needed to state
@@ -475,6 +544,8 @@ export function projectBots(
     modes: ReadonlyMap<string, MessageMode | null> = new Map(),
 ): readonly BotGroup[] {
     const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+    const subtasksProject = (agent: Agent, bot: Bot): readonly BotSubtaskGroup[] =>
+        agentSubtasksProject(agent, bot, workspaceById, endpoint, config, drafts, modes);
     return bots
         .filter((bot) => bot.archivedAt === null && bot.status === "active")
         .sort(orderCompare)
@@ -485,6 +556,7 @@ export function projectBots(
                 workspaceId: bot.workspaceId,
                 name: bot.name,
                 username: bot.username,
+                ...(bot.systemKey === undefined ? {} : { systemKey: bot.systemKey }),
                 orderKey: bot.orderKey,
                 path: computePath(bot.compute),
                 ...(bot.avatar === null
@@ -504,6 +576,129 @@ export function projectBots(
                     modes.get(bot.agent.id),
                 ),
                 unread: unreadOf([bot.agent]),
+                subtasks: subtasksProject(bot.agent, bot),
+            };
+        });
+}
+
+/**
+ * The active, user-interactive children of one bot or task conversation, in the
+ * daemon's explicit tree order. A child sharing its owner's folder reports the
+ * owner's path; one with a worktree of its own reports that checkout's.
+ */
+function agentSubtasksProject(
+    agent: Agent,
+    owner: { readonly workspaceId: string; readonly compute: Bot["compute"] },
+    workspaceById: ReadonlyMap<string, Workspace>,
+    endpoint: string,
+    config: DaemonConfig,
+    drafts: ReadonlyMap<string, AgentDraftSnapshot>,
+    modes: ReadonlyMap<string, MessageMode | null>,
+): readonly BotSubtaskGroup[] {
+    return (agent.subtasks ?? [])
+        .filter((child) => child.archivedAt === null)
+        .map((child) => {
+            const workspace = workspaceById.get(child.workspaceId);
+            return {
+                workspaceId: child.workspaceId,
+                path:
+                    child.workspaceId === owner.workspaceId
+                        ? computePath(owner.compute)
+                        : workspacePath(workspace),
+                session: projectAgent(
+                    child,
+                    workspace,
+                    endpoint,
+                    config,
+                    drafts.get(child.id),
+                    modes.get(child.id),
+                ),
+                subtasks: agentSubtasksProject(
+                    child,
+                    owner,
+                    workspaceById,
+                    endpoint,
+                    config,
+                    drafts,
+                    modes,
+                ),
+            };
+        });
+}
+
+/**
+ * Every task the host holds, oldest first, each carrying the caller's own
+ * membership when they have joined it.
+ *
+ * The caller's list is not ordered here: membership order is the caller's, and
+ * the surface that lists joined tasks sorts them by it. Archived tasks are kept,
+ * marked, because a membership outlives an archive and the host says so.
+ *
+ * `ownerOf` resolves the person a task belongs to. It is supplied by the
+ * connection, which is what knows whether this is a team or a standalone
+ * daemon and which user profiles it has read.
+ */
+export function projectTasks(
+    tasks: readonly Task[],
+    memberships: readonly TaskMembership[],
+    workspaces: readonly Workspace[],
+    endpoint: string,
+    config: DaemonConfig,
+    ownerOf: (task: Task) => TaskOwner | null,
+    drafts: ReadonlyMap<string, AgentDraftSnapshot> = new Map(),
+    modes: ReadonlyMap<string, MessageMode | null> = new Map(),
+): readonly TaskGroup[] {
+    const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+    const membershipByTask = new Map(
+        memberships.map((membership) => [membership.taskId, membership]),
+    );
+    return [...tasks]
+        .sort((left, right) =>
+            left.createdAt === right.createdAt
+                ? left.id < right.id
+                    ? -1
+                    : left.id > right.id
+                      ? 1
+                      : 0
+                : left.createdAt - right.createdAt,
+        )
+        .map((task) => {
+            const membership = membershipByTask.get(task.id);
+            return {
+                id: task.id,
+                workspaceId: task.workspaceId,
+                name: task.name,
+                path: computePath(task.compute),
+                createdAt: task.createdAt,
+                archived: task.status === "archived" || task.archivedAt !== null,
+                canArchive: task.canArchive === true,
+                ...(membership === undefined
+                    ? {}
+                    : {
+                          membership: {
+                              orderKey: membership.orderKey,
+                              joinedAt: membership.joinedAt,
+                          },
+                      }),
+                owner: ownerOf(task),
+                session: projectAgent(
+                    task.agent,
+                    workspaceById.get(task.workspaceId),
+                    endpoint,
+                    config,
+                    drafts.get(task.agent.id),
+                    modes.get(task.agent.id),
+                ),
+                subtasks: agentSubtasksProject(
+                    task.agent,
+                    task,
+                    workspaceById,
+                    endpoint,
+                    config,
+                    drafts,
+                    modes,
+                ),
+                unread: unreadOf([task.agent]),
             };
         });
 }
@@ -519,7 +714,7 @@ function projectWorkspace(
     projectId: string,
     endpoint: string,
     config: DaemonConfig,
-    gitState: GitState | undefined,
+    gitState: GitSnapshotState | undefined,
     drafts: ReadonlyMap<string, AgentDraftSnapshot> = new Map(),
     modes: ReadonlyMap<string, MessageMode | null> = new Map(),
 ): WorkspaceGroup {
@@ -527,7 +722,7 @@ function projectWorkspace(
     // this owned connection contract. Consumers decide which set they need.
     const agents = workspace.agents;
     const activeAgents = agents.filter((agent) => agent.archivedAt === null);
-    const git = workspaceGit(gitState);
+    const git = gitSnapshotProject(gitState);
     return {
         id: workspace.id,
         name: workspace.name,
@@ -557,6 +752,24 @@ function projectWorkspace(
     };
 }
 
+// A catalog event replaces one immutable Agent. Keep the other session rows
+// through all projection layers instead of allocating the whole catalog again.
+// Store only workspace context, never the workspace's sibling-agent array.
+const groupSessionCache = new WeakMap<
+    Agent,
+    {
+        config: DaemonConfig;
+        draft: AgentDraftSnapshot | undefined;
+        storedMode: MessageMode | null | undefined;
+        endpoint: string;
+        cwd: string;
+        workspaceKind: Workspace["kind"] | undefined;
+        botId: string | undefined;
+        projectId: string;
+        value: GroupSession;
+    }
+>();
+
 function projectAgent(
     agent: Agent,
     workspace: Workspace | undefined,
@@ -565,10 +778,24 @@ function projectAgent(
     draft?: AgentDraftSnapshot,
     storedMode?: MessageMode | null,
 ): GroupSession {
-    const mode = modeOf(config, draft, storedMode);
-    const serviceTier = happyAgentServiceTierFromWire(mode.serviceTier);
     const botId = workspace?.kind === "bot" ? (workspace.botId ?? undefined) : undefined;
     const projectId = workspace?.projectId ?? agent.workspaceId;
+    const cwd = workspacePath(workspace);
+    const cached = groupSessionCache.get(agent);
+    if (
+        cached &&
+        cached.config === config &&
+        cached.draft === draft &&
+        cached.storedMode === storedMode &&
+        cached.endpoint === endpoint &&
+        cached.cwd === cwd &&
+        cached.workspaceKind === workspace?.kind &&
+        cached.botId === botId &&
+        cached.projectId === projectId
+    )
+        return cached.value;
+    const mode = modeOf(config, draft, storedMode);
+    const serviceTier = happyAgentServiceTierFromWire(mode.serviceTier);
     // A bot's one conversation is scoped to the bot. Only a project's workspace
     // can answer with a project, so the bot case is decided before that.
     const scope =
@@ -577,12 +804,12 @@ function projectAgent(
             : workspace?.kind === "root"
               ? ({ kind: "project", projectId } as const)
               : ({ kind: "workspace", projectId, workspaceId: agent.workspaceId } as const);
-    return {
+    const value: GroupSession = {
         activeSubagents: agent.subagents.running,
         archived: agent.archivedAt !== null,
         ...(agent.archivedAt === null ? {} : { archivedAt: agent.archivedAt }),
         createdAt: agent.createdAt,
-        cwd: workspacePath(workspace),
+        cwd,
         ...(draft?.value == null
             ? {}
             : {
@@ -618,6 +845,18 @@ function projectAgent(
               }),
         updatedAt: agent.updatedAt,
     };
+    groupSessionCache.set(agent, {
+        config,
+        draft,
+        storedMode,
+        endpoint,
+        cwd,
+        workspaceKind: workspace?.kind,
+        botId,
+        projectId,
+        value,
+    });
+    return value;
 }
 
 function projectQuestion(question: Question): UserInputRequest {
@@ -671,8 +910,12 @@ function projectSubagents(
  * The run is part of the key because the same message projects differently
  * inside a run that is still going: an agent's text is `complete` only once its
  * run has stopped.
+ * The minimal profile and ownership match are keys too: changing the viewer
+ * updates affected user rows without invalidating every other message.
  */
 interface MessageElements {
+    readonly profile: UserProfile | undefined;
+    readonly own: boolean;
     readonly runId: string;
     readonly runStatus: Run["status"];
     readonly reader: TranscriptReader;
@@ -687,6 +930,8 @@ interface MessageElements {
  * and would defeat the memory below.
  */
 interface TranscriptReader {
+    readonly userProfiles?: ReadonlyMap<string, UserProfile>;
+    readonly currentUserId?: string;
     readonly agentId: string;
     readonly parentAgentId: string | null;
 }
@@ -700,8 +945,13 @@ function projectMessage(
     reader: TranscriptReader,
 ): readonly ChatElement[] {
     const cached = messageElements.get(entry.message);
+    const userId = entry.message.role === "user" ? entry.message.metadata.userId : undefined;
+    const profile = userId === undefined ? undefined : reader.userProfiles?.get(userId);
+    const own = userId !== undefined && userId === reader.currentUserId;
     if (
         cached !== undefined &&
+        cached.profile === profile &&
+        cached.own === own &&
         cached.runId === runId &&
         cached.runStatus === runStatus &&
         cached.reader.agentId === reader.agentId &&
@@ -709,7 +959,7 @@ function projectMessage(
     )
         return cached.elements;
     const elements = messageElementsProject(entry, runId, runStatus, reader);
-    messageElements.set(entry.message, { runId, runStatus, reader, elements });
+    messageElements.set(entry.message, { runId, runStatus, reader, elements, profile, own });
     return elements;
 }
 
@@ -759,7 +1009,18 @@ function messageElementsProject(
                 id: `message:${elementId}`,
                 kind: "user_message",
                 messageId: message.id,
+                authority: entry.pendingSend ? "local" : "server",
                 identity: null,
+                ...(message.metadata.userId === undefined
+                    ? {}
+                    : {
+                          userId: message.metadata.userId,
+                          identity:
+                              message.metadata.userId === reader.currentUserId
+                                  ? null
+                                  : message.metadata.userId,
+                          profile: reader.userProfiles?.get(message.metadata.userId),
+                      }),
                 ...(senderAgent === undefined ? {} : { senderAgent }),
                 delivery:
                     message.status === "pending" && message.delivery === "steer"
@@ -817,6 +1078,7 @@ function messageElementsProject(
                     ...base,
                     id,
                     kind: "failure",
+                    messageId: message.id,
                     outcome: "failed",
                     reason: block.text,
                 });
@@ -948,6 +1210,20 @@ function projectToolPresentation(
     presentation: NonNullable<Extract<MessageBlock, { type: "tool_call" }>["presentation"]>,
 ): ToolPresentation {
     switch (presentation.type) {
+        case "agent_spawn":
+            return {
+                kind: "agent_spawn",
+                ...(presentation.model === undefined
+                    ? {}
+                    : {
+                          model: {
+                              modelId: presentation.model.modelId,
+                              providerId: presentation.model.providerId,
+                              name: presentation.model.name,
+                          },
+                      }),
+                ...(presentation.agentId === undefined ? {} : { agentId: presentation.agentId }),
+            };
         case "exploration":
             return { kind: "exploration", steps: presentation.operations };
         case "exec_command":
@@ -1048,14 +1324,6 @@ function modelCatalog(config: DaemonConfig): SessionState["modelCatalog"] {
         providers: Object.entries(config.providers).map(([id, provider]) => ({
             id,
             ...provider,
-            models: provider.models.map((model) => ({
-                ...model,
-                ...(model.serviceTiers === undefined
-                    ? {}
-                    : {
-                          serviceTiers: happyAgentServiceTiersFromWire(model.serviceTiers),
-                      }),
-            })),
         })),
     };
 }
@@ -1064,7 +1332,6 @@ function modelDefinitionsProject(config: DaemonConfig): readonly unknown[] {
     return Object.entries(config.models).map(([id, model]) => ({
         id,
         ...model,
-        serviceTiers: happyAgentServiceTiersFromWire(model.serviceTiers),
     }));
 }
 
@@ -1096,32 +1363,19 @@ function unreadOf(agents: readonly Agent[]): ProjectGroup["unread"] {
     };
 }
 
-function projectGit(git: GitState | undefined): GitChangeSnapshot | undefined {
-    return git === undefined ? undefined : gitSnapshot(git);
-}
-
-function workspaceGit(git: GitState | undefined): GitChangeSnapshot | undefined {
-    return git === undefined ? undefined : gitSnapshot(git);
-}
-
-function gitSnapshot(git: GitState): GitChangeSnapshot {
-    return {
-        changedFiles: git.changedFiles,
-        insertions: git.insertions,
-        deletions: git.deletions,
-        files: git.files,
-        generation: `${git.facts.head}:${String(git.scannedAt)}`,
-        version: git.scannedAt,
-        ...(git.comparison === "ready" && git.base !== null ? { baseRevision: git.base } : {}),
-    };
-}
-
 function workspacePath(workspace: Workspace | undefined): string {
     return workspace === undefined ? "" : computePath(workspace.compute);
 }
 
 function computePath(compute: Project["compute"]): string {
-    return compute.type === "host" ? compute.path : `/docker/${compute.image}`;
+    switch (compute.type) {
+        case "host":
+            return compute.path;
+        case "docker":
+            return `/docker/${compute.image}`;
+        case "runner":
+            return compute.path ?? "";
+    }
 }
 
 function newestRunningRun(runs: readonly Run[]): Run | undefined {

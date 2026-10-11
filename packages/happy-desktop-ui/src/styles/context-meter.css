@@ -106,7 +106,8 @@
 }
 
 /* The compaction mark: a notch in the track, not a line over the fill, so the
-   fill passing it covers it rather than being cut by it. */
+   fill passing it covers it rather than being cut by it. One pixel keeps the
+   marker legible without making the compaction point feel too heavy. */
 .happy-context-meter__threshold {
     position: absolute;
     top: 0;

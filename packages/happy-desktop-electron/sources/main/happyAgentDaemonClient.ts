@@ -1,3 +1,5 @@
+import { connect as connectLocalSocket } from "node:net";
+import { localAgentSocketPath } from "./localAgentSocketPath.js";
 import { readFile } from "node:fs/promises";
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
 import { homedir } from "node:os";
@@ -6,8 +8,14 @@ import type { Duplex } from "node:stream";
 import {
     HappyAgentApiError,
     HappyAgentClient,
+    WORKSPACE_SERVICE_AUTHORIZATION_HEADER,
     type AgentResponse,
+    type ArtifactVersionResponse,
     type Cuid2,
+    type CreateLiveSessionRequest,
+    type CreateLiveSessionResponse,
+    type CloseLiveSessionRequest,
+    type LiveSessionResponse,
     type DrainResponse,
     type FileContentResponse,
     type HealthResponse,
@@ -15,6 +23,7 @@ import {
     type InspectorStoppedResponse,
     type ShutdownResponse,
     type WorkspaceResponse,
+    type WorkspaceService,
     type WriteFileRequest,
     type WriteFileResponse,
 } from "@slopus/happy-agent-client";
@@ -29,9 +38,13 @@ import { WebSocket, createWebSocketStream } from "ws";
  */
 export const HAPPY_AGENT_TERMINAL_MAX_WIRE_BYTES = 4 * 1024 * 1024;
 
+/** The approved Live control protocol carries bounded UTF-8 JSON, never audio. */
+export const HAPPY_AGENT_LIVE_MAX_WIRE_BYTES = 256 * 1024;
+
 export interface HappyAgentDaemonClientOptions {
     readonly socketPath: string;
     readonly token: string;
+    readonly connectionId?: string;
 }
 
 export interface HappyAgentDaemonPaths {
@@ -67,15 +80,37 @@ export class HappyAgentDaemonClient {
     readonly socketPath: string;
     readonly #token: string;
     readonly #client: HappyAgentClient;
+    readonly #connectionId?: string;
+    readonly #connections = new Map<string, HappyAgentDaemonClient>();
 
     constructor(options: HappyAgentDaemonClientOptions) {
         this.socketPath = options.socketPath;
         this.#token = options.token;
-        this.#client = new HappyAgentClient({
+        this.#connectionId = options.connectionId;
+        const client = new HappyAgentClient({
             endpoint: "http://happy-agent/",
             token: options.token,
             fetch: (input, init) => unixSocketFetch(options.socketPath, input, init),
         });
+        this.#client = options.connectionId ? client.connection(options.connectionId) : client;
+    }
+
+    /** Main-only handoff to the isolated renderer transport; never sent to a page. */
+    rendererTransport(): HappyAgentDaemonClientOptions {
+        return { socketPath: this.socketPath, token: this.#token };
+    }
+
+    connection(id: string): HappyAgentDaemonClient {
+        let client = this.#connections.get(id);
+        if (!client) {
+            client = new HappyAgentDaemonClient({
+                socketPath: this.socketPath,
+                token: this.#token,
+                connectionId: id,
+            });
+            this.#connections.set(id, client);
+        }
+        return client;
     }
 
     health(signal?: AbortSignal): Promise<HealthResponse> {
@@ -108,6 +143,61 @@ export class HappyAgentDaemonClient {
         return this.#client.getAgent(agentId as Cuid2, signal ? { signal } : undefined);
     }
 
+    createLiveSession(
+        request: CreateLiveSessionRequest,
+        signal?: AbortSignal,
+    ): Promise<CreateLiveSessionResponse> {
+        return this.#client.createLiveSession(request, signal ? { signal } : undefined);
+    }
+
+    getLiveSession(id: Cuid2, signal?: AbortSignal): Promise<LiveSessionResponse> {
+        return this.#client.getLiveSession(id, signal ? { signal } : undefined);
+    }
+
+    closeLiveSession(
+        id: Cuid2,
+        request: CloseLiveSessionRequest = {},
+        signal?: AbortSignal,
+    ): Promise<LiveSessionResponse> {
+        return this.#client.closeLiveSession(id, request, signal ? { signal } : undefined);
+    }
+
+    /** JSON frames stay intact; neither daemon credentials nor provider keys leave this transport. */
+    attachLiveSession(id: Cuid2, windowId: string): Promise<WebSocket> {
+        const url = new URL(this.#client.liveSessionControlUrl(id, windowId));
+        url.protocol = "ws:";
+        return new Promise((resolve, reject) => {
+            const socket = new WebSocket(url, {
+                createConnection: () => connectLocalSocket(this.socketPath),
+                handshakeTimeout: 10_000,
+                headers: { authorization: `Bearer ${this.#token}` },
+                maxPayload: HAPPY_AGENT_LIVE_MAX_WIRE_BYTES,
+                perMessageDeflate: false,
+            });
+            const fail = (error: Error) => {
+                socket.terminate();
+                reject(error);
+            };
+            socket.once("error", fail);
+            socket.once("unexpected-response", (_request, response) => {
+                response.resume();
+                fail(
+                    new HappyAgentDaemonHttpError(
+                        response.statusCode ?? 502,
+                        "The GPT-Live control channel was refused.",
+                    ),
+                );
+            });
+            socket.once("open", () => {
+                socket.off("error", fail);
+                // Install the relay before receiving the daemon's first hello frame.
+                socket.pause();
+                socket.on("error", () => undefined);
+                resolve(socket);
+            });
+        });
+    }
+
     getWorkspace(workspaceId: string, signal?: AbortSignal): Promise<WorkspaceResponse> {
         return this.#client.getWorkspace(workspaceId as Cuid2, signal ? { signal } : undefined);
     }
@@ -134,6 +224,67 @@ export class HappyAgentDaemonClient {
             request,
             signal ? { signal } : undefined,
         );
+    }
+
+    /** One numbered artifact version and its whole manifest. */
+    getArtifactVersion(
+        artifactId: string,
+        version: number,
+        signal?: AbortSignal,
+    ): Promise<ArtifactVersionResponse> {
+        return this.#client.getArtifactVersion(
+            artifactId as Cuid2,
+            version,
+            signal ? { signal } : undefined,
+        );
+    }
+
+    /**
+     * Opens one file of a numbered artifact version as a stream, so a page's
+     * video can seek by the byte range it asks for instead of waiting for the
+     * whole file. The route carries this client's connection prefix.
+     */
+    openArtifactFile(
+        artifactId: string,
+        version: number,
+        filePath: string,
+        range?: string,
+        signal?: AbortSignal,
+    ): Promise<HappyAgentDaemonRawResponse> {
+        const url = new URL(this.#client.artifactFileUrl(artifactId as Cuid2, version, filePath));
+        return this.rawRequest({
+            method: "GET",
+            path: `${url.pathname}${url.search}`,
+            headers: { accept: "*/*", ...(range === undefined ? {} : { range }) },
+            ...(signal ? { signal } : {}),
+        });
+    }
+
+    /**
+     * Forwards one request to an artifact's own API, `/v0/artifacts/:id/api/`,
+     * under this client's connection prefix, without interpreting either side:
+     * the API belongs to Happy Agent, so a new one needs no desktop release.
+     * `rest` is already-encoded path segments and `search` the raw query.
+     */
+    openArtifactApi(
+        artifactId: string,
+        rest: string,
+        search: string,
+        options: {
+            readonly method: string;
+            readonly headers: Readonly<Record<string, string>>;
+            readonly body?: Buffer;
+            readonly signal?: AbortSignal;
+        },
+    ): Promise<HappyAgentDaemonRawResponse> {
+        const connection = new URL(this.#client.endpoint).pathname.replace(/\/$/u, "");
+        const prefix = `${connection}/v0/artifacts/${encodeURIComponent(artifactId)}/api/`;
+        const path = `${prefix}${rest}${search}`;
+        // Dot segments resolved here would carry the daemon credential to a
+        // route outside the artifact's API.
+        if (!new URL(path, "http://happy").pathname.startsWith(prefix))
+            return Promise.reject(new Error("The artifact API path is invalid."));
+        return this.rawRequest({ ...options, path });
     }
 
     /**
@@ -186,29 +337,99 @@ export class HappyAgentDaemonClient {
         });
     }
 
-    /**
-     * Resolves the product's agent identity through Happy Agent, then opens the
-     * browser tunnel owned by that agent's workspace.
-     */
-    async openHttpProxy(agentId: string): Promise<Duplex> {
-        const { agent } = await this.getAgent(agentId);
-        return this.openWorkspaceHttpProxy(agent.workspaceId);
-    }
-
     /** Opens `CONNECT /v0/workspaces/:workspaceId/proxy`. */
     openWorkspaceHttpProxy(workspaceId: string): Promise<Duplex> {
-        const path = `/v0/workspaces/${encodeURIComponent(workspaceId)}/proxy`;
+        // The SDK owns and validates the host-published connection prefix, just
+        // as it does for ordinary HTTP requests and terminal attachments.
+        const prefix = new URL(this.#client.endpoint).pathname.replace(/\/$/u, "");
+        const path = `${prefix}/v0/workspaces/${encodeURIComponent(workspaceId)}/proxy`;
+        return this.#openConnect(path);
+    }
+
+    /** Only explicitly started services can be selected; an ordinary host port is not exposed. */
+    async browserServiceResolve(
+        workspaceId: string,
+        selector: { readonly id: string } | { readonly port: number },
+        signal: AbortSignal,
+    ): Promise<string> {
+        let candidates: readonly WorkspaceService[];
+        if ("id" in selector) {
+            const result = await this.#client.getWorkspaceService(
+                workspaceId as Cuid2,
+                selector.id as Cuid2,
+                { signal },
+            );
+            candidates = [result.service];
+        } else {
+            const result = await this.#client.listWorkspaceServices(
+                workspaceId as Cuid2,
+                { limit: 100 },
+                { signal },
+            );
+            if (result.nextPageCursor !== null)
+                throw new Error("The service catalog is incomplete.");
+            candidates = result.services.filter((service) => service.port === selector.port);
+        }
+        const active = candidates.filter((service) => service.status === "running");
+        if (active.length === 0)
+            throw new Error(
+                "No running sandboxed service matches this address. Ask the agent to start it with service_start.",
+            );
+        if (active.length !== 1)
+            throw new Error(
+                "More than one sandboxed service uses this port. Open its service-specific address instead.",
+            );
+        return active[0]!.id;
+    }
+
+    /** Both credentials stay in main and cover only this service's current execution. */
+    async openWorkspaceServiceProxy(
+        workspaceId: string,
+        serviceId: string,
+        signal: AbortSignal,
+    ): Promise<Duplex> {
+        const credential = await this.#client.issueWorkspaceServiceAccessToken(
+            workspaceId as Cuid2,
+            serviceId as Cuid2,
+            { signal },
+        );
+        const path = new URL(
+            this.#client.workspaceServiceProxyUrl(workspaceId as Cuid2, serviceId as Cuid2),
+        ).pathname;
+        return this.#openConnect(
+            path,
+            { [WORKSPACE_SERVICE_AUTHORIZATION_HEADER]: `Bearer ${credential.accessToken}` },
+            signal,
+        );
+    }
+
+    #openConnect(
+        path: string,
+        headers: Readonly<Record<string, string>> = {},
+        signal?: AbortSignal,
+    ): Promise<Duplex> {
         return new Promise((resolvePromise, reject) => {
+            if (signal?.aborted) {
+                reject(abortedError());
+                return;
+            }
             const request = httpRequest({
-                headers: { authorization: `Bearer ${this.#token}` },
+                // CONNECT must enter the daemon's tunnel router on a fresh connection.
+                agent: false,
+                headers: { ...headers, authorization: `Bearer ${this.#token}` },
                 method: "CONNECT",
                 path,
                 socketPath: this.socketPath,
             });
+            const abort = () => request.destroy(abortedError());
+            const cleanup = () => signal?.removeEventListener("abort", abort);
+            signal?.addEventListener("abort", abort, { once: true });
+            request.once("close", cleanup);
             let settled = false;
             const fail = (statusCode: number | undefined): void => {
                 if (settled) return;
                 settled = true;
+                cleanup();
                 const status = statusCode ?? 500;
                 reject(
                     new HappyAgentDaemonHttpError(
@@ -228,6 +449,7 @@ export class HappyAgentDaemonClient {
                     return;
                 }
                 settled = true;
+                cleanup();
                 if (head.length > 0) socket.unshift(head);
                 resolvePromise(socket);
             });
@@ -250,12 +472,26 @@ export class HappyAgentDaemonClient {
      * The workspace and terminal IDs are already authoritative `/v0`
      * identities; main performs no session lookup or legacy route projection.
      */
-    attachTerminal(workspaceId: string, terminalId: string): Promise<Duplex> {
-        const path = `/v0/workspaces/${encodeURIComponent(
+    attachTerminal(
+        workspaceId: string,
+        terminalId: string,
+        connectionId?: string,
+    ): Promise<Duplex> {
+        const remote = connectionId ?? this.#connectionId;
+        // The SDK validates the connection ID and owns the proxy prefix.
+        const prefix = remote
+            ? new URL(
+                  this.#connectionId === remote
+                      ? this.#client.endpoint
+                      : this.#client.connection(remote).endpoint,
+              ).pathname.replace(/\/$/u, "")
+            : "";
+        const path = `${prefix}/v0/workspaces/${encodeURIComponent(
             workspaceId,
         )}/terminals/${encodeURIComponent(terminalId)}/attach`;
         return new Promise((resolvePromise, reject) => {
-            const socket = new WebSocket(`ws+unix://${this.socketPath}:${path}`, {
+            const socket = new WebSocket(`ws://happy-agent${path}`, {
+                createConnection: () => connectLocalSocket(this.socketPath),
                 handshakeTimeout: 10_000,
                 headers: { authorization: `Bearer ${this.#token}` },
                 maxPayload: HAPPY_AGENT_TERMINAL_MAX_WIRE_BYTES,
@@ -306,7 +542,7 @@ export function happyAgentDaemonPathsResolve(
     const directory = join(happyHome, "agent");
     return {
         socketPath:
-            environment.HAPPY_AGENT_SERVER_SOCKET_PATH?.trim() || join(directory, "server.sock"),
+            environment.HAPPY_AGENT_SERVER_SOCKET_PATH?.trim() || localAgentSocketPath(directory),
         tokenPath: environment.HAPPY_AGENT_SERVER_TOKEN_PATH?.trim() || join(directory, "token"),
     };
 }

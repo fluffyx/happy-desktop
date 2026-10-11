@@ -1,7 +1,8 @@
+import { HappyAgentApiError } from "@slopus/happy-agent-client";
 import { UserError } from "../types.js";
 import type {
+    HappyAgentAvatarImage,
     HappyAgentPermissionMode,
-    HappyAgentServiceTier,
     HappyAgentThinkingLevel,
 } from "./happyAgentTypes.js";
 
@@ -10,6 +11,32 @@ export function happyAgentUserError(error: unknown): UserError {
     if (error instanceof UserError) return error;
     if (error instanceof Error) return new UserError(error.message, undefined, error);
     return new UserError(String(error), undefined, error);
+}
+
+/**
+ * Why an action did not complete, as a closed kind rather than its words: the
+ * daemon answered and refused, the request never reached it, or anything else.
+ */
+export type HappyAgentActionFailure = "refused" | "offline" | "unknown";
+
+/** How one reader-initiated action ended. */
+export type HappyAgentActionResult =
+    | { readonly ok: true }
+    | { readonly ok: false; readonly failure: HappyAgentActionFailure };
+
+export const HAPPY_AGENT_ACTION_OK: HappyAgentActionResult = { ok: true };
+
+/**
+ * Classifies a thrown value by walking its cause chain. A daemon refusal is
+ * the client's typed error; a request the browser could not deliver at all
+ * surfaces from `fetch` as a `TypeError`, which is the platform's own contract.
+ */
+export function happyAgentActionFailed(error: unknown): HappyAgentActionResult {
+    for (let current = error; current instanceof Error; current = current.cause) {
+        if (current instanceof HappyAgentApiError) return { ok: false, failure: "refused" };
+        if (current instanceof TypeError) return { ok: false, failure: "offline" };
+    }
+    return { ok: false, failure: "unknown" };
 }
 
 /**
@@ -101,6 +128,22 @@ export function happyAgentPermissionLabel(mode: HappyAgentPermissionMode): strin
     return PERMISSION_LABELS[mode];
 }
 
-export function happyAgentServiceTierLabel(tier: HappyAgentServiceTier | null): string {
-    return tier === "fast" ? "Fast" : "Regular";
+/**
+ * Bytes per base64 chunk. Divisibility by three means each chunk can be encoded
+ * independently without padding in the middle of the joined result.
+ */
+const BASE64_CHUNK = 0x6000;
+
+/**
+ * A picture being sent to the host, as a URL this client can already draw. It
+ * is what an optimistic row shows while the upload is in flight: the bytes are
+ * in hand, so the face need not wait for the host to serve them back.
+ */
+export function happyAgentAvatarImageDataUrl(image: HappyAgentAvatarImage): string {
+    const bytes = new Uint8Array(image.data);
+    const encoded: string[] = [];
+    for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK) {
+        encoded.push(btoa(String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK))));
+    }
+    return `data:${image.contentType};base64,${encoded.join("")}`;
 }

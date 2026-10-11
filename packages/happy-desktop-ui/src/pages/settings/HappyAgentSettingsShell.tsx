@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { AppShell } from "../../AppShell";
+import { APP_SHELL_SIDEBAR_DEFAULT_WIDTH, AppShell } from "../../AppShell";
 import { Box } from "../../Box";
 import { Icon, type IconName } from "../../Icon";
 import { PanelHeader } from "../../PanelHeader";
@@ -25,6 +25,10 @@ export type HappyAgentSettingsShellProps = {
     /** Native macOS window chrome, matching the workspace shell it replaces. */
     windowControls?: boolean;
     windowFullScreen?: boolean;
+    /** A connection rail holds the window's left edge; see `AppShell`. */
+    connectionRail?: boolean;
+    /** The workspace sidebar's width, so opening Settings does not move the column. */
+    sidebarWidth?: number;
 };
 
 /**
@@ -42,6 +46,8 @@ export function HappyAgentSettingsShell(props: HappyAgentSettingsShellProps) {
         <AppShell
             windowControls={props.windowControls}
             windowFullScreen={props.windowFullScreen}
+            connectionRail={props.connectionRail}
+            sidebarDefaultWidth={props.sidebarWidth ?? APP_SHELL_SIDEBAR_DEFAULT_WIDTH}
             sidebar={
                 <Sidebar
                     activeItemId={props.activeCategoryId}

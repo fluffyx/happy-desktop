@@ -1,14 +1,18 @@
 import { createStore } from "zustand/vanilla";
 import {
+    deepEqual,
     referencesPreserve,
     happyAgentPermissionLabel,
-    happyAgentServiceTierLabel,
     happyAgentThinkingLabel,
 } from "./happyAgentSupport.js";
 import type {
+    HappyAgentCurrentAccount,
     HappyAgentEffortOption,
     HappyAgentMenusSnapshot,
+    HappyAgentModel,
     HappyAgentModelCatalog,
+    HappyAgentModelProvider,
+    HappyAgentModelEffortRemembered,
     HappyAgentModelOption,
     HappyAgentPermissionMode,
     HappyAgentPermissionModeOption,
@@ -28,25 +32,67 @@ const PERMISSION_MODES: readonly HappyAgentPermissionMode[] = [
  * Pure derivation of picker options from the model catalog and the current
  * session selection. Kept side-effect free so both the standalone menus store
  * and the chat store can compute the same option lists from their own inputs.
+ * `remembered` reports the effort last chosen per model, when the caller keeps one.
  */
 export function happyAgentMenusDerive(
     catalog: HappyAgentModelCatalog,
     selection: HappyAgentSelection,
+    remembered?: HappyAgentModelEffortRemembered,
 ): HappyAgentMenusSnapshot {
     const modelOptions: HappyAgentModelOption[] = [];
-    let selectedProvider = catalog.providers.find(
+    const selectedProvider = catalog.providers.find(
         (provider) => provider.id === selection.providerId,
     );
+    const optionOf = (
+        provider: Pick<HappyAgentModelProvider, "id" | "type">,
+        model: HappyAgentModel,
+        disabled: boolean,
+    ): HappyAgentModelOption => {
+        const rememberedEffort = remembered?.(provider.id, model.id);
+        return {
+            providerId: provider.id,
+            modelId: model.id,
+            name: model.name,
+            disabled,
+            current: provider.id === selection.providerId && model.id === selection.modelId,
+            efforts: model.thinkingLevels.map((level) => ({
+                level,
+                label: happyAgentThinkingLabel(level),
+            })),
+            defaultEffort: model.defaultThinkingLevel,
+            providerType: provider.type,
+            ...(rememberedEffort !== undefined && model.thinkingLevels.includes(rememberedEffort)
+                ? { rememberedEffort }
+                : {}),
+        };
+    };
+    let currentOption: HappyAgentModelOption | undefined;
     for (const provider of catalog.providers) {
         for (const model of provider.models) {
-            modelOptions.push({
-                providerId: provider.id,
-                modelId: model.id,
-                name: model.name,
-                disabled: provider.disabledReason !== undefined,
-                current: provider.id === selection.providerId && model.id === selection.modelId,
-            });
+            const option = optionOf(provider, model, provider.disabledReason !== undefined);
+            if (option.current) currentOption = option;
+            // A hidden account is not offered, though the selection on it stays.
+            if (!provider.hidden) modelOptions.push(option);
         }
+    }
+    const currentAccount: HappyAgentCurrentAccount =
+        selectedProvider === undefined
+            ? "missing"
+            : !selectedProvider.enabled
+              ? "disabled"
+              : selectedProvider.hidden
+                ? "hidden"
+                : "available";
+    // An account removed from the configuration takes its models' rows with it;
+    // the shared definition still names the model the conversation was on.
+    if (currentOption === undefined && selectedProvider === undefined) {
+        const model = catalog.models.find((candidate) => candidate.id === selection.modelId);
+        if (model !== undefined)
+            currentOption = optionOf(
+                { id: selection.providerId, type: selection.providerId },
+                model,
+                true,
+            );
     }
 
     const currentModel = selectedProvider?.models.find((model) => model.id === selection.modelId);
@@ -67,23 +113,15 @@ export function happyAgentMenusDerive(
         }),
     );
 
-    const supportsFast = selectedProvider?.serviceTiers.includes("fast") ?? false;
-    const serviceTierOptions: HappyAgentServiceTierOption[] = [
-        {
-            tier: null,
-            label: happyAgentServiceTierLabel(null),
-            current: selection.serviceTier === undefined,
-        },
-        ...(supportsFast
-            ? [
-                  {
-                      tier: "fast" as const,
-                      label: happyAgentServiceTierLabel("fast"),
-                      current: selection.serviceTier === "fast",
-                  },
-              ]
-            : []),
-    ];
+    const serviceTierOptions: HappyAgentServiceTierOption[] = (
+        selectedProvider?.disabledReason === undefined
+            ? (currentModel?.serviceTierOptions ?? [])
+            : []
+    ).map((option) => ({
+        tier: option.id,
+        label: option.label,
+        current: (selection.serviceTier ?? null) === option.id,
+    }));
 
     return {
         modelOptions,
@@ -92,6 +130,8 @@ export function happyAgentMenusDerive(
         serviceTierOptions,
         currentProviderId: selection.providerId,
         currentModelId: selection.modelId,
+        currentAccount,
+        ...(currentOption === undefined ? {} : { currentOption }),
         currentEffort: selection.effort,
         currentPermissionMode: selection.permissionMode,
         currentServiceTier: selection.serviceTier,
@@ -113,11 +153,22 @@ export function happyAgentMenusReferencesPreserve(
         previous.serviceTierOptions,
         next.serviceTierOptions,
     );
+    // The current row is usually one of the listed ones; it keeps that identity.
+    const currentOption =
+        next.currentOption === undefined
+            ? undefined
+            : (modelOptions.find((option) => deepEqual(option, next.currentOption)) ??
+              (previous.currentOption !== undefined &&
+              deepEqual(previous.currentOption, next.currentOption)
+                  ? previous.currentOption
+                  : next.currentOption));
     if (
         modelOptions === previous.modelOptions &&
         effortOptions === previous.effortOptions &&
         permissionModeOptions === previous.permissionModeOptions &&
         serviceTierOptions === previous.serviceTierOptions &&
+        currentOption === previous.currentOption &&
+        next.currentAccount === previous.currentAccount &&
         next.currentProviderId === previous.currentProviderId &&
         next.currentModelId === previous.currentModelId &&
         next.currentEffort === previous.currentEffort &&
@@ -131,6 +182,7 @@ export function happyAgentMenusReferencesPreserve(
         effortOptions,
         permissionModeOptions,
         serviceTierOptions,
+        ...(currentOption === undefined ? {} : { currentOption }),
     };
 }
 
@@ -153,6 +205,7 @@ export function happyAgentMenusSelectionProject(
     catalog: HappyAgentModelCatalog,
     previous: HappyAgentMenusSnapshot,
     selection: HappyAgentSelection,
+    remembered?: HappyAgentModelEffortRemembered,
 ): HappyAgentMenusSnapshot {
     if (
         previous.currentProviderId === selection.providerId &&
@@ -169,7 +222,7 @@ export function happyAgentMenusSelectionProject(
     )
         return happyAgentMenusReferencesPreserve(
             previous,
-            happyAgentMenusDerive(catalog, selection),
+            happyAgentMenusDerive(catalog, selection, remembered),
         );
 
     return {
@@ -211,6 +264,7 @@ export interface HappyAgentMenusStore {
 export interface HappyAgentMenusStoreOptions {
     readonly catalog: HappyAgentModelCatalog;
     readonly selection: HappyAgentSelection;
+    readonly effortRemembered?: HappyAgentModelEffortRemembered;
 }
 
 /**
@@ -224,14 +278,22 @@ export function happyAgentMenusStoreCreate(
 ): HappyAgentMenusStore {
     const catalog = options.catalog;
     const store = createStore<HappyAgentMenusSnapshot>()(() =>
-        happyAgentMenusDerive(catalog, options.selection),
+        happyAgentMenusDerive(catalog, options.selection, options.effortRemembered),
     );
     return {
         get: () => store.getState(),
         subscribe: (listener) => store.subscribe(listener),
         menusSelectionUpdate(selection) {
             const previous = store.getState();
-            store.setState(happyAgentMenusSelectionProject(catalog, previous, selection), true);
+            store.setState(
+                happyAgentMenusSelectionProject(
+                    catalog,
+                    previous,
+                    selection,
+                    options.effortRemembered,
+                ),
+                true,
+            );
         },
     };
 }

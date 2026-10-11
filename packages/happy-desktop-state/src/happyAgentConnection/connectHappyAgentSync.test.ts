@@ -1,5 +1,9 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { connectHappyAgent } from "./connectHappyAgent.js";
+import { happyAgentChatStoreCreate } from "../happyAgent/happyAgentChatStore.js";
+import { happyAgentModelCatalogProject } from "../happyAgent/happyAgentProject.js";
+import type { HappyAgentSessionId } from "../happyAgent/happyAgentTypes.js";
+import { MINIMUM_HAPPY_AGENT_VERSION } from "./compatibility.js";
 import { HAPPY_AGENT_PROTOCOL_VERSION, HappyAgentApiError } from "@slopus/happy-agent-client";
 import type {
     ChatDelta,
@@ -31,10 +35,14 @@ afterEach(() => {
     for (const connection of openConnections.splice(0)) connection.close();
 });
 
-function harnessOpen(daemon = fakeHappyAgentDaemonCreate()): Harness {
+function harnessOpen(
+    daemon = fakeHappyAgentDaemonCreate(),
+    options: { readonly memberProfileRequired?: boolean } = {},
+): Harness {
     const waits: number[] = [];
     const rejections: MutationRejectedDelta[] = [];
     const connection = connectHappyAgent({
+        ...options,
         endpoint: "http://happy-agent.test/",
         token: "token",
         client: daemon.client,
@@ -125,7 +133,194 @@ async function liveHarness(): Promise<
     return { ...harness, groups, chat, sessionId: agent.id };
 }
 
+it("shows a delegated session's own speed choices while history and activity are still loading", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const config = daemon.configGet();
+    const selectedModel = config.defaults.modelId;
+    const selectedProvider = config.defaults.providerId;
+    daemon.configSet({
+        ...config,
+        defaults: { ...config.defaults, modelId: "regular-only" },
+        models: {
+            ...config.models,
+            [selectedModel]: {
+                ...config.models[selectedModel]!,
+                serviceTierOptions: [
+                    { id: null, label: "Regular" },
+                    { id: "priority", label: "Fast" },
+                ],
+            },
+            "regular-only": {
+                ...config.models[selectedModel]!,
+                name: "Regular only",
+                serviceTierOptions: [{ id: null, label: "Regular" }],
+            },
+        },
+        providers: {
+            ...config.providers,
+            [selectedProvider]: {
+                ...config.providers[selectedProvider]!,
+                models: [
+                    ...config.providers[selectedProvider]!.models,
+                    { id: "regular-only", enabled: true },
+                ],
+            },
+        },
+    });
+    const project = daemon.projectSeed({ id: "project-speed" });
+    const parent = daemon.agentSeed(project.id, { id: "parent-speed" });
+    const child = daemon.agentSeed(project.id, {
+        id: "child-speed",
+        parentAgentId: parent.id,
+    });
+    daemon.modeSeed(child.id, {
+        ...config.defaults,
+        modelId: selectedModel,
+        providerId: selectedProvider,
+        serviceTier: "priority",
+    });
+    const releaseHistory = daemon.pause("getMessages");
+    const releaseActivity = daemon.pause("getAgentActivity");
+    const releaseQuestion = daemon.pause("getPendingQuestion");
+    const { connection } = harnessOpen(daemon);
+    const groups = groupsWatch(connection);
+    const chat = happyAgentChatStoreCreate(child.id as HappyAgentSessionId, {
+        catalog: happyAgentModelCatalogProject(daemon.configGet()),
+        connectActions: connection,
+        connectMutationSubscribe: () => () => undefined,
+        transcriptConnect: ({ sessionId, onChange, onError }) => {
+            const transcript = connection.connectSession({
+                sessionId,
+                onChange: (elements, session) => onChange(elements, session, []),
+                onError,
+            });
+            return {
+                close: () => transcript.close(),
+                loadMore: (token) => transcript.loadMore(token),
+            };
+        },
+    });
+    const unsubscribe = chat.subscribe(() => undefined);
+    try {
+        expect(chat.get().menus).toBeUndefined();
+        await vi.waitFor(() => {
+            expect(chat.get().menus?.currentModelId).toBe(selectedModel);
+            expect(chat.get().menus?.serviceTierOptions).toEqual([
+                { tier: null, label: "Regular", current: false },
+                { tier: "priority", label: "Fast", current: true },
+            ]);
+        });
+        expect(chat.get().ready).toBe(false);
+        expect(chat.get().modelLocked).toBe(false);
+        expect(chat.get().entries).toEqual([]);
+        expect(chat.get().menus?.currentProviderId).toBe(selectedProvider);
+        expect(chat.get().menus?.currentPermissionMode).toBe(config.defaults.permissionMode);
+        expect(
+            groups.projects[0]?.sessions.find((session) => session.id === child.id)
+                ?.parentSessionId,
+        ).toBe(parent.id);
+        releaseHistory();
+        releaseActivity();
+        releaseQuestion();
+        await vi.waitFor(() => expect(chat.get().ready).toBe(true));
+        expect(chat.get().menus?.currentServiceTier).toBe("priority");
+        expect(chat.get().modelLocked).toBe(false);
+    } finally {
+        releaseHistory();
+        releaseActivity();
+        releaseQuestion();
+        unsubscribe();
+        chat[Symbol.dispose]();
+    }
+});
+
+it("keeps local speed edits through stale bootstrap and deferred history snapshots", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const project = daemon.projectSeed({ id: "project-speed-race" });
+    const agent = daemon.agentSeed(project.id, { id: "agent-speed-race" });
+    const getBootstrap = daemon.client.getAgentBootstrap.bind(daemon.client);
+    let releaseBootstrap!: () => void;
+    const bootstrapGate = new Promise<void>((resolve) => {
+        releaseBootstrap = resolve;
+    });
+    let bootstrapCaptured!: () => void;
+    const captured = new Promise<void>((resolve) => {
+        bootstrapCaptured = resolve;
+    });
+    vi.spyOn(daemon.client, "getAgentBootstrap").mockImplementation(async (...args) => {
+        const snapshot = await getBootstrap(...args);
+        bootstrapCaptured();
+        await bootstrapGate;
+        return snapshot;
+    });
+    const releaseHistory = daemon.pause("getMessages");
+    const { connection } = harnessOpen(daemon);
+    const groups = groupsWatch(connection);
+    const chat = sessionWatch(connection, agent.id);
+    await captured;
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    connection.setServiceTier(agent.id, "ultrafast");
+    await vi.waitFor(() => {
+        expect(chat.session?.serviceTier).toBe("ultrafast");
+        expect(daemon.callCount("saveAgentDraft")).toBe(1);
+    });
+    releaseBootstrap();
+    await vi.waitFor(() => expect(chat.session?.selectionKnown).toBe(true));
+    expect(chat.session?.historyLoading).toBe(true);
+    expect(chat.session?.serviceTier).toBe("ultrafast");
+    releaseHistory();
+    await vi.waitFor(() => expect(chat.session?.historyLoading).not.toBe(true));
+    expect(chat.session?.serviceTier).toBe("ultrafast");
+});
+
 // --- startup and SSE reconnection ---------------------------------------
+
+it("sends the selected Ultrafast wire tier with the user message, then clears it for Regular", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    connection.setServiceTier(sessionId, "ultrafast");
+    expect(chat.session?.serviceTier).toBe("ultrafast");
+    connection.sendMessage(sessionId, "first");
+    await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(1));
+    expect(daemon.calls.find((call) => call.method === "sendMessage")?.args[1]).toMatchObject({
+        mode: { serviceTier: "ultrafast" },
+    });
+    connection.setServiceTier(sessionId, undefined);
+    connection.sendMessage(sessionId, "second");
+    await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(2));
+    expect(daemon.calls.filter((call) => call.method === "sendMessage")[1]?.args[1]).toMatchObject({
+        mode: { serviceTier: null },
+    });
+});
+
+it("keeps 523 untouched catalog sessions identical when one session changes", async () => {
+    const { connection, daemon } = harnessOpen();
+    const project = daemon.projectSeed({ id: "project-large" });
+    for (let index = 0; index < 524; index += 1) {
+        daemon.agentSeed(project.id, { id: `agent-${index}`, title: `Conversation ${index}` });
+    }
+    const groups = groupsWatch(connection);
+    await vi.waitFor(() => expect(groups.projects[0]?.sessions.length).toBe(524));
+    const before = new Map(groups.projects[0]!.sessions.map((session) => [session.id, session]));
+    const current = daemon.agentGet("agent-0");
+    daemon.eventEmit("agent.updated", {
+        agentId: current.id,
+        previousVersion: current.version,
+        version: daemon.versionNext(),
+        changes: { title: "Changed conversation", status: "working", updatedAt: 42_000 },
+    });
+    await vi.waitFor(() =>
+        expect(groups.projects[0]?.sessions.find((s) => s.id === current.id)?.title).toBe(
+            "Changed conversation",
+        ),
+    );
+    for (const session of groups.projects[0]!.sessions) {
+        if (session.id === current.id) {
+            expect(session).not.toBe(before.get(session.id));
+            expect(session.status).toBe("running");
+            expect(session.updatedAt).toBe(42_000);
+        } else expect(session).toBe(before.get(session.id));
+    }
+});
 
 it("connects through health and bootstrap, then streams from the bootstrap cursor", async () => {
     const { connection, daemon } = harnessOpen();
@@ -158,6 +353,69 @@ it("reports reconnecting after a server drop and resumes from the last applied c
     expect(userMessages(chat.elements)).toHaveLength(1);
 });
 
+it("reads a replacement daemon's health and reports its version after reconciling", async () => {
+    const { connection, daemon } = harnessOpen();
+    daemon.projectSeed({ id: "project-a" });
+    const groups = groupsWatch(connection);
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    expect(connection.compatibility()).toMatchObject({
+        status: "compatible",
+        serverVersion: MINIMUM_HAPPY_AGENT_VERSION,
+    });
+
+    // The same endpoint now answers from another process on another version.
+    daemon.daemonReplace({ version: "0.4.75" });
+
+    await vi.waitFor(() =>
+        expect(connection.compatibility()).toMatchObject({
+            status: "compatible",
+            serverVersion: "0.4.75",
+        }),
+    );
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    expect(daemon.callCount("getHealth")).toBe(2);
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(2);
+    expect(groups.projects.map((project) => project.id)).toEqual(["project-a"]);
+});
+
+it("takes nothing from an incompatible replacement until its health admits it", async () => {
+    const { connection, daemon } = harnessOpen();
+    const groups = groupsWatch(connection);
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+
+    daemon.daemonReplace({ version: "0.0.1" });
+    await vi.waitFor(() =>
+        expect(connection.compatibility()).toMatchObject({
+            status: "server_outdated",
+            serverVersion: "0.0.1",
+        }),
+    );
+    await vi.waitFor(() => expect(daemon.callCount("getHealth")).toBeGreaterThanOrEqual(3));
+    expect(groups.state.connection).toBe("reconnecting");
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(1);
+    expect(daemon.callCount("streamEvents")).toBe(2);
+
+    daemon.healthSet({ daemon: "0.4.75" });
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    expect(connection.compatibility()).toMatchObject({
+        status: "compatible",
+        serverVersion: "0.4.75",
+    });
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(2);
+});
+
+it("does not read health again when the same daemon's feed only reconnects", async () => {
+    const { connection, daemon } = harnessOpen();
+    const groups = groupsWatch(connection);
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+
+    daemon.streamDropAll();
+    await vi.waitFor(() => expect(daemon.streamOpens).toHaveLength(2));
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    expect(daemon.callCount("getHealth")).toBe(1);
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(1);
+});
+
 it("retries an unreachable daemon with exponential backoff and surfaces the error", async () => {
     const daemon = fakeHappyAgentDaemonCreate();
     daemon.projectSeed({ id: "project-a" });
@@ -187,15 +445,49 @@ it("polls health until the daemon is ready before opening the stream", async () 
     await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
 });
 
-it("refuses an incompatible protocol without opening the stream", async () => {
+const freshMachineOnboarding = {
+    completed: false,
+    steps: {
+        profile: { done: false },
+        project: { done: false },
+        providers: { done: true, signedIn: ["claude"] },
+    },
+};
+
+it("holds a team member without a profile before bootstrap and the stream", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    daemon.onboardingSet(freshMachineOnboarding);
+    const { connection } = harnessOpen(daemon);
+    const groups = groupsWatch(connection);
+
+    await vi.waitFor(() => expect(daemon.callCount("getOnboarding")).toBeGreaterThanOrEqual(2));
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(0);
+    expect(daemon.callCount("streamEvents")).toBe(0);
+    expect(groups.state.connection).toBe("connecting");
+});
+
+it("bootstraps a fresh solo machine that has no profile", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    daemon.onboardingSet(freshMachineOnboarding);
+    daemon.projectSeed({ id: "project-a" });
+    const { connection } = harnessOpen(daemon, { memberProfileRequired: false });
+    const groups = groupsWatch(connection);
+
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    expect(groups.projects.map((project) => project.id)).toEqual(["project-a"]);
+    expect(daemon.callCount("getDesktopBootstrap")).toBe(1);
+});
+
+it("accepts a newer additive protocol", async () => {
     const daemon = fakeHappyAgentDaemonCreate();
     daemon.healthSet({ protocol: HAPPY_AGENT_PROTOCOL_VERSION + 1 });
     const { connection } = harnessOpen(daemon);
-    groupsWatch(connection);
+    const groups = groupsWatch(connection);
 
-    await vi.waitFor(() => expect(connection.compatibility().status).toBe("client_outdated"));
-    expect(daemon.callCount("streamEvents")).toBe(0);
-    expect(daemon.callCount("getDesktopBootstrap")).toBe(0);
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    expect(connection.compatibility().status).toBe("compatible");
+    expect(daemon.callCount("streamEvents")).toBe(1);
+    expect(daemon.callCount("getDesktopBootstrap")).toBeGreaterThan(0);
 });
 
 it("close() severs the live stream and stops the reconnect loop", async () => {
@@ -341,6 +633,50 @@ it("does not duplicate the session row when agent.created is redelivered", async
 
 // --- sent message reconciliation ------------------------------------------
 
+it("voice acceptance waits for authority and preserves the optimistic row identity", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    const release = daemon.pause("sendMessage");
+    let accepted = false;
+    const sent = connection.sendMessageConfirmed(sessionId, "Reviewed voice text").then(() => {
+        accepted = true;
+    });
+    const optimistic = userMessages(chat.elements)[0]!;
+    expect(optimistic.authority).toBe("local");
+    await Promise.resolve();
+    expect(accepted).toBe(false);
+    release();
+    await sent;
+    expect(accepted).toBe(true);
+    const authoritative = userMessages(chat.elements)[0]!;
+    expect(authoritative.authority).toBe("server");
+    expect(authoritative.id).toBe(optimistic.id);
+    expect(authoritative.messageId).toBe(optimistic.messageId);
+    expect(daemon.callCount("sendMessage")).toBe(1);
+});
+
+it("voice acceptance resolves from an authoritative event before the HTTP response", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    const release = daemon.pause("sendMessage:respond");
+    try {
+        await connection.sendMessageConfirmed(sessionId, "Exact confirmed text");
+        expect(userMessages(chat.elements)).toHaveLength(1);
+        expect(userMessages(chat.elements)[0]?.authority).toBe("server");
+        expect(daemon.callCount("sendMessage")).toBe(1);
+    } finally {
+        release();
+    }
+});
+
+it("voice acceptance rejects a delayed daemon refusal without claiming delivery or retrying", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    daemon.failOnce("sendMessage", new HappyAgentApiError(400, "refused", "invalid_request", null));
+    const sent = connection.sendMessageConfirmed(sessionId, "Do not claim this was sent");
+    expect(userMessages(chat.elements)[0]?.authority).toBe("local");
+    await expect(sent).rejects.toThrow("not accepted");
+    expect(userMessages(chat.elements)).toEqual([]);
+    expect(daemon.callCount("sendMessage")).toBe(1);
+});
+
 it("shows an optimistic message immediately and keeps its identity once the daemon takes it", async () => {
     const { connection, daemon, chat, sessionId } = await liveHarness();
     const release = daemon.pause("sendMessage");
@@ -441,20 +777,21 @@ it("marks pending messages accepted and moves them under the run that took them"
     expect(chat.session?.status).toBe("running");
 });
 
-it("serializes concurrent sends to the same agent", async () => {
+it("starts sends without waiting for draft persistence or another send", async () => {
     const { connection, daemon, sessionId } = await liveHarness();
+    const releaseDraft = daemon.pause("saveAgentDraft");
     const release = daemon.pause("sendMessage");
+    connection.setDraft(sessionId, "");
+    await vi.waitFor(() => expect(daemon.callCount("saveAgentDraft")).toBe(1));
     connection.sendMessage(sessionId, "first");
     connection.sendMessage(sessionId, "second");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(daemon.callCount("sendMessage")).toBe(1);
-
-    release();
     await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(2));
     const texts = daemon.calls
         .filter((call) => call.method === "sendMessage")
         .map((call) => (call.args[1] as { text: string }).text);
     expect(texts).toEqual(["first", "second"]);
+    release();
+    releaseDraft();
 });
 
 // --- streaming content reconciliation --------------------------------------
@@ -980,4 +1317,184 @@ it("resumes the stream from the newest applied event cursor after events advance
     daemon.streamDropAll();
     await vi.waitFor(() => expect(daemon.streamOpens).toHaveLength(2));
     expect(daemon.streamOpens[1]).toBe(newest.cursor);
+});
+
+it("preserves unavailable Git scans and recovers from the next live snapshot", async () => {
+    const { daemon, connection } = harnessOpen();
+    daemon.projectSeed({ id: "project-git" });
+    const groups = groupsWatch(connection);
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    const git = {
+        facts: {
+            branch: null,
+            detached: false,
+            head: "abc123",
+            upstream: null,
+            ahead: 0,
+            behind: 0,
+        },
+        comparison: "unavailable" as const,
+        base: null,
+        changedFiles: 0,
+        insertions: 0,
+        deletions: 0,
+        countsExact: false,
+        conflicted: false,
+        files: [],
+        filesTruncated: false,
+        scannedAt: 1000,
+    };
+    daemon.eventEmit("git.updated", { workspaceId: "project-git", git });
+    await vi.waitFor(() => expect(groups.projects[0]?.git?.comparison).toBe("unavailable"));
+    daemon.eventEmit("git.updated", {
+        workspaceId: "project-git",
+        git: {
+            ...git,
+            comparison: "ready",
+            base: "abc123",
+            changedFiles: 1,
+            insertions: 1,
+            countsExact: true,
+            scannedAt: 2000,
+            files: [
+                {
+                    path: "lol.txt",
+                    status: "untracked",
+                    staged: false,
+                    unstaged: true,
+                    binary: false,
+                    insertions: 1,
+                    deletions: 0,
+                },
+            ],
+        },
+    });
+    await vi.waitFor(() =>
+        expect(groups.projects[0]?.git).toMatchObject({
+            comparison: "ready",
+            changedFiles: 1,
+            files: [{ path: "lol.txt" }],
+        }),
+    );
+});
+
+it("retains the last successful Git comparison through failed scans and clears it after a real clean scan", async () => {
+    const { daemon, connection } = harnessOpen();
+    daemon.projectSeed({ id: "project-git-stale" });
+    const groups = groupsWatch(connection);
+    await vi.waitFor(() => expect(groups.state.connection).toBe("live"));
+    const git = {
+        facts: {
+            branch: "main",
+            detached: false,
+            head: "head1",
+            upstream: null,
+            ahead: 0,
+            behind: 0,
+        },
+        comparison: "ready" as const,
+        base: "base1",
+        changedFiles: 1,
+        insertions: 1,
+        deletions: 0,
+        countsExact: true,
+        conflicted: false,
+        files: [
+            {
+                path: "lol.txt",
+                status: "untracked" as const,
+                staged: false,
+                unstaged: true,
+                binary: false,
+                insertions: 1,
+                deletions: 0,
+            },
+        ],
+        filesTruncated: false,
+        scannedAt: 1000,
+    };
+    daemon.eventEmit("git.updated", { workspaceId: "project-git-stale", git });
+    await vi.waitFor(() => expect(groups.projects[0]?.git?.comparison).toBe("ready"));
+    const files = groups.projects[0]!.git!.files;
+    daemon.eventEmit("git.updated", {
+        workspaceId: "project-git-stale",
+        git: {
+            ...git,
+            comparison: "unavailable",
+            base: null,
+            files: [],
+            changedFiles: 0,
+            insertions: 0,
+            countsExact: false,
+            scannedAt: 2000,
+        },
+    });
+    await vi.waitFor(() => expect(groups.projects[0]?.git?.comparison).toBe("stale"));
+    expect(groups.projects[0]!.git).toMatchObject({
+        changedFiles: 1,
+        insertions: 1,
+        baseRevision: "base1",
+        version: 1000,
+    });
+    expect(groups.projects[0]!.git!.files).toBe(files);
+
+    // Reconnect hydration must preserve the same cache when the new scan fails.
+    vi.spyOn(daemon.client, "watchGit").mockResolvedValueOnce({
+        snapshots: {
+            "project-git-stale": {
+                ...git,
+                comparison: "unavailable",
+                files: [],
+                changedFiles: 0,
+                insertions: 0,
+                scannedAt: 2500,
+            },
+        },
+    });
+    daemon.gapOnNextStream();
+    daemon.streamDropAll();
+    await vi.waitFor(() => {
+        expect(daemon.callCount("getDesktopBootstrap")).toBe(2);
+        expect(groups.state.connection).toBe("live");
+    });
+    expect(groups.projects[0]!.git).toMatchObject({ comparison: "stale", changedFiles: 1 });
+    expect(groups.projects[0]!.git!.files).toBe(files);
+
+    // Losing the watch response entirely must not erase the list either.
+    vi.spyOn(daemon.client, "watchGit").mockRejectedValueOnce(new Error("watch unavailable"));
+    daemon.gapOnNextStream();
+    daemon.streamDropAll();
+    await vi.waitFor(() => {
+        expect(daemon.callCount("getDesktopBootstrap")).toBe(3);
+        expect(groups.state.connection).toBe("live");
+    });
+    expect(groups.projects[0]!.git).toMatchObject({ comparison: "stale", changedFiles: 1 });
+    expect(groups.projects[0]!.git!.files).toBe(files);
+    daemon.eventEmit("git.updated", {
+        workspaceId: "project-git-stale",
+        git: { ...git, files: [], changedFiles: 0, insertions: 0, scannedAt: 3000 },
+    });
+    await vi.waitFor(() =>
+        expect(groups.projects[0]?.git).toMatchObject({
+            comparison: "ready",
+            changedFiles: 0,
+            files: [],
+            version: 3000,
+        }),
+    );
+
+    vi.spyOn(daemon.client, "watchGit").mockRejectedValueOnce(new Error("watch unavailable"));
+    daemon.gapOnNextStream();
+    daemon.streamDropAll();
+    await vi.waitFor(() => {
+        expect(daemon.callCount("getDesktopBootstrap")).toBe(4);
+        expect(groups.state.connection).toBe("live");
+    });
+    expect(groups.projects[0]!.git).toMatchObject({ comparison: "stale", changedFiles: 0 });
+    // A successful refresh of the same scan restores freshness, even at the same timestamp.
+    daemon.eventEmit("git.updated", {
+        workspaceId: "project-git-stale",
+        git: { ...git, files: [], changedFiles: 0, insertions: 0, scannedAt: 3000 },
+    });
+    await vi.waitFor(() => expect(groups.projects[0]?.git?.comparison).toBe("ready"));
 });

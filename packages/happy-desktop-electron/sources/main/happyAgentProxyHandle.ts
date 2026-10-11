@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { HappyAgentApiError } from "@slopus/happy-agent-client";
 import {
@@ -9,12 +10,19 @@ import {
 } from "./happyAgentDaemonClient";
 import { openInRun, openInTargetsRead } from "./openIn";
 import { happyAgentDaemonHealthProject } from "./happyAgentHttpProxy";
+import type { HappyAgentRequestMilestone } from "./happyAgentRequestTiming";
+import type { HappyAgentDaemonClientOptions } from "./happyAgentDaemonClient";
+import { HAPPY_AGENT_LIVE_WINDOW_HEADER, happyAgentLivePath } from "./happyAgentLiveRoute";
+import { ArtifactSiteError } from "./artifactSite";
 
 /** The minimal Happy Agent surface used by the loopback bridge. */
 export type HappyAgentProxyClient = Pick<
     HappyAgentDaemonClient,
     "getWorkspace" | "health" | "rawRequest" | "readWorkspaceFile" | "writeWorkspaceFile"
->;
+> & {
+    readonly connection?: (id: string) => HappyAgentProxyClient;
+    readonly rendererTransport?: () => HappyAgentDaemonClientOptions;
+};
 
 export interface HappyAgentProxyHandleOptions {
     readonly client: HappyAgentProxyClient;
@@ -23,9 +31,20 @@ export interface HappyAgentProxyHandleOptions {
     readonly query: URLSearchParams;
     readonly request: IncomingMessage;
     readonly response: ServerResponse;
+    readonly onTiming?: (milestone: HappyAgentRequestMilestone) => void;
     readonly onConnectionError?: (error: unknown) => void;
     /** Publishes one workspace file as an isolated local preview site. */
-    readonly htmlPreviewUrl?: (workspaceId: string, filePath: string) => string;
+    readonly htmlPreviewUrl?: (
+        workspaceId: string,
+        filePath: string,
+        connectionId?: string,
+    ) => string;
+    /** Serves one numbered artifact version as an isolated site and names its entry. */
+    readonly artifactSiteUrl?: (
+        artifactId: string,
+        version: number,
+        connectionId?: string,
+    ) => Promise<string>;
 }
 
 /**
@@ -40,6 +59,7 @@ export interface HappyAgentProxyHandleOptions {
 function daemonErrorStatus(error: unknown): number | undefined {
     if (error instanceof HappyAgentDaemonHttpError) return error.statusCode;
     if (error instanceof HappyAgentApiError) return error.status;
+    if (error instanceof ArtifactSiteError) return error.status;
     return undefined;
 }
 
@@ -54,7 +74,24 @@ function daemonErrorStatus(error: unknown): number | undefined {
 export async function happyAgentProxyHandle(
     options: HappyAgentProxyHandleOptions,
 ): Promise<boolean> {
-    const { client, method, path, query, request, response } = options;
+    const { method, query, request, response } = options;
+    let { client, path } = options;
+    if (happyAgentLivePath(path)) {
+        writeJson(response, 403, { error: "GPT-Live requires the native window transport." });
+        return true;
+    }
+    const remote = /^\/connections\/([a-z][a-z0-9_-]{0,63})(\/[^/]+)$/u.exec(path);
+    const connectionId = remote?.[1];
+    if (connectionId) {
+        if (!client.connection) {
+            writeJson(response, 501, {
+                error: "Update the desktop shell to use remote file services.",
+            });
+            return true;
+        }
+        client = client.connection(connectionId);
+        path = remote![2]!;
+    }
     const daemonPath = happyAgentDaemonPath(path, query);
     if (daemonPath !== undefined) {
         await happyAgentForward(
@@ -63,7 +100,8 @@ export async function happyAgentProxyHandle(
             response,
             method,
             daemonPath,
-            options.onConnectionError,
+            path.startsWith("/v0/connections/") ? undefined : options.onConnectionError,
+            options.onTiming,
         );
         return true;
     }
@@ -74,10 +112,12 @@ export async function happyAgentProxyHandle(
             return true;
         }
         if (method === "GET" && path === "/open-in-targets") {
-            writeJson(response, 200, await openInTargetsRead());
+            writeJson(response, 200, connectionId ? [] : await openInTargetsRead());
             return true;
         }
         if (method === "POST" && path === "/open-in") {
+            if (connectionId)
+                throw new Error("A remote workspace cannot be opened as a local folder.");
             const body = await bodyReadJson(request);
             const workspaceId = requiredString(body.workspaceId, "workspaceId");
             const target = requiredString(body.target, "target");
@@ -105,11 +145,13 @@ export async function happyAgentProxyHandle(
         if (method === "POST" && path === "/attachment-source-reachable") {
             const body = await bodyReadJson(request);
             writeJson(response, 200, {
-                reachable: await attachmentSourceReachable(
-                    client,
-                    requiredString(body.workspaceId, "workspaceId"),
-                    requiredString(body.sourcePath, "sourcePath"),
-                ),
+                reachable:
+                    !connectionId &&
+                    (await attachmentSourceReachable(
+                        client,
+                        requiredString(body.workspaceId, "workspaceId"),
+                        requiredString(body.sourcePath, "sourcePath"),
+                    )),
             });
             return true;
         }
@@ -137,7 +179,21 @@ export async function happyAgentProxyHandle(
             const workspaceId = requiredQuery(query, "workspaceId");
             const filePath = requiredQuery(query, "path");
             writeJson(response, 200, {
-                url: options.htmlPreviewUrl(workspaceId, filePath),
+                url: options.htmlPreviewUrl(workspaceId, filePath, connectionId),
+            });
+            return true;
+        }
+        if (method === "GET" && path === "/artifact-site") {
+            if (!options.artifactSiteUrl) {
+                writeJson(response, 501, {
+                    error: "This desktop cannot serve an artifact as a page.",
+                });
+                return true;
+            }
+            const artifactId = requiredQuery(query, "artifactId");
+            const version = Number(requiredQuery(query, "version"));
+            writeJson(response, 200, {
+                url: await options.artifactSiteUrl(artifactId, version, connectionId),
             });
             return true;
         }
@@ -157,7 +213,8 @@ export async function happyAgentProxyHandle(
         }
         return false;
     } catch (error) {
-        if (happyAgentDaemonConnectionUnavailable(error)) options.onConnectionError?.(error);
+        if (!connectionId && happyAgentDaemonConnectionUnavailable(error))
+            options.onConnectionError?.(error);
         if (!response.headersSent) {
             const status = daemonErrorStatus(error);
             writeJson(response, status ?? 502, { error: errorMessage(error) });
@@ -311,6 +368,7 @@ async function happyAgentForward(
     method: string,
     path: string,
     onConnectionError?: (error: unknown) => void,
+    onTiming?: (milestone: HappyAgentRequestMilestone) => void,
 ): Promise<void> {
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -328,6 +386,7 @@ async function happyAgentForward(
             "host",
             "origin",
             "referer",
+            HAPPY_AGENT_LIVE_WINDOW_HEADER,
         ]);
         const forwardedHeaders: Record<string, string> = {};
         for (const [name, value] of Object.entries(request.headers)) {
@@ -341,6 +400,7 @@ async function happyAgentForward(
             ...(Object.keys(forwardedHeaders).length === 0 ? {} : { headers: forwardedHeaders }),
             signal: controller.signal,
         });
+        onTiming?.("daemon-headers");
         const omittedResponseHeaders = omittedHeaderNames(upstream.headers.connection, [
             "access-control-allow-credentials",
             "access-control-allow-headers",
@@ -355,7 +415,20 @@ async function happyAgentForward(
             else response.setHeader(name, value);
         }
         response.writeHead(upstream.statusCode);
-        await pipeline(upstream.body, response);
+        if (onTiming) {
+            // A data listener on the source would switch it to flowing mode before
+            // pipeline is attached. This meter observes chunks only after the
+            // pipeline owns the stream, and preserves backpressure end to end.
+            const meter = new Transform({
+                transform(chunk: Buffer, _encoding, callback) {
+                    onTiming("daemon-first-byte");
+                    callback(null, chunk);
+                },
+            });
+            await pipeline(upstream.body, meter, response);
+        } else {
+            await pipeline(upstream.body, response);
+        }
     } catch (error) {
         if (controller.signal.aborted) return;
         if (happyAgentDaemonConnectionUnavailable(error)) onConnectionError?.(error);
@@ -396,9 +469,10 @@ const PREVIEW_MAX_BYTES = 64 * 1024 * 1024;
 const RAW_BODY_MAX_BYTES = 64 * 1024 * 1024;
 const JSON_BODY_MAX_BYTES = 40 * 1024 * 1024;
 
-let previewHeld:
-    | { readonly key: string; readonly contentType: string; readonly bytes: Buffer }
-    | undefined;
+const previewHeld = new WeakMap<
+    HappyAgentProxyClient,
+    { readonly key: string; readonly contentType: string; readonly bytes: Buffer }
+>();
 
 function previewKey(workspaceId: string, filePath: string, hash?: string): string {
     return `${workspaceId}\u0000${filePath}\u0000${hash ?? ""}`;
@@ -417,14 +491,18 @@ async function workspaceFileBytesLoad(
     hash?: string,
     signal?: AbortSignal,
 ): Promise<{ readonly contentType: string; readonly bytes: Buffer; readonly hash: string }> {
-    const held = previewHeld;
+    const held = previewHeld.get(client);
     if (held && hash !== undefined && held.key === previewKey(workspaceId, filePath, hash))
         return { contentType: held.contentType, bytes: held.bytes, hash };
     const file = await workspaceFileLoad(client, workspaceId, filePath, signal);
     const bytes = Buffer.from(file.content, "base64");
     if (bytes.byteLength > PREVIEW_MAX_BYTES) throw new Error("This file is too large to preview.");
     const contentType = previewContentType(filePath);
-    previewHeld = { key: previewKey(workspaceId, filePath, file.hash), contentType, bytes };
+    previewHeld.set(client, {
+        key: previewKey(workspaceId, filePath, file.hash),
+        contentType,
+        bytes,
+    });
     return { contentType, bytes, hash: file.hash };
 }
 

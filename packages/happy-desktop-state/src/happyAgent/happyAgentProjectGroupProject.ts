@@ -81,6 +81,7 @@ export interface HappyAgentWorktreeGroup {
     readonly activity: "running" | "awaitingInput" | "waiting" | "idle";
     /** Epoch milliseconds of the newest content in any of its sessions. */
     readonly updatedAt: number;
+    readonly changesStatus?: "loading" | "ready" | "stale" | "unavailable";
     readonly changedFiles?: number;
     readonly addedLines?: number;
     readonly deletedLines?: number;
@@ -119,14 +120,12 @@ export interface HappyAgentProjectGroup {
     readonly activity: "running" | "awaitingInput" | "waiting" | "idle";
     /** Epoch milliseconds of the newest content anywhere under the project. */
     readonly updatedAt: number;
+    readonly changesStatus?: "loading" | "ready" | "stale" | "unavailable";
     readonly changedFiles?: number;
     readonly addedLines?: number;
     readonly deletedLines?: number;
     readonly changes?: HappyAgentProject["changes"];
 }
-
-/** A session the host has given a position, and which therefore takes a row. */
-type HappyAgentPlacedSession = HappyAgentSessionSummary & { readonly orderKey: string };
 
 /**
  * Groups the flat session catalog under the daemon's projects and worktrees,
@@ -144,8 +143,8 @@ export function happyAgentProjectGroupsProject(
     catalog: HappyAgentProjectCatalog,
     sessions: readonly HappyAgentSessionSummary[],
 ): readonly HappyAgentProjectGroup[] {
-    const projectSessions = new Map<HappyAgentProjectId, HappyAgentPlacedSession[]>();
-    const worktreeSessions = new Map<HappyAgentWorktreeId, HappyAgentPlacedSession[]>();
+    const projectSessions = new Map<HappyAgentProjectId, HappyAgentSessionSummary[]>();
+    const worktreeSessions = new Map<HappyAgentWorktreeId, HappyAgentSessionSummary[]>();
     for (const session of sessions) {
         // A subagent runs under the session that started it and is reachable
         // through that session; giving it a row of its own would put a session
@@ -154,14 +153,10 @@ export function happyAgentProjectGroupsProject(
         // moment ago — is still the reader's own tab, so a missing key falls
         // back to the session's id rather than costing the session its row.
         if (session.parentSessionId !== undefined) continue;
-        const placed: HappyAgentPlacedSession = {
-            ...session,
-            orderKey: session.orderKey ?? session.id,
-        };
         const bucket = session.worktreeId
             ? mapAppend(worktreeSessions, session.worktreeId)
             : mapAppend(projectSessions, session.projectId);
-        bucket.push(placed);
+        bucket.push(session);
     }
 
     const worktreesByProject = new Map<HappyAgentProjectId, HappyAgentWorktreeGroup[]>();
@@ -188,6 +183,9 @@ export function happyAgentProjectGroupsProject(
             conversations,
             activity: activityOf(conversations),
             updatedAt: newestOf(conversations),
+            ...(worktree.changesStatus === undefined
+                ? {}
+                : { changesStatus: worktree.changesStatus }),
             ...(worktree.changedFiles === undefined ? {} : { changedFiles: worktree.changedFiles }),
             ...(worktree.addedLines === undefined ? {} : { addedLines: worktree.addedLines }),
             ...(worktree.deletedLines === undefined ? {} : { deletedLines: worktree.deletedLines }),
@@ -297,6 +295,7 @@ function projectGroup(
             0,
         ),
         ...(project.avatar ? { avatar: project.avatar } : {}),
+        ...(project.changesStatus === undefined ? {} : { changesStatus: project.changesStatus }),
         ...(project.changedFiles === undefined ? {} : { changedFiles: project.changedFiles }),
         ...(project.addedLines === undefined ? {} : { addedLines: project.addedLines }),
         ...(project.deletedLines === undefined ? {} : { deletedLines: project.deletedLines }),
@@ -382,10 +381,12 @@ export function happyAgentWorktreeLifecycleRefusal(
  * instead of letting the next message throw it back to the top.
  */
 function byOrderKey(
-    left: { readonly orderKey: string; readonly id: string },
-    right: { readonly orderKey: string; readonly id: string },
+    left: { readonly orderKey?: string; readonly id: string },
+    right: { readonly orderKey?: string; readonly id: string },
 ): number {
-    if (left.orderKey !== right.orderKey) return left.orderKey < right.orderKey ? -1 : 1;
+    const leftKey = left.orderKey ?? left.id;
+    const rightKey = right.orderKey ?? right.id;
+    if (leftKey !== rightKey) return leftKey < rightKey ? -1 : 1;
     return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 }
 
@@ -395,7 +396,7 @@ function byOrderKey(
  * rewrites only the moved row's key: sorting on the key is what moves the row.
  */
 function conversationsOf(
-    sessions: readonly HappyAgentPlacedSession[] | undefined,
+    sessions: readonly HappyAgentSessionSummary[] | undefined,
 ): readonly ConversationSummary[] {
     return [...(sessions ?? [])].sort(byOrderKey).map(happyAgentConversationSummaryProject);
 }

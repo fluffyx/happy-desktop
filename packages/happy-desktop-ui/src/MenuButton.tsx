@@ -2,10 +2,13 @@ import { useCallback, useId, useRef, useState } from "react";
 import { Button, type ButtonSize, type ButtonVariant } from "./Button";
 import { Icon, type IconName, type IconProps } from "./Icon";
 import { Menu, type MenuItem } from "./Menu";
+import { WindowOverlay } from "./WindowOverlay";
 
 export interface MenuButtonProps {
     readonly label: string;
     readonly icon: IconName;
+    /** Shown beside the glyph, for a trigger that names itself on the surface. */
+    readonly text?: string;
     /**
      * Optical size of the trigger glyph, for a name backed by the heavier of the
      * two families. An Octicons glyph is drawn across the full 16 box where an
@@ -18,6 +21,17 @@ export interface MenuButtonProps {
     readonly items: readonly MenuItem[] | (() => readonly MenuItem[]);
     readonly onSelect: (id: string) => void;
     readonly align?: "start" | "end";
+    /** Which edge of the trigger the popover opens from. */
+    readonly placement?: "above" | "below";
+    /**
+     * Hangs the popover off the window's overlay lane, fixed beside the
+     * trigger, instead of inside the trigger's own box. For a trigger in a pane
+     * that would clip or seal the card — a narrow sidebar, a layered panel —
+     * where a popover drawn in place is cut off at the pane's edge or painted
+     * under the chrome beside it. The card is pushed back inside the window
+     * when the trigger sits too near an edge for it to fit.
+     */
+    readonly overlay?: boolean;
     readonly disabled?: boolean;
     /** Caps a long menu to a scrollable viewport while keeping its trigger fixed. */
     readonly menuMaxHeight?: number;
@@ -28,8 +42,22 @@ export interface MenuButtonProps {
     readonly menuWidth?: number;
     readonly size?: ButtonSize;
     readonly variant?: ButtonVariant;
+    readonly className?: string;
     readonly "data-testid"?: string;
 }
+
+/** How close to the window's edge an overlaid popover may sit before it is pushed back in. */
+const VIEWPORT_MARGIN = 8;
+
+/** The trigger's box at the moment the menu opened, in viewport pixels. */
+interface TriggerBounds {
+    readonly top: number;
+    readonly bottom: number;
+    readonly left: number;
+    readonly right: number;
+}
+
+const TRIGGER_UNMEASURED: TriggerBounds = { top: 0, bottom: 0, left: 0, right: 0 };
 
 /**
  * A compact icon action with a corner-anchored Menu. It owns only whether its
@@ -39,22 +67,58 @@ export function MenuButton(props: MenuButtonProps) {
     const [open, setOpen] = useState(false);
     const [materializedItems, setMaterializedItems] = useState<readonly MenuItem[]>([]);
     const [menuPage, setMenuPage] = useState(0);
-    const [triggerBottom, setTriggerBottom] = useState(0);
+    const [trigger, setTrigger] = useState<TriggerBounds>(TRIGGER_UNMEASURED);
     const root = useRef<HTMLDivElement>(null);
+    // The popover's node, wherever it was drawn: in the trigger's own box, or
+    // in the overlay lane where a query from the root would not find it.
+    const popover = useRef<HTMLDivElement>(null);
     const menuId = useId();
     const expanded = open && !props.disabled;
+    const overlay = props.overlay === true;
+    const above = props.placement === "above";
+    const alignEnd = props.align === "end";
     const triggerFocus = (): void => {
         root.current?.querySelector<HTMLElement>(":scope > button")?.focus();
     };
     const menuItems = (): HTMLElement[] =>
-        root.current
-            ? [...root.current.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)')]
+        popover.current
+            ? [...popover.current.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)')]
             : [];
-    // The popover's commit is the exact lifetime boundary at which its first
-    // menu item exists, so focus does not depend on React's microtask ordering.
-    const popoverRef = useCallback((node: HTMLDivElement | null): void => {
-        node?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
-    }, []);
+    // The popover's commit is the exact lifetime boundary at which its box and
+    // its first menu item exist, so placement and focus do not depend on
+    // React's microtask ordering.
+    const popoverRef = useCallback(
+        (node: HTMLDivElement | null): void => {
+            popover.current = node;
+            if (!node) return;
+            if (overlay) {
+                // Anchored to the trigger's near corner, then pushed back
+                // inside the window if the card would run past an edge.
+                const bounds = node.getBoundingClientRect();
+                const wanted = alignEnd ? trigger.right - bounds.width : trigger.left;
+                const left = Math.max(
+                    VIEWPORT_MARGIN,
+                    Math.min(wanted, window.innerWidth - bounds.width - VIEWPORT_MARGIN),
+                );
+                node.style.left = `${String(left)}px`;
+                if (above) {
+                    const bottom = Math.max(VIEWPORT_MARGIN, window.innerHeight - trigger.top);
+                    node.style.bottom = `${String(bottom)}px`;
+                } else {
+                    const top = Math.max(
+                        VIEWPORT_MARGIN,
+                        Math.min(
+                            trigger.bottom,
+                            window.innerHeight - bounds.height - VIEWPORT_MARGIN,
+                        ),
+                    );
+                    node.style.top = `${String(top)}px`;
+                }
+            }
+            node.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
+        },
+        [above, alignEnd, overlay, trigger],
+    );
     const close = (returnFocus: boolean): void => {
         setOpen(false);
         if (returnFocus) triggerFocus();
@@ -95,13 +159,65 @@ export function MenuButton(props: MenuButtonProps) {
               ]
             : []),
     ];
+    const menuMaxHeight =
+        props.menuMaxHeight === undefined
+            ? undefined
+            : above
+              ? `max(0px, min(${String(props.menuMaxHeight)}px, calc(${String(trigger.top)}px - 8px)))`
+              : `max(0px, min(${String(props.menuMaxHeight)}px, calc(100vh - ${String(trigger.bottom)}px - 8px)))`;
+    const popoverContent = (
+        <>
+            <button
+                aria-label="Close menu"
+                className="happy-menu-button__backdrop"
+                data-happy-desktop-ui="menu-button-backdrop"
+                onClick={() => close(true)}
+                tabIndex={-1}
+                type="button"
+            />
+            <div
+                className="happy-menu-button__popover"
+                data-happy-desktop-ui="menu-button-popover"
+                data-overlay={overlay ? "" : undefined}
+                data-placement={above ? "above" : undefined}
+                ref={popoverRef}
+            >
+                <Menu
+                    id={menuId}
+                    items={[...visibleItems]}
+                    label={props.menuLabel}
+                    onSelect={(id) => {
+                        if (id === previousPageId) {
+                            setMenuPage((page) => Math.max(0, page - 1));
+                            requestAnimationFrame(() => menuItems()[0]?.focus());
+                            return;
+                        }
+                        if (id === nextPageId) {
+                            setMenuPage((page) => Math.min(pageCount - 1, page + 1));
+                            requestAnimationFrame(() => menuItems()[0]?.focus());
+                            return;
+                        }
+                        close(true);
+                        props.onSelect(id);
+                    }}
+                    {...(menuMaxHeight === undefined
+                        ? {}
+                        : { style: { maxHeight: menuMaxHeight } })}
+                    width={props.menuWidth}
+                />
+            </div>
+        </>
+    );
     return (
         <div
-            className="happy-menu-button"
-            data-align={props.align === "end" ? "end" : undefined}
+            className={["happy-menu-button", props.className].filter(Boolean).join(" ")}
+            data-align={alignEnd ? "end" : undefined}
             data-happy-desktop-ui="menu-button"
+            data-open={expanded ? "" : undefined}
             data-testid={props["data-testid"]}
             ref={root}
+            // Key events from an overlaid popover still arrive here: a portal
+            // is elsewhere in the document but in place in the React tree.
             onKeyDown={(event) => {
                 if (!expanded) return;
                 if (event.key === "Escape") {
@@ -137,7 +253,7 @@ export function MenuButton(props: MenuButtonProps) {
                 aria-label={props.label}
                 disabled={props.disabled}
                 {...(props.iconSize === undefined ? { icon: props.icon } : {})}
-                iconOnly
+                {...(props.text === undefined ? { iconOnly: true } : {})}
                 onClick={(event) => {
                     if (expanded) close(false);
                     else {
@@ -145,7 +261,13 @@ export function MenuButton(props: MenuButtonProps) {
                             typeof props.items === "function" ? props.items() : props.items,
                         );
                         setMenuPage(0);
-                        setTriggerBottom(event.currentTarget.getBoundingClientRect().bottom);
+                        const bounds = event.currentTarget.getBoundingClientRect();
+                        setTrigger({
+                            top: bounds.top,
+                            bottom: bounds.bottom,
+                            left: bounds.left,
+                            right: bounds.right,
+                        });
                         setOpen(true);
                     }
                 }}
@@ -155,51 +277,14 @@ export function MenuButton(props: MenuButtonProps) {
                 {props.iconSize === undefined ? null : (
                     <Icon name={props.icon} size={props.iconSize} />
                 )}
+                {props.text}
             </Button>
             {expanded ? (
-                <>
-                    <button
-                        aria-label="Close menu"
-                        className="happy-menu-button__backdrop"
-                        data-happy-desktop-ui="menu-button-backdrop"
-                        onClick={() => close(true)}
-                        tabIndex={-1}
-                        type="button"
-                    />
-                    <div
-                        className="happy-menu-button__popover"
-                        data-happy-desktop-ui="menu-button-popover"
-                        ref={popoverRef}
-                    >
-                        <Menu
-                            id={menuId}
-                            items={[...visibleItems]}
-                            label={props.menuLabel}
-                            onSelect={(id) => {
-                                if (id === previousPageId) {
-                                    setMenuPage((page) => Math.max(0, page - 1));
-                                    requestAnimationFrame(() => menuItems()[0]?.focus());
-                                    return;
-                                }
-                                if (id === nextPageId) {
-                                    setMenuPage((page) => Math.min(pageCount - 1, page + 1));
-                                    requestAnimationFrame(() => menuItems()[0]?.focus());
-                                    return;
-                                }
-                                close(true);
-                                props.onSelect(id);
-                            }}
-                            {...(props.menuMaxHeight === undefined
-                                ? {}
-                                : {
-                                      style: {
-                                          maxHeight: `max(0px, min(${String(props.menuMaxHeight)}px, calc(100vh - ${String(triggerBottom)}px - 8px)))`,
-                                      },
-                                  })}
-                            width={props.menuWidth}
-                        />
-                    </div>
-                </>
+                overlay ? (
+                    <WindowOverlay>{popoverContent}</WindowOverlay>
+                ) : (
+                    popoverContent
+                )
             ) : null}
         </div>
     );

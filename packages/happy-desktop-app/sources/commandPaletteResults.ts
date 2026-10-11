@@ -3,6 +3,7 @@ import type {
     HappyAgentProjectGroup,
     HappyAgentSessionSummary,
     HappyAgentWorktreeGroup,
+    HappyAgentLinkOpenPlacement,
     ScrollbarVisibility,
     ThemeMode,
 } from "happy-desktop-state";
@@ -62,6 +63,7 @@ export type CommandPaletteCommand =
       }
     | { readonly kind: "sessionCreate" }
     | { readonly kind: "workspaceCreate" }
+    | { readonly kind: "taskCreate" }
     | { readonly kind: "settingsOpen" }
     | { readonly kind: "settingsSectionOpen"; readonly section: string }
     | { readonly kind: "updateApply" };
@@ -105,6 +107,18 @@ export type CommandPaletteSettingRow =
                   readonly label: string;
               }[];
               readonly next: ScrollbarVisibility;
+          };
+      })
+    | (CommandPaletteSettingRowBase & {
+          readonly setting: "linkOpenPlacement";
+          readonly control: {
+              readonly kind: "segmented";
+              readonly value: HappyAgentLinkOpenPlacement;
+              readonly segments: readonly {
+                  readonly value: HappyAgentLinkOpenPlacement;
+                  readonly label: string;
+              }[];
+              readonly next: HappyAgentLinkOpenPlacement;
           };
       })
     | (CommandPaletteSettingRowBase & {
@@ -201,12 +215,15 @@ export interface CommandPaletteContext {
     readonly sessionCreateAvailable: boolean;
     /** Whether a new workspace can be made in the addressed project. */
     readonly workspaceCreateAvailable: boolean;
+    /** Whether a new task can be made on the addressed Happy Agent. */
+    readonly taskCreateAvailable: boolean;
 }
 
 export interface CommandPaletteInput extends CommandPaletteContext {
     readonly query: string;
     readonly themeMode: ThemeMode;
     readonly scrollbarVisibility: ScrollbarVisibility;
+    readonly linkOpenPlacement: HappyAgentLinkOpenPlacement;
     readonly titleShimmerEnabled: boolean;
     readonly experimentalFeaturesEnabled: boolean;
 }
@@ -230,6 +247,14 @@ const SCROLLBAR_SEGMENTS: readonly {
 }[] = [
     { value: "automatic", label: "Automatic" },
     { value: "always", label: "Always visible" },
+];
+
+const LINK_OPEN_SEGMENTS: readonly {
+    readonly value: HappyAgentLinkOpenPlacement;
+    readonly label: string;
+}[] = [
+    { value: "panel", label: "Side panel" },
+    { value: "browser", label: "Browser" },
 ];
 
 /**
@@ -264,7 +289,7 @@ const SETTINGS_JUMPS: readonly {
         section: "account",
         sectionLabel: "Account",
         icon: "users",
-        keywords: "profile name email photo happy social encryption secret key devices",
+        keywords: "profile name email photo happy account connect disconnect workos",
     },
     {
         id: "settings:instructions",
@@ -313,6 +338,14 @@ const SETTINGS_JUMPS: readonly {
         sectionLabel: "Dev Tools",
         icon: "code",
         keywords: "inspector profiler debug log",
+    },
+    {
+        id: "settings:experimental",
+        title: "Settings › Experimental",
+        section: "experimental",
+        sectionLabel: "Experimental",
+        icon: "zap",
+        keywords: "voice gpt-live experimental features",
     },
     {
         id: "settings:default-model",
@@ -624,6 +657,9 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
     const scrollbarIndex = SCROLLBAR_SEGMENTS.findIndex(
         (segment) => segment.value === input.scrollbarVisibility,
     );
+    const linkOpenIndex = LINK_OPEN_SEGMENTS.findIndex(
+        (segment) => segment.value === input.linkOpenPlacement,
+    );
     return [
         {
             kind: "setting",
@@ -651,6 +687,21 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
                 value: input.scrollbarVisibility,
                 segments: SCROLLBAR_SEGMENTS,
                 next: SCROLLBAR_SEGMENTS[(scrollbarIndex + 1) % SCROLLBAR_SEGMENTS.length].value,
+            },
+        },
+        {
+            kind: "setting",
+            setting: "linkOpenPlacement",
+            id: "setting:link-open",
+            label: "Open links in",
+            description:
+                "Side panel keeps the page beside the conversation; Browser hands it to the machine's own",
+            controlId: "happy-agent-palette-link-open",
+            control: {
+                kind: "segmented",
+                value: input.linkOpenPlacement,
+                segments: LINK_OPEN_SEGMENTS,
+                next: LINK_OPEN_SEGMENTS[(linkOpenIndex + 1) % LINK_OPEN_SEGMENTS.length].value,
             },
         },
         {
@@ -692,6 +743,7 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
  */
 const SETTINGS_INLINE_SECTIONS: Record<CommandPaletteSettingRow["setting"], string> = {
     experimentalFeatures: "Settings General Experimental features",
+    linkOpenPlacement: "Settings General Links",
     scrollbarVisibility: "Settings General Appearance",
     themeMode: "Settings General Appearance",
     titleShimmer: "Settings General Appearance",
@@ -712,6 +764,7 @@ function settingsSectionRows(input: CommandPaletteInput): Ranked[] {
         rows.push({ rank, updatedAt: 0, row });
     }
     for (const jump of SETTINGS_JUMPS) {
+        if (jump.section === "experimental" && !input.experimentalFeaturesEnabled) continue;
         // The section the row leads to is searchable too: "general" has to
         // reach the rows that live under General, not only the page itself.
         const rank = rowRank(query, jump.title, jump.sectionLabel, jump.keywords);
@@ -770,6 +823,18 @@ function actionRows(
                       glyph: { kind: "icon" as const, name: "plus" as const },
                       shortcut: APP_SHORTCUTS.sessionCreate,
                       command: { kind: "sessionCreate" as const },
+                  },
+              ]
+            : []),
+        ...(context.taskCreateAvailable
+            ? [
+                  {
+                      kind: "command" as const,
+                      id: "action:task-create",
+                      title: "New task",
+                      glyph: { kind: "icon" as const, name: "tasks" as const },
+                      shortcut: APP_SHORTCUTS.taskCreate,
+                      command: { kind: "taskCreate" as const },
                   },
               ]
             : []),

@@ -5,6 +5,59 @@ isolated, host-native Electron performance gym for Happy Agent.
 
 ## Electron Happy Agent gym
 
+### Windows and public-repository load
+
+The native runner supports Windows named pipes, an isolated `USERPROFILE` and
+AppData, native PowerShell tool commands, and hidden background Git/daemon
+helpers. Set `HAPPY_DESKTOP_AGENT_EXECUTABLE` to an absolute built agent `.exe`;
+`HAPPY_DESKTOP_ELECTRON_EXECUTABLE` can select an installed Electron binary.
+The Windows runner uses that agent executable directly, without a symlink or
+`.cmd` wrapper. Desktop navigation clicks the actual sidebar and conversation
+tabs: connection routers do not follow arbitrary URL-hash changes.
+
+Build and run from PowerShell at the repository root:
+
+```powershell
+$env:HAPPY_DESKTOP_PROFILE = '1'
+$env:HAPPY_DESKTOP_PROFILE_MODE = 'optimized'
+# Only when testing a local source daemon reporting 0.0.0:
+$env:HAPPY_ALLOW_SOURCE_AGENT = '1'
+pnpm --dir packages/happy-desktop-electron build
+node --import tsx packages/happy-desktop-gym/sources/electron/cli.ts prepare --profile realistic
+# Use the root printed by prepare and a previously checked-out public repository:
+node --import tsx packages/happy-desktop-gym/sources/electron/cli.ts attach-repository --root C:\path\to\hdg\g-RUNID --repository C:\path\to\public-checkout
+node --import tsx packages/happy-desktop-gym/sources/electron/cli.ts run --root C:\path\to\hdg\g-RUNID --workload public-repository
+```
+
+`attach-repository` makes a separate local clone, checks out the source HEAD,
+records its commit and tracked-file count in the manifest, and seeds four
+40-turn conversations through real Agent APIs. Prompts include checked-out
+source excerpts and file paths; responses use the profile's deterministic long
+history lane. It verifies persistence after restarting the daemon. The source
+checkout stays untouched, and no repository scripts or dependencies are run.
+The additive counts remain distinct from the original versioned dataset.
+Run this workload on `realistic` or `stress` for substantial transcript load.
+
+Set `HAPPY_DESKTOP_GYM_AGENT_PROFILE=1` to additionally request Bun CPU profiles
+in the owned artifacts directory. Bun writes those on process exit; renderer
+Chromium traces and React profiles still come from the app's native profiler.
+Use identical fixtures and profiler settings for before/after comparisons.
+Deterministic inference makes performance repeatable; it does not replace a
+separate test with an authenticated real provider.
+
+The public-repository scroll lane hydrates its long transcript before starting
+the concurrent streams. Trusted upward wheel input releases follow mode before
+each deterministic position jump; the measured position must reach its target
+within eight pixels. A run pinned at the latest message fails this check.
+
+`--workload background-drafts` opens a seeded long conversation and applies 100
+real API draft updates to another conversation, then restores its original draft.
+It verifies that the visible conversation stays selected and captures the native
+profile and screenshot. This lane preserves history for repeated comparisons.
+History preparation waits on durable run-completion events rather than repeatedly
+downloading transcripts. Its `seed-progress.json` records completed turns; the
+catalog check verifies all seeded identities from one authoritative bootstrap.
+
 The gym creates one disposable run under `<system-temp>/hdg/g-<run-id>` by
 default. Every mutable path belongs to that one short root: `HOME`, `TMPDIR`,
 `HAPPY_HOME_DIR`, the Happy Agent socket and token, Electron user data,
@@ -122,7 +175,7 @@ updates every 5ms. Animation-frame gaps are calibrated against idle frames
 captured immediately around each sweep and reported with estimated dropped
 frames, long frames, browser long tasks, delivered viewport widths, and panel
 geometry. Every sampled frame must keep rendered transcript rows mounted. The
-gym window remains inactive and the workload never controls the system cursor.
+gym window must always remain inactive, never take keyboard focus or be brought to the foreground, and the workload never controls the system cursor.
 
 Run it repeatedly against one already-prepared root:
 
@@ -234,6 +287,37 @@ pnpm --dir packages/happy-desktop-gym gym:electron clean --root <printed-run-roo
 without the Gym ownership marker. Keep a run for inspection, or clean it
 explicitly after collecting the artifacts.
 
+## Real GPT-Live call
+
+The opt-in `live-voice` command launches a separate owned daemon and Electron
+window, enables voice through Settings, chooses an explicit Codex subscription,
+and clicks the normal Start/End controls. It uses real provider inference and
+WebRTC; no deterministic inference server or voice transport fixture is started.
+The existing Codex sign-in file is referenced by path, never copied or printed.
+This lane uses the selected subscription and currently requires macOS speech tools.
+
+```sh
+# The source-agent flag is a renderer build-time setting, needed only for a 0.0.0 daemon.
+HAPPY_ALLOW_SOURCE_AGENT=1 pnpm --dir packages/happy-desktop-electron build
+HAPPY_DESKTOP_AGENT_EXECUTABLE=/absolute/path/to/patched/happy-agent \
+node --import tsx packages/happy-desktop-gym/sources/electron/cli.ts live-voice \
+  --auth-file /absolute/path/to/codex/auth.json \
+  --artifact-dir "$PWD/.context/live-voice"
+```
+
+After the app and provider both confirm the call is active, a controllable virtual
+microphone plays: “Hello. Say hi and tell me what you are capable of and what you
+see.” The gym requires the real provider's user transcript, a greeting and
+capabilities in its assistant transcript, a randomly named project from the
+visible desktop (not named in the spoken prompt), and nonzero inbound RTP audio
+energy. Media recorders capture the actual sent microphone track and received
+speaker track. The artifact folder contains the source WAV, input/output WebM,
+Settings/desktop/call screenshots, typed control events, and `result.json`, whose
+stage distinguishes setup failures from call failures. SDP, socket URLs and
+credentials are excluded from the capture. `--pool-default` exercises a smart
+controller default backed by a hidden concrete Codex account; the voice credential
+remains that concrete account.
+
 ## Browser rendering harness
 
 `gym/playwright` owns the reusable real-browser measurement harness. A consumer
@@ -262,3 +346,40 @@ alter a second measurement's paint. `renderer.screenshot()` writes inspection
 PNGs only when `VITE_HAPPY_DESKTOP_WRITE_SCREENSHOTS=1`; use
 `pnpm --filter happy-desktop-gym test:playwright:artifacts` for a deliberate
 artifact refresh.
+
+### Transcript streaming layout regression
+
+The browser gym's `ConversationStreamingGeometry.test.tsx` consumer mounts the
+real `ConversationView` with streamed prose, an Edit activity, and the working
+status. Run it from the repository root (with reviewed full access on macOS):
+
+```sh
+VITE_HAPPY_DESKTOP_WRITE_SCREENSHOTS=1 pnpm --dir packages/happy-desktop-ui test src/ConversationStreamingGeometry.test.tsx
+```
+
+Commit `1d1f9f7e` replaced live Markdown/font layout with character-count height
+estimates to avoid retaining streamed prefixes. Those estimates became
+authoritative virtual-row offsets: excess height left blank gaps, and insufficient
+height overlapped following rows. Before the fix, even the two-paragraph repro
+painted 209px but reserved 225px in all three engines.
+
+The regression checks live and settled row bounds, rich Markdown, width changes,
+stable row/focus identity, bottom following, and growing expanded shell output.
+It also checks that each streamed prefix uses the settled layout algorithm while
+leaving the retained history cache unchanged. Chromium, Firefox, and WebKit run
+at 2×; inspection PNGs are saved beside the test.
+
+The rich-table fixture preserves a second user-reported payload verbatim and
+streams it through ordinary chunks and Markdown delimiters at 800px, 560px, and
+360px. This catches the syntax-only stages that complete-message fixtures miss:
+an empty table row has padding but no text line, an empty heading has a box and
+collapsing margins but no line, and an empty list item still has its marker line.
+The model distinguishes an empty rendered element from omitted definitions/HTML;
+it never repairs row sizes from DOM measurements.
+
+Known separate limitation: Pretext 0.0.8 and Gecko disagree on narrow URL line
+breaks even for settled text. The 360px Firefox replay and an isolated settled
+prefix are executable expected failures (not skipped or given a larger tolerance).
+The 800px/560px Firefox replays, empty-block cases in every engine, and all
+Chromium/WebKit widths must pass. Happy Desktop uses Chromium. This change does
+not claim to fix the independent Gecko line-breaking model.

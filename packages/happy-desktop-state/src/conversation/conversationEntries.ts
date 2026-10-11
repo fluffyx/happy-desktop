@@ -201,7 +201,12 @@ function payloadEqual(left: ConversationEntry, right: ConversationEntry): boolea
                 left.elapsedMs === right.elapsedMs
             );
         if (left.variant === "compute" || right.variant === "compute") return false;
-        return left.level === right.level && left.title === right.title;
+        return (
+            left.level === right.level &&
+            left.title === right.title &&
+            left.source?.messageId === right.source?.messageId &&
+            left.source?.runId === right.source?.runId
+        );
     }
     if (left.kind === "agentActivity" && right.kind === "agentActivity")
         return activityEqual(left.activity, right.activity);
@@ -459,6 +464,13 @@ function presentationEqual(
     if (left === right) return true;
     if (!left || !right) return false;
     if (left.type !== right.type) return false;
+    if (left.type === "agentSpawn" && right.type === "agentSpawn")
+        return (
+            left.agentId === right.agentId &&
+            left.model?.modelId === right.model?.modelId &&
+            left.model?.providerId === right.model?.providerId &&
+            left.model?.name === right.model?.name
+        );
     if (left.type === "exploration" && right.type === "exploration")
         return (
             left.operations.length === right.operations.length &&

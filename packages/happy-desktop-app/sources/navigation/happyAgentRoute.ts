@@ -13,7 +13,18 @@ import type { HappyAgentFileTabKind } from "happy-desktop-state";
  * route must carry becomes a field here.
  */
 export type HappyAgentRoute =
+    /** One machine's published artifacts, newest first. */
+    | { readonly kind: "artifacts"; readonly happyAgentId: string }
+    /** One artifact on one machine, open in the viewer. */
+    | { readonly kind: "artifact"; readonly happyAgentId: string; readonly artifactId: string }
     | { readonly kind: "blueprint" }
+    /**
+     * Where a new bot is named. The machine is in the address because the bot
+     * will live on that machine, so the window's back and forward move between
+     * machines' naming surfaces rather than between two views of one ambiguous
+     * form.
+     */
+    | { readonly kind: "botCreate"; readonly happyAgentId: string }
     | {
           readonly kind: "chat";
           readonly happyAgentId: string;
@@ -21,13 +32,6 @@ export type HappyAgentRoute =
           readonly chatId: string;
       }
     | { readonly kind: "chats" }
-    /**
-     * Where a session is started. The machine is in the address because the
-     * projects it can run in are that machine's, so the window's back and
-     * forward move between machines' Create surfaces rather than between two
-     * views of one ambiguous form.
-     */
-    | { readonly kind: "create"; readonly happyAgentId: string }
     | {
           readonly kind: "file";
           readonly happyAgentId: string;
@@ -40,10 +44,11 @@ export type HappyAgentRoute =
     | { readonly kind: "group"; readonly happyAgentId: string; readonly groupId: string }
     | { readonly kind: "home" }
     | { readonly kind: "inbox"; readonly happyAgentId: string }
-    | { readonly kind: "social"; readonly happyAgentId: string }
     | { readonly kind: "happyAgent"; readonly happyAgentId: string }
     | { readonly kind: "settings" }
-    | { readonly kind: "settingsSection"; readonly section: string };
+    | { readonly kind: "settingsSection"; readonly section: string }
+    /** Where a new task is made, on the machine it will live on, as a bot is. */
+    | { readonly kind: "taskCreate"; readonly happyAgentId: string };
 
 /** The place a window opens on before it has been anywhere. */
 export const HAPPY_AGENT_ROUTE_HOME: HappyAgentRoute = { kind: "home" };
@@ -56,14 +61,18 @@ export const HAPPY_AGENT_ROUTE_HOME: HappyAgentRoute = { kind: "home" };
 export function happyAgentRoutePath(route: HappyAgentRoute): string {
     const part = encodeURIComponent;
     switch (route.kind) {
+        case "artifacts":
+            return `/artifacts/${part(route.happyAgentId)}`;
+        case "artifact":
+            return `/artifacts/${part(route.happyAgentId)}/${part(route.artifactId)}`;
         case "blueprint":
             return "/blueprint";
+        case "botCreate":
+            return `/bots/new/${part(route.happyAgentId)}`;
         case "chat":
             return `/chats/${part(route.happyAgentId)}/${part(route.groupId)}/${part(route.chatId)}`;
         case "chats":
             return "/chats";
-        case "create":
-            return `/create/${part(route.happyAgentId)}`;
         case "file": {
             const parent = route.chatId ? `/${part(route.chatId)}` : "";
             return `/chats/${part(route.happyAgentId)}/${part(route.groupId)}${parent}/file/${part(route.fileKind)}/${part(route.path)}`;
@@ -74,14 +83,14 @@ export function happyAgentRoutePath(route: HappyAgentRoute): string {
             return "/";
         case "inbox":
             return `/inbox/${part(route.happyAgentId)}`;
-        case "social":
-            return `/social/${part(route.happyAgentId)}`;
         case "happyAgent":
             return `/chats/${part(route.happyAgentId)}`;
         case "settings":
             return "/settings";
         case "settingsSection":
             return `/settings/${part(route.section)}`;
+        case "taskCreate":
+            return `/tasks/new/${part(route.happyAgentId)}`;
     }
 }
 
@@ -117,8 +126,17 @@ export function happyAgentRoutePathParse(pathname: string): HappyAgentRoute | un
     const [head, first, second, third, fourth, fifth, sixth] = segments;
     if (head === undefined) return HAPPY_AGENT_ROUTE_HOME;
     switch (head) {
+        case "artifacts":
+            if (first === undefined || segments.length > 3) return undefined;
+            return second === undefined
+                ? { kind: "artifacts", happyAgentId: first }
+                : { artifactId: second, kind: "artifact", happyAgentId: first };
         case "blueprint":
             return segments.length === 1 ? { kind: "blueprint" } : undefined;
+        case "bots":
+            return first === "new" && second !== undefined && segments.length === 3
+                ? { kind: "botCreate", happyAgentId: second }
+                : undefined;
         case "chats":
             if (first === undefined) return { kind: "chats" };
             if (second === undefined) return { kind: "happyAgent", happyAgentId: first };
@@ -151,21 +169,17 @@ export function happyAgentRoutePathParse(pathname: string): HappyAgentRoute | un
                     : undefined;
             }
             return undefined;
-        case "create":
-            return first !== undefined && segments.length === 2
-                ? { kind: "create", happyAgentId: first }
-                : undefined;
         case "inbox":
             return first !== undefined && segments.length === 2
                 ? { kind: "inbox", happyAgentId: first }
                 : undefined;
-        case "social":
-            return first !== undefined && segments.length === 2
-                ? { kind: "social", happyAgentId: first }
-                : undefined;
         case "settings":
             if (first === undefined) return { kind: "settings" };
             return segments.length === 2 ? { kind: "settingsSection", section: first } : undefined;
+        case "tasks":
+            return first === "new" && second !== undefined && segments.length === 3
+                ? { kind: "taskCreate", happyAgentId: second }
+                : undefined;
         default:
             return undefined;
     }
@@ -186,8 +200,23 @@ export function happyAgentRouteParse(value: unknown): HappyAgentRoute | undefine
     if (typeof value !== "object" || value === null) return undefined;
     const record = value as Record<string, unknown>;
     switch (record["kind"]) {
+        case "artifacts": {
+            const happyAgentId = fieldOf(record, "happyAgentId");
+            return happyAgentId ? { kind: "artifacts", happyAgentId } : undefined;
+        }
+        case "artifact": {
+            const happyAgentId = fieldOf(record, "happyAgentId");
+            const artifactId = fieldOf(record, "artifactId");
+            return happyAgentId && artifactId
+                ? { artifactId, kind: "artifact", happyAgentId }
+                : undefined;
+        }
         case "blueprint":
             return { kind: "blueprint" };
+        case "botCreate": {
+            const happyAgentId = fieldOf(record, "happyAgentId");
+            return happyAgentId ? { kind: "botCreate", happyAgentId } : undefined;
+        }
         case "chat": {
             const happyAgentId = fieldOf(record, "happyAgentId");
             const groupId = fieldOf(record, "groupId");
@@ -198,10 +227,6 @@ export function happyAgentRouteParse(value: unknown): HappyAgentRoute | undefine
         }
         case "chats":
             return { kind: "chats" };
-        case "create": {
-            const happyAgentId = fieldOf(record, "happyAgentId");
-            return happyAgentId ? { kind: "create", happyAgentId } : undefined;
-        }
         case "file": {
             const happyAgentId = fieldOf(record, "happyAgentId");
             const groupId = fieldOf(record, "groupId");
@@ -230,10 +255,6 @@ export function happyAgentRouteParse(value: unknown): HappyAgentRoute | undefine
             const happyAgentId = fieldOf(record, "happyAgentId");
             return happyAgentId ? { kind: "inbox", happyAgentId } : undefined;
         }
-        case "social": {
-            const happyAgentId = fieldOf(record, "happyAgentId");
-            return happyAgentId ? { kind: "social", happyAgentId } : undefined;
-        }
         case "happyAgent": {
             const happyAgentId = fieldOf(record, "happyAgentId");
             return happyAgentId ? { kind: "happyAgent", happyAgentId } : undefined;
@@ -243,6 +264,10 @@ export function happyAgentRouteParse(value: unknown): HappyAgentRoute | undefine
         case "settingsSection": {
             const section = fieldOf(record, "section");
             return section ? { kind: "settingsSection", section } : undefined;
+        }
+        case "taskCreate": {
+            const happyAgentId = fieldOf(record, "happyAgentId");
+            return happyAgentId ? { kind: "taskCreate", happyAgentId } : undefined;
         }
         default:
             return undefined;

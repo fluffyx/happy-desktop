@@ -26,6 +26,11 @@ import {
     happyAgentSelectionServiceTierUpdate,
 } from "./happyAgentSessionDraftStore.js";
 import { deepEqual, happyAgentUserError } from "./happyAgentSupport.js";
+import {
+    happyAgentTranscriptSenderIds,
+    type HappyAgentAgentIdentitySource,
+} from "./happyAgentAgentIdentities.js";
+import type { ConversationAgentIdentity } from "../conversation/conversationEntry.js";
 import type {
     HappyAgentAnsweredUserInput,
     HappyAgentBackgroundProcess,
@@ -33,7 +38,9 @@ import type {
     HappyAgentImageInput,
     HappyAgentMenusSnapshot,
     HappyAgentContextGauge,
+    HappyAgentModel,
     HappyAgentModelCatalog,
+    HappyAgentModelEffortRemembered,
     HappyAgentModelSelection,
     HappyAgentPermissionMode,
     HappyAgentQueuedMessage,
@@ -45,7 +52,7 @@ import type {
     HappyAgentSessionUsage,
     HappyAgentSlashCommand,
     SubagentSummary,
-    HappyAgentTask,
+    HappyAgentTodo,
     HappyAgentThinkingLevel,
     HappyAgentUserInputAnswers,
     HappyAgentUserInputRequest,
@@ -57,6 +64,8 @@ import type {
 const WORKING_LABEL_MAX = 64;
 const SENT_IMAGE_BUDGET_BYTES = 32 * 1024 * 1024;
 const PENDING_MUTATION_LIMIT = 2_048;
+/** Keep a released store alive long enough to surface a slow mutation refusal. */
+const PENDING_MUTATION_RETENTION_MS = 2 * 60_000;
 
 function transcriptSessionBusy(session: SessionState): boolean {
     return session.activeTurn !== undefined;
@@ -212,7 +221,7 @@ function transcriptQueuedMessagesProject(
     }));
 }
 
-function transcriptTasksProject(session: SessionState): readonly HappyAgentTask[] {
+function transcriptTasksProject(session: SessionState): readonly HappyAgentTodo[] {
     return session.tasks.map((task) => ({
         id: task.id,
         subject: task.subject,
@@ -303,28 +312,42 @@ function contextGaugeDerive(
     context: HappyAgentSessionUsage["context"],
     selection?: { readonly modelId: string; readonly providerId: string },
 ): HappyAgentContextGauge | undefined {
+    const catalogModel = (providerId: string, modelId: string) =>
+        catalog.providers
+            .find((provider) => provider.id === providerId)
+            ?.models.find((model) => model.id === modelId);
+    // The daemon compacts at the model's published threshold, so that point, not a share of
+    // the window, is where the meter marks compaction; a limit at or past the window is no
+    // threshold at all.
+    const compactTokensOf = (
+        model: HappyAgentModel | undefined,
+        total: number,
+    ): { readonly compactTokens: number } | Record<never, never> =>
+        model?.autoCompactWindow !== undefined &&
+        model.autoCompactWindow > 0 &&
+        model.autoCompactWindow < total
+            ? { compactTokens: model.autoCompactWindow }
+            : {};
     if (!context) {
         if (selection === undefined) return undefined;
-        const total = catalog.providers
-            .find((provider) => provider.id === selection.providerId)
-            ?.models.find((model) => model.id === selection.modelId)?.contextWindow;
+        const model = catalogModel(selection.providerId, selection.modelId);
+        const total = model?.contextWindow;
         if (total === undefined || total <= 0) return undefined;
         return {
             usedTokens: 0,
             remainingTokens: total,
             totalTokens: total,
             remainingFraction: 1,
+            ...compactTokensOf(model, total),
             approximate: false,
             measured: false,
         };
     }
-    const catalogWindow =
+    const model =
         context.modelId === undefined
             ? undefined
-            : catalog.providers
-                  .find((provider) => provider.id === context.providerId)
-                  ?.models.find((model) => model.id === context.modelId)?.contextWindow;
-    const total = context.contextWindow ?? catalogWindow;
+            : catalogModel(context.providerId, context.modelId);
+    const total = context.contextWindow ?? model?.contextWindow;
     if (total == null || total <= 0) return undefined;
     const usedTokens = Math.max(0, Math.min(context.totalTokens, total));
     const remainingTokens = total - usedTokens;
@@ -333,6 +356,7 @@ function contextGaugeDerive(
         remainingTokens,
         totalTokens: total,
         remainingFraction: remainingTokens / total,
+        ...compactTokensOf(model, total),
         approximate: context.approximate,
     };
 }
@@ -490,7 +514,7 @@ export interface HappyAgentChatSnapshot {
     readonly queuedMessages: readonly HappyAgentQueuedMessage[];
     /** Complete ordered slash-command catalog projected from the focused agent. */
     readonly slashCommands: readonly HappyAgentSlashCommand[];
-    readonly tasks: readonly HappyAgentTask[];
+    readonly tasks: readonly HappyAgentTodo[];
     readonly goal?: HappyAgentGoal;
     readonly subagents: readonly SubagentSummary[];
     readonly backgroundProcesses: readonly HappyAgentBackgroundProcess[];
@@ -522,10 +546,17 @@ export type HappyAgentChatOutput =
 
 export interface HappyAgentChatStore {
     get(): HappyAgentChatSnapshot;
+    /** True while an action still needs this store to surface a rejection. */
+    hasPendingMutations(): boolean;
     subscribe(listener: () => void): () => void;
     sessionRetry(): void;
     historyLoadMore(): void;
     messageSend(text: string, images?: readonly HappyAgentImageInput[]): Promise<void>;
+    /** Exact-text human confirmation from voice. Never routes text into a pending question. */
+    voiceMessageSendConfirmed(
+        text: string,
+        permissionMode: HappyAgentPermissionMode,
+    ): Promise<void>;
     slashCommandInvoke(name: string, argumentsValue?: string): Promise<void>;
     draftSet(draft: string, updatedAt: number, origin: string): Promise<void>;
     runAbort(): Promise<void>;
@@ -555,6 +586,14 @@ export interface HappyAgentChatStore {
 
 export interface HappyAgentChatDeps {
     readonly catalog: HappyAgentModelCatalog;
+    /**
+     * Owner-only authoritative input: the connection's current model catalog.
+     * The listener is called with it now and again on every change; the
+     * returned function stops it, and the store calls it when disposed. The
+     * pickers and context gauge re-derive from it; the session's own selection
+     * is the daemon's and is left alone.
+     */
+    readonly catalogFollow?: (listener: (catalog: HappyAgentModelCatalog) => void) => () => void;
     readonly transcriptConnect: HappyAgentChatTranscriptConnect;
     readonly connectActions: Pick<
         HappyAgentConnection,
@@ -562,6 +601,7 @@ export interface HappyAgentChatDeps {
         | "compactSession"
         | "invokeSlashCommand"
         | "sendMessage"
+        | "sendMessageConfirmed"
         | "setDraft"
         | "setEffort"
         | "setPermissionMode"
@@ -579,6 +619,9 @@ export interface HappyAgentChatDeps {
         input: HappyAgentModelSelection,
     ) => HappyAgentSelection;
     readonly output?: (event: HappyAgentChatOutput) => void;
+    readonly effortRemembered?: HappyAgentModelEffortRemembered;
+    /** Names the agents that send messages into this conversation. */
+    readonly agentIdentities?: HappyAgentAgentIdentitySource;
 }
 
 export interface HappyAgentChatTranscriptConnection {
@@ -638,6 +681,9 @@ export function happyAgentChatStoreCreate(
     }));
 
     const listeners = new Set<() => void>();
+    /* The connection's current model catalog; the daemon can change what it
+       offers while this conversation is open. */
+    let catalog = deps.catalog;
     let disposed = false;
     let active = false;
     let status: "loading" | "ready" | "error" = "loading";
@@ -651,12 +697,51 @@ export function happyAgentChatStoreCreate(
     let detachedBackgroundProcessIds: ReadonlySet<number> = new Set();
     let mutationRejection: MutationRejectedDelta | undefined;
     const pendingMutationIds = new Set<string>();
-    const pendingMutationOrder: string[] = [];
+    const pendingMutationOrder: { readonly id: string; readonly trackedAt: number }[] = [];
     /* Replaced rather than edited, so the transcript projection can settle
        "were these the images the last projection saw?" by identity. */
     let sentImages: ReadonlyMap<string, readonly HappyAgentImageInput[]> = new Map();
     let sentImageBytes = 0;
     const conversationCache = happyAgentConversationCacheCreate();
+    /* The agents that sent messages into this transcript, as the window knows
+       them. One map is kept while none of them changed, because the projection
+       compares it by identity and a new one rebuilds every turn. */
+    let senderIdsFrom: readonly ChatElement[] | undefined;
+    let senderIds: ReadonlySet<string> = new Set();
+    let senders: ReadonlyMap<string, ConversationAgentIdentity> = new Map();
+    let unsubscribeSenders: (() => void) | undefined;
+    const sendersResolve = (): boolean => {
+        const source = deps.agentIdentities;
+        if (source === undefined || senderIds.size === 0) return false;
+        const next = new Map<string, ConversationAgentIdentity>();
+        for (const agentId of senderIds) {
+            const known = source.lookup(agentId);
+            if (known === undefined) source.request(agentId);
+            else next.set(agentId, known);
+        }
+        if (
+            next.size === senders.size &&
+            [...next].every(([agentId, known]) => deepEqual(known, senders.get(agentId)))
+        )
+            return false;
+        senders = next;
+        return true;
+    };
+    const sendersFollow = (elements: readonly ChatElement[]): void => {
+        if (elements === senderIdsFrom) return;
+        senderIdsFrom = elements;
+        const ids = happyAgentTranscriptSenderIds(elements);
+        if (ids.size === senderIds.size && [...ids].every((agentId) => senderIds.has(agentId)))
+            return;
+        senderIds = ids;
+        sendersResolve();
+        // Followed only once someone has written in: a transcript nobody else
+        // speaks in has nothing to name, and needs no word of the list moving.
+        if (senderIds.size > 0 && deps.agentIdentities !== undefined)
+            unsubscribeSenders ??= deps.agentIdentities.subscribe(() => {
+                if (!disposed && sendersResolve()) commit();
+            });
+    };
     /* Nothing is projected into this conversation from outside it, and the
        projection compares what it was given last time, so the empty list is one
        object rather than a new one per commit. */
@@ -670,6 +755,7 @@ export function happyAgentChatStoreCreate(
     let activityPanelOpen = false;
     let openImageRef: HappyAgentImageRef | undefined;
     const requestSubmissions = new Map<string, ConversationRequestSubmission>();
+    const requestMutationIds = new Map<string, string>();
     const requestSelections = new Map<string, Readonly<Record<string, readonly string[]>>>();
 
     const sessionLoadable = (): Loadable<HappyAgentSession> =>
@@ -695,6 +781,7 @@ export function happyAgentChatStoreCreate(
             }));
         }
         const subagents = connected === undefined ? [] : transcriptSubagentsProject(connected);
+        sendersFollow(elements);
         const tasks = connected === undefined ? [] : transcriptTasksProject(connected);
         const goal = connected === undefined ? undefined : transcriptGoalProject(connected);
         const backgroundProcesses =
@@ -713,6 +800,7 @@ export function happyAgentChatStoreCreate(
                       answeredUserInputs: transcriptAnsweredUserInputs,
                       expandedGroupIds: expandedTurnIds,
                       subagents,
+                      agentIdentities: senders,
                   });
         const withHistory: readonly ConversationEntry[] =
             connected?.loadingMore === true
@@ -804,7 +892,7 @@ export function happyAgentChatStoreCreate(
             ...(usage === undefined ? {} : { usage }),
             usageLoading: false,
             contextGauge: contextGaugeDerive(
-                deps.catalog,
+                catalog,
                 usage?.context,
                 connected === undefined
                     ? undefined
@@ -815,9 +903,15 @@ export function happyAgentChatStoreCreate(
             ),
             activityPanelOpen,
             ...(openImage === undefined ? {} : { openImage }),
-            ...(connected === undefined
+            ...(connected === undefined || connected.selectionKnown === false
                 ? {}
-                : { menus: happyAgentMenusDerive(deps.catalog, transcriptSelectionOf(connected)) }),
+                : {
+                      menus: happyAgentMenusDerive(
+                          catalog,
+                          transcriptSelectionOf(connected),
+                          deps.effortRemembered,
+                      ),
+                  }),
         };
         /* The transcript answers for itself: `entriesMerge` returns the very
            list it was given when nothing moved, so a new one is a change and
@@ -835,8 +929,32 @@ export function happyAgentChatStoreCreate(
             onChange: (elements, connected, answeredUserInputs) => {
                 if (!active || disposed) return;
                 transcriptElements = elements;
+                // A refusal belongs to the connection that made it. Once a
+                // new one is live — after an update or an outage — it no
+                // longer describes anything, so it does not outlive it.
+                if (
+                    transcriptSession !== undefined &&
+                    transcriptSession.connection !== "live" &&
+                    connected.connection === "live"
+                )
+                    mutationRejection = undefined;
                 transcriptSession = connected;
                 transcriptAnsweredUserInputs = answeredUserInputs;
+                // Only authoritative question state settles the local submission.
+                // Keep selections through transport failure so Retry sends them again.
+                const pendingRequests = new Set(
+                    connected.pendingUserInputs.map((request) => request.requestId),
+                );
+                for (const requestId of requestSubmissions.keys()) {
+                    if (pendingRequests.has(requestId)) continue;
+                    requestSubmissions.delete(requestId);
+                    requestSelections.delete(requestId);
+                }
+                for (const [mutationId, requestId] of requestMutationIds) {
+                    if (pendingRequests.has(requestId)) continue;
+                    requestMutationIds.delete(mutationId);
+                    pendingMutationIds.delete(mutationId);
+                }
                 detachedBackgroundProcessIds = detachedProcessIdsUpdate(
                     detachedBackgroundProcessIds,
                     elements,
@@ -886,16 +1004,42 @@ export function happyAgentChatStoreCreate(
         const rejectionWasVisible = mutationRejection !== undefined;
         mutationRejection = undefined;
         pendingMutationIds.add(mutationId);
-        pendingMutationOrder.push(mutationId);
+        pendingMutationOrder.push({ id: mutationId, trackedAt: Date.now() });
         while (pendingMutationOrder.length > PENDING_MUTATION_LIMIT) {
             const expired = pendingMutationOrder.shift();
-            if (expired !== undefined) pendingMutationIds.delete(expired);
+            if (expired !== undefined) pendingMutationIds.delete(expired.id);
         }
         if (rejectionWasVisible) commit();
     };
 
+    const pendingMutationActive = (): boolean => {
+        const cutoff = Date.now() - PENDING_MUTATION_RETENTION_MS;
+        while (pendingMutationOrder[0]?.trackedAt < cutoff) {
+            const expired = pendingMutationOrder.shift();
+            if (expired !== undefined) pendingMutationIds.delete(expired.id);
+        }
+        return pendingMutationIds.size > 0;
+    };
+
+    const unsubscribeCatalog = deps.catalogFollow?.((next) => {
+        if (disposed || next === catalog) return;
+        catalog = next;
+        commit();
+    });
+
     const unsubscribeMutationRejections = deps.connectMutationSubscribe((rejection) => {
         if (!pendingMutationIds.delete(rejection.mutationId)) return;
+        const requestId = requestMutationIds.get(rejection.mutationId);
+        if (requestId !== undefined) {
+            requestMutationIds.delete(rejection.mutationId);
+            requestSubmissions.set(requestId, {
+                requestId,
+                status: "failed",
+                error: new UserError(rejection.message),
+            });
+            commit();
+            return;
+        }
         mutationRejection = rejection;
         commit();
     });
@@ -926,18 +1070,39 @@ export function happyAgentChatStoreCreate(
 
     const answerInputRun = (input: HappyAgentUserInputAnswers): Promise<void> =>
         rejecting(() => {
-            connectMutationTrack(
-                deps.connectActions.answerUserInput(sessionId, input.requestId, {
+            if (requestSubmissions.get(input.requestId)?.status === "pending") return;
+            requestSubmissions.set(input.requestId, {
+                requestId: input.requestId,
+                status: "pending",
+            });
+            commit();
+            try {
+                const mutationId = deps.connectActions.answerUserInput(sessionId, input.requestId, {
                     answers: input.answers,
-                }),
-            );
+                });
+                requestMutationIds.set(mutationId, input.requestId);
+                connectMutationTrack(mutationId);
+            } catch (error) {
+                requestSubmissions.set(input.requestId, {
+                    requestId: input.requestId,
+                    status: "failed",
+                    error: happyAgentUserError(error),
+                });
+                commit();
+                throw error;
+            }
             output({ type: "inputAnswered", sessionId, requestId: input.requestId });
         });
 
     const pendingQuestionAnswer = async (text: string): Promise<{ textUsed: boolean }> => {
         const request = store.getState().pendingUserInputs[0];
         const message = text.trim();
-        if (request === undefined || message.length === 0) return { textUsed: false };
+        if (
+            request === undefined ||
+            message.length === 0 ||
+            requestSubmissions.get(request.requestId)?.status === "pending"
+        )
+            return { textUsed: false };
         const ticked = requestSelections.get(request.requestId) ?? {};
         const answers: Record<string, readonly string[]> = {};
         let textUsed = false;
@@ -950,7 +1115,6 @@ export function happyAgentChatStoreCreate(
             }
         }
         await answerInputRun({ requestId: request.requestId, answers });
-        requestSelections.delete(request.requestId);
         return { textUsed };
     };
 
@@ -972,6 +1136,7 @@ export function happyAgentChatStoreCreate(
 
     return {
         get: () => store.getState(),
+        hasPendingMutations: pendingMutationActive,
         subscribe(listener) {
             listeners.add(listener);
             if (listeners.size === 1) start();
@@ -993,6 +1158,24 @@ export function happyAgentChatStoreCreate(
             if (token === undefined || transcriptSession?.loadingMore === true) return;
             transcriptConnection?.loadMore(token);
         },
+        voiceMessageSendConfirmed: (text, permissionMode) =>
+            rejecting(async () => {
+                const current = store.getState();
+                if (current.session.type !== "ready")
+                    throw new Error("The conversation is not ready.");
+                if (
+                    current.pendingUserInputs.length > 0 ||
+                    current.session.value.pendingUserInputs.length > 0
+                )
+                    throw new Error(
+                        "Answer the pending question yourself before sending a voice draft.",
+                    );
+                if (current.session.value.permissionMode !== permissionMode)
+                    throw new Error("The access mode changed. Review the message again.");
+                const steered = runStatus === "running";
+                await deps.connectActions.sendMessageConfirmed(sessionId, text);
+                output({ type: "messageSent", sessionId, steered });
+            }),
         messageSend: (text, images) =>
             rejecting(async () => {
                 if ((await pendingQuestionAnswer(text)).textUsed) return;
@@ -1019,6 +1202,37 @@ export function happyAgentChatStoreCreate(
             }),
         slashCommandInvoke: (name, argumentsValue) =>
             rejecting(() => {
+                // A skill is not a command the daemon runs on its own: it is a
+                // document the model has to read before it acts. So invoking one
+                // sends an ordinary user message that carries an explicit request
+                // for the `read_skill` tool. Happy Agent runs that tool before
+                // inference, records the call and its result in the transcript, and
+                // the model continues with the instructions loaded. The message text
+                // is the command as the reader typed it, so the transcript shows the
+                // invocation and the model reads the ask beside the loaded document.
+                const command = slashCommands.find((one) => one.name === name);
+                if (command?.kind === "skill") {
+                    const steered = runStatus === "running";
+                    const text =
+                        argumentsValue === undefined || argumentsValue.trim().length === 0
+                            ? `/${name}`
+                            : `/${name} ${argumentsValue}`;
+                    connectMutationTrack(
+                        deps.connectActions.sendMessage(sessionId, {
+                            text,
+                            content: [
+                                { type: "text", text },
+                                {
+                                    type: "tool_call_request",
+                                    name: "read_skill",
+                                    arguments: { name },
+                                },
+                            ],
+                        }),
+                    );
+                    output({ type: "messageSent", sessionId, steered });
+                    return;
+                }
                 connectMutationTrack(
                     deps.connectActions.invokeSlashCommand(sessionId, name, argumentsValue),
                 );
@@ -1045,7 +1259,7 @@ export function happyAgentChatStoreCreate(
             const current = transcriptSelectionOf(connected);
             const next =
                 deps.modelSelect?.(current, input) ??
-                happyAgentSelectionModelUpdate(deps.catalog, current, input);
+                happyAgentSelectionModelUpdate(catalog, current, input);
             deps.selectionUsed?.(next);
             connectMutationTrack(
                 deps.connectActions.switchModel(sessionId, {
@@ -1145,6 +1359,8 @@ export function happyAgentChatStoreCreate(
             disposed = true;
             stop();
             unsubscribeMutationRejections();
+            unsubscribeCatalog?.();
+            unsubscribeSenders?.();
             storeUnsubscribe();
             listeners.clear();
             pendingMutationIds.clear();
@@ -1156,6 +1372,7 @@ export function happyAgentChatStoreCreate(
             conversationCache.entries = undefined;
             conversationCache.groups = new Map();
             requestSubmissions.clear();
+            requestMutationIds.clear();
             requestSelections.clear();
         },
     };

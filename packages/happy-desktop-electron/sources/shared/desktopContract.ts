@@ -10,6 +10,11 @@ export type DesktopMode = "local";
 /** Appearance source the Electron shell applies to every local renderer and guest. */
 export type DesktopAppearanceMode = "dark" | "light" | "system";
 export type DesktopScrollbarVisibility = "always" | "automatic";
+/** When the shell holds this computer out of system sleep. Follows the agents when absent. */
+/** Where a plain click on a web link opens: the side panel's browser tab, or the machine's browser. */
+export type DesktopLinkOpenPlacement = "panel" | "browser";
+/** When the shell holds this computer out of system sleep. Follows the agents when absent. */
+export type DesktopKeepAwakeMode = "on" | "agent" | "off";
 
 export interface DesktopCloudAuthConfiguration {
     readonly environment: "production" | "staging";
@@ -33,8 +38,8 @@ export interface DesktopDefaultModel extends DesktopModelIdentity {
 /** The choices most recently made while using one provider-qualified model. */
 export interface DesktopModelPreference extends DesktopModelIdentity {
     readonly lastEffort?: string;
-    /** `standard` names the provider's ordinary tier; every other value is a catalog tier. */
-    readonly lastSpeed: string;
+    /** The exact agent-owned tier ID; null selects the agent's labeled default route. */
+    readonly lastSpeed: string | null;
 }
 
 /**
@@ -48,8 +53,13 @@ export interface DesktopConfig {
     readonly defaultModel?: DesktopDefaultModel;
     readonly defaultEffort: string;
     readonly defaultPermissionMode: DesktopPermissionMode;
+    readonly keepAwake?: DesktopKeepAwakeMode;
     readonly lastPickedModel?: DesktopModelIdentity;
+    /** Where a clicked link opens; the side panel when absent. */
+    readonly linkOpen?: DesktopLinkOpenPlacement;
     readonly modelPreferences: readonly DesktopModelPreference[];
+    /** Explicit opt-in to Desktop and Happy Agent preview releases, off when absent. */
+    readonly previewUpdatesEnabled?: boolean;
     readonly scrollbarVisibility: DesktopScrollbarVisibility;
     readonly titleShimmerEnabled?: boolean;
     readonly version: 1;
@@ -75,7 +85,7 @@ export type DesktopActiveTarget = DesktopTopologyTarget & {
     mode: "local";
     happyAgentVersion: string;
     /**
-     * Loopback base URL of the main process's Happy Agent HTTP proxy. The renderer's
+     * Renderer-facing base URL (`http://happy-agent` in Electron). The renderer's
      * connection loader probes `${happyAgentHttpUrl}/health` directly; this is the
      * only channel the renderer uses to reach the local daemon.
      */
@@ -224,12 +234,71 @@ export interface DesktopDaemonDownload {
     readonly totalBytes: number;
 }
 
+/**
+ * Why starting Happy Agent failed, as a fixed code beside the displayable
+ * error. Absent where no fixed code applies; the message is never classified.
+ */
+export type DesktopStartFailureCode = "start_timeout";
+
+/**
+ * Why finding or fetching a Happy Agent release failed, by where it stopped.
+ * Set where the failure is raised, never read from its message.
+ */
+export type DesktopDownloadFailureCode =
+    /** GitHub's API refused the release lookup for its rate limit. */
+    | "release_lookup_rate_limited"
+    /** The release lookup answered with another HTTP error, timed out, or was unreadable. */
+    | "release_lookup_failed"
+    /** GitHub lists no usable release for this machine and channel. */
+    | "release_unavailable"
+    /** The request never got a response: DNS, connect, proxy, or TLS. */
+    | "network_unreachable"
+    /** The archive stopped arriving part-way and every resume failed. */
+    | "transfer_interrupted"
+    /** The archive stalled or ran out of time on every attempt. */
+    | "transfer_timeout"
+    /** The archive's host answered with an HTTP error. */
+    | "transfer_http_error"
+    /** The archive's size or checksum did not match its release. */
+    | "integrity_mismatch"
+    /** The disk is full. */
+    | "disk_full"
+    /** A file was locked or access was denied, as an antivirus scan does to a new executable. */
+    | "filesystem_locked"
+    /** Unpacking the archive failed or found something other than one binary. */
+    | "extract_failed"
+    /** Another process held the install lock for the whole wait. */
+    | "install_lock_timeout"
+    /** A failure of this download with no closer code. */
+    | "unclassified";
+
+/** How far a failed download got before it stopped. */
+export interface DesktopDaemonDownloadFailure {
+    /** Requests made for the archive, resumes included; 0 when it failed before asking. */
+    readonly attempts: number;
+    readonly receivedBytes: number;
+    /** The archive's declared size; 0 when it failed before one was known. */
+    readonly totalBytes: number;
+}
+
+/** The machine the shell runs on, as far as anything may know it. */
+export interface DesktopSystem {
+    /** The bare OS version number (`15.6.0`, `10.0.26100`); null where the OS reports more than a number. */
+    readonly osVersion: string | null;
+    /** The shell's own architecture. */
+    readonly arch: "arm64" | "x64" | "other";
+}
+
 /** The machine-local Happy Agent installation and the daemon currently serving it. */
 export interface DesktopDaemonSnapshot {
     readonly availableVersion?: string;
     /** The archive on its way here, while `operation` is `downloading`. */
     readonly download?: DesktopDaemonDownload;
     readonly error?: string;
+    /** The fixed code for `error`, when it has one. Cleared with `error`. */
+    readonly errorCode?: DesktopStartFailureCode | DesktopDownloadFailureCode;
+    /** How far the download behind `error` got, when a download failed. Cleared with `error`. */
+    readonly downloadFailure?: DesktopDaemonDownloadFailure;
     readonly installation: "missing" | "installed";
     readonly installedVersion?: string;
     readonly managed: boolean;
@@ -285,6 +354,8 @@ export type DesktopRuntimeSnapshot =
     | {
           phase: "error";
           message: string;
+          /** The fixed code for `message`, when it has one. */
+          code?: DesktopStartFailureCode;
           request: DesktopStartRequest;
           retryable: boolean;
           /**
@@ -362,6 +433,12 @@ export interface DesktopBuildIdentity {
 /** Launch argument prefix carrying `DesktopBuildIdentity` JSON into the preload. */
 export const buildIdentityArgument = "--happy-build-identity=";
 
+/** Main chooses this identity before the application document exists. */
+export const liveWindowArgument = "--happy-live-window=";
+
+/** Launch argument enabling renderer-local diagnostics in an explicit debug window. */
+export const debugMetricsArgument = "--happy-debug-metrics";
+
 /**
  * Where local first-run setup currently stands. The stage is always derived from
  * what this machine actually has — a Node runtime, an installed agent, a
@@ -412,8 +489,12 @@ export type LocalOnboardingStage =
      * that answer is worth anybody's attention.
      */
     | "assistantsFound"
-    /** Happy Agent requires a human identity before it can finish setup. */
-    | "profileRequired"
+    /**
+     * The first step of the sequence, revisited. Nothing is owed here: setup
+     * already finished this work, and the step exists so a person can go back
+     * and see what Happy put on their machine.
+     */
+    | "agentReady"
     /** Happy Agent Connect is resolving the daemon-owned onboarding status. */
     | "examining"
     /** Everything else is settled and this Happy Agent is demonstrably unused. */
@@ -466,7 +547,29 @@ export interface LocalAssistantState {
      * `providersMissing` is itself Happy Agent's answer that none of them works.
      */
     readonly status: "found" | "missing";
+    /**
+     * Found only through a PATH entry this process did not start with, or at
+     * its installer's default location: an install made while Happy was open.
+     */
+    readonly pathRefreshed?: true;
 }
+
+/**
+ * Which other coding apps this machine has, from bounded read-only file checks.
+ * `null` means Happy could not tell, or has no verified signal on this OS.
+ */
+export interface LocalAppsSnapshot {
+    readonly claudeDesktop: boolean | null;
+    /** The Codex desktop app, now the ChatGPT app; ChatGPT Classic does not count. */
+    readonly codexDesktop: boolean | null;
+    /** Google Antigravity or Antigravity IDE. */
+    readonly antigravityApp: boolean | null;
+    /** Google Antigravity's `agy` command. */
+    readonly agyCli: boolean | null;
+}
+
+/** The shell the official install commands are written for on this machine. */
+export type LocalInstallShell = "powershell" | "posix";
 
 export interface LocalOnboardingSnapshot {
     readonly stage: LocalOnboardingStage;
@@ -496,9 +599,22 @@ export interface LocalOnboardingSnapshot {
      * and what Happy Agent can do with it. Present only at `providersMissing`.
      */
     readonly assistants?: readonly LocalAssistantState[];
+    /** Present with `assistants`: the shell their install commands are written for. */
+    readonly installShell?: LocalInstallShell;
+    /** Present with `assistants` once this machine's other coding apps were looked for. */
+    readonly localApps?: LocalAppsSnapshot;
     /** An attempt to reach Happy Agent is running, started from a failed stage. */
     readonly retrying?: boolean;
+    /**
+     * Where the sequence actually stands, when `stage` is a finished step
+     * someone went back to. The step bar draws the work already done from
+     * this, so a revisit lights an earlier step without unwinding the rest.
+     */
+    readonly reachedStage?: LocalOnboardingStage;
 }
+
+/** A step of first-run setup a person may deliberately return to. */
+export type LocalOnboardingStepBack = "setup" | "subscriptions";
 
 /**
  * One file a window of its own is showing, as that window is allowed to see it:
@@ -528,10 +644,17 @@ export interface DesktopBrowserStatus {
     readonly statusText: string;
 }
 
-/** Which local session's network a browser guest browses through. */
+/** The owning Happy Agent route and workspace whose network the guest uses. */
 export interface DesktopBrowserProxyTarget {
-    readonly sessionId: string;
+    /** Null names the host; otherwise the host-published connection identity. */
+    readonly connectionId: string | null;
+    readonly workspaceId: string;
 }
+
+/** User-initiated navigation; guest pages never receive this bridge. */
+export type DesktopBrowserCommand =
+    | { readonly action: "load"; readonly url: string }
+    | { readonly action: "back" | "forward" | "reload" | "stop" };
 
 /**
  * One step in the life of one main-frame document inside an HTML preview guest.
@@ -595,12 +718,27 @@ export type DesktopPreviewNavigation = DesktopPreviewNavigationStep & {
 };
 
 export interface HappyDesktopBridge {
+    /** Native window identity; absent from the browser development bridge. */
+    readonly liveWindowId?: string;
+    /** An enabled feature and an explicit Start are required before audio capture. */
+    liveMicrophoneStart?(input: { readonly enabled: true }): Promise<void>;
+    /** Ends permission to capture audio; graceful call settlement remains with the renderer. */
+    liveMicrophoneRevoke?(): Promise<void>;
     /**
      * This window's development identity, absent in a packaged build. It is a
      * plain value rather than a call because the window is one build for its
      * whole life: the shell has it before the first frame and it never changes.
      */
     readonly buildIdentity?: DesktopBuildIdentity;
+    /** The machine the shell runs on. Absent from shells older than this field. */
+    readonly system?: DesktopSystem;
+    /**
+     * Whether this window was explicitly launched with desktop debug tooling.
+     * This is fixed for the window's life and is separate from `buildIdentity`:
+     * every development checkout has an identity, but only `--debug` windows
+     * should run the live metrics sampler.
+     */
+    readonly debugMetricsEnabled: boolean;
     /**
      * Makes Chromium's preferred color scheme follow Happy's selection, so
      * previews, browser guests, and auxiliary windows agree with
@@ -618,10 +756,17 @@ export interface HappyDesktopBridge {
      */
     attachmentSourcePath(file: File): string | undefined;
     /** Points this window's browser guests at one local Happy Agent session's network boundary. */
-    browserProxyApply(target: DesktopBrowserProxyTarget): Promise<void>;
+    /** Returns the guest partition only after its workspace proxy is configured. */
+    browserProxyApply(target: DesktopBrowserProxyTarget): Promise<string>;
+    /** Absent on older native hosts, which cannot safely open private service pages. */
+    browserCommand?(
+        target: DesktopBrowserProxyTarget,
+        guestId: number,
+        command: DesktopBrowserCommand,
+    ): Promise<void>;
     browserOpenSubscribe(listener: (url: string) => void): () => void;
     browserStatusSubscribe(listener: (status: DesktopBrowserStatus) => void): () => void;
-    /** Announces that the shell received a Happy Social OAuth callback. */
+    /** Announces that the shell received a WorkOS OAuth callback. */
     cloudAuthCallbackSubscribe(listener: () => void): () => void;
     /** Whether a callback is waiting, without consuming its one-shot URL. */
     cloudAuthCallbackPending(): Promise<boolean>;
@@ -651,6 +796,14 @@ export interface HappyDesktopBridge {
      * or reconcile with the operating system.
      */
     dockUnreadSet(count: number): void;
+    /**
+     * States whether this computer should be held out of system sleep right
+     * now. One-way and fire-and-forget like the Dock mark: the window resolves
+     * the reader's choice against what the agents are doing, and the shell
+     * holds or releases the operating system's sleep assertion to match. The
+     * display may still sleep; only the machine itself is kept running.
+     */
+    keepAwakeSet(active: boolean): void;
     /**
      * Fires every time zoom is asked for, with the whole-number percentage the
      * window is now at — including when the answer is the one it was already
@@ -688,6 +841,16 @@ export interface HappyDesktopBridge {
     daemonInstallKill(): Promise<void>;
     /** Drains and restarts the local daemon on the version it is already running. */
     daemonRestart(): Promise<void>;
+    /** Installs/checks the compatible CLI before any phone authorization. */
+    legacyCliPrepare(): Promise<void>;
+    /** Links the prepared terminal CLI to this machine's existing Mobile pairing. */
+    legacyCliConnect(): Promise<void>;
+    /** Read-only status of this operating-system user's existing terminal CLI. */
+    legacyCliStatus?(): Promise<import("happy-desktop-state").HappyTerminalCliInspection>;
+    /** Acts only after the person confirms the exact inspected CLI scope. */
+    legacyCliReset?(
+        request: import("happy-desktop-state").HappyTerminalCliResetRequest,
+    ): Promise<import("happy-desktop-state").HappyTerminalCliResetOutcome>;
     /** Downloads and verifies the first Happy Agent release without running it. */
     daemonDownload(): Promise<void>;
     daemonGet(): Promise<DesktopDaemonSnapshot>;
@@ -718,10 +881,6 @@ export interface HappyDesktopBridge {
     /** Where local first-run setup stands, without waiting for its next change. */
     onboardingGet(): Promise<LocalOnboardingSnapshot>;
     onboardingSubscribe(listener: (snapshot: LocalOnboardingSnapshot) => void): () => void;
-    onboardingProfileCreate(input: {
-        readonly email: string;
-        readonly name: string;
-    }): Promise<void>;
     /**
      * Opens the native folder picker, requires a Git repository root, and opens
      * it as this Happy Agent's first project. Picking, validating, and registering all
@@ -729,8 +888,12 @@ export interface HappyDesktopBridge {
      * already receive in a snapshot.
      */
     onboardingProjectChoose(): Promise<void>;
+    /** Remembers the explicit handoff to Chief of Staff without importing a project. */
+    onboardingChiefOfStaffComplete(): Promise<void>;
     /** Leaves provider authentication setup after its report, or skips it while it runs. */
     onboardingAssistantsContinue(): Promise<void>;
+    /** Returns to an earlier step of first-run setup. */
+    onboardingStepBack(step: LocalOnboardingStepBack): Promise<void>;
     runtimeGet(): Promise<DesktopRuntimeSnapshot>;
     runtimeReset(): Promise<void>;
     runtimeRetry(): Promise<void>;
@@ -760,9 +923,12 @@ export interface HappyMediaPreviewBridge {
 }
 
 export const desktopIpc = {
+    liveMicrophoneStart: "happy:live:microphone-start",
+    liveMicrophoneRevoke: "happy:live:microphone-revoke",
     /** Renderer → main only: the appearance source inherited by local web contents. */
     appearanceSet: "happy:appearance:set",
     browserProxyApply: "happy:browser:proxy-apply",
+    browserCommand: "happy:browser:command",
     browserOpenRequested: "happy:browser:open-requested",
     browserStatusChanged: "happy:browser:status-changed",
     cloudAuthCallbackReceived: "happy:cloud-auth:callback-received",
@@ -781,6 +947,8 @@ export const desktopIpc = {
     mediaPreviewOpen: "happy:media-preview:open",
     /** Renderer → main only: the number of conversations waiting for the person. */
     dockUnreadSet: "happy:dock:unread-set",
+    /** Renderer → main only: whether the computer should be held out of sleep. */
+    keepAwakeSet: "happy:keep-awake:set",
     /** Main → renderer only: the window's zoom, every time the View menu is used. */
     zoomChanged: "happy:zoom:changed",
     desktopConfigGet: "happy:desktop-config:get",
@@ -792,6 +960,10 @@ export const desktopIpc = {
     daemonInstallDismiss: "happy:daemon:install-dismiss",
     daemonInstallKill: "happy:daemon:install-kill",
     daemonRestart: "happy:daemon:restart",
+    legacyCliConnect: "happy:legacy-cli:connect",
+    legacyCliPrepare: "happy:legacy-cli:prepare",
+    legacyCliStatus: "happy:legacy-cli:status",
+    legacyCliReset: "happy:legacy-cli:reset",
     daemonGet: "happy:daemon:get",
     daemonStart: "happy:daemon:start",
     daemonUpgrade: "happy:daemon:upgrade",
@@ -814,10 +986,11 @@ export const desktopIpc = {
     profilerReactMessage: "happy:profiler:react-message",
     applicationMenuOpen: "happy:application-menu:open",
     onboardingAssistantsContinue: "happy:onboarding:assistants-continue",
+    onboardingStepBack: "happy:onboarding:step-back",
     onboardingChanged: "happy:onboarding:changed",
     onboardingGet: "happy:onboarding:get",
-    onboardingProfileCreate: "happy:onboarding:profile-create",
     onboardingProjectChoose: "happy:onboarding:project-choose",
+    onboardingChiefOfStaffComplete: "happy:onboarding:chief-of-staff-complete",
     runtimeChanged: "happy:runtime:changed",
     runtimeGet: "happy:runtime:get",
     runtimeReset: "happy:runtime:reset",
@@ -829,9 +1002,6 @@ export const desktopIpc = {
     windowStateGet: "happy:window-state:get",
 } as const;
 
-/** Persistent, capability-isolated Chromium profile used only by embedded browser tabs. */
-export const happyBrowserPartition = "persist:happy-browser";
-
 /**
  * In-memory Chromium profile used only by rendered HTML file previews. It is
  * deliberately not persistent and not the browser's: a previewed page keeps no
@@ -839,6 +1009,14 @@ export const happyBrowserPartition = "persist:happy-browser";
  * are logged into.
  */
 export const happyHtmlPreviewPartition = "happy-html-preview";
+
+/**
+ * In-memory Chromium profile used only by HTML artifacts. Each numbered version
+ * is served from its own origin inside it, so a page keeps its storage for as
+ * long as the app runs and shares it with no other artifact or version; nothing
+ * outlives a restart.
+ */
+export const happyArtifactPartition = "happy-artifact";
 
 /**
  * Query the preview window is loaded with, so the renderer entry mounts only the

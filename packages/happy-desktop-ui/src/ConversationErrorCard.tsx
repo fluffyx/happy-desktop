@@ -1,7 +1,7 @@
 import { type CSSProperties } from "react";
+import type { ConversationErrorAssistance } from "happy-desktop-state";
+import { conversationErrorAssistanceText } from "./conversationErrorAssistanceText";
 import { partitionComponentProps } from "./componentProps";
-import { CopyButton } from "./CopyButton";
-import { ScrollingText } from "./ScrollingText";
 import { Octicon } from "./vectorIcons/VectorIcon";
 
 export interface ConversationErrorCardProps {
@@ -11,12 +11,15 @@ export interface ConversationErrorCardProps {
     readonly style?: CSSProperties;
     readonly title: string;
     readonly tone?: "error" | "warning";
+    readonly assistance?: ConversationErrorAssistance;
+    readonly onAssistanceRequest?: () => void;
 }
 
 /**
- * A failed turn's compact explanation, aligned to the assistant activity rail.
- * It uses the same one-line rhythm as a tool call so failures remain visible
- * without interrupting the transcript with a full alert panel.
+ * A failed turn's complete explanation, aligned to the assistant activity rail.
+ * The reason retains its paragraphs and wraps in place. Its one way out is the
+ * Chief of Staff, which receives the error itself; there is no copy or log
+ * button beside it.
  */
 export function ConversationErrorCard(props: ConversationErrorCardProps) {
     const [local] = partitionComponentProps(props, [
@@ -26,8 +29,13 @@ export function ConversationErrorCard(props: ConversationErrorCardProps) {
         "style",
         "title",
         "tone",
+        "assistance",
+        "onAssistanceRequest",
     ]);
     const tone = local.tone ?? "error";
+    const assistance = local.assistance
+        ? conversationErrorAssistanceText(local.assistance)
+        : undefined;
     return (
         <div
             className={["happy-conversation-error-card", local.className].filter(Boolean).join(" ")}
@@ -58,21 +66,30 @@ export function ConversationErrorCard(props: ConversationErrorCardProps) {
                     >
                         {local.title}
                     </strong>
-                    <ScrollingText
+                    <span
                         className="happy-conversation-error-card__reason"
                         data-happy-desktop-ui="conversation-error-reason"
                     >
                         {local.reason}
-                    </ScrollingText>
+                    </span>
+                    {assistance ? (
+                        <span className="happy-conversation-error-card__assistance">
+                            <button
+                                className="happy-conversation-error-card__assistance-action"
+                                disabled={assistance.disabled || !local.onAssistanceRequest}
+                                onClick={local.onAssistanceRequest}
+                                type="button"
+                            >
+                                {assistance.label}
+                            </button>
+                            {assistance.detail ? (
+                                <span className="happy-conversation-error-card__assistance-detail">
+                                    {assistance.detail}
+                                </span>
+                            ) : null}
+                        </span>
+                    ) : null}
                 </span>
-                {/* A failure is the line a reader most often needs verbatim —
-                    in a bug report, a search, or a reply — so the whole reason
-                    is one click away, not a careful drag-selection. */}
-                <CopyButton
-                    data-happy-desktop-ui="conversation-error-copy"
-                    label="Copy error"
-                    text={`${local.title}: ${local.reason}`}
-                />
             </div>
         </div>
     );

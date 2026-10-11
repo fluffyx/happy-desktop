@@ -73,13 +73,19 @@ async function request<Value>(action: string, input?: unknown): Promise<Value> {
  */
 export function browserDevBridgeCreate(): HappyDesktopBridge {
     return {
+        // Browser-local development has no explicit Electron debug launch, so
+        // it must not start the desktop-only live metrics sampler.
+        debugMetricsEnabled: false,
         // A normal browser exposes no native preferred-color-scheme override;
         // the application tree itself is already controlled by ThemeScope.
         appearanceSet: () => undefined,
+        keepAwakeSet: () => undefined,
         // A browser tab is told nothing about where a dropped file came from,
         // so every attachment here travels by value.
         attachmentSourcePath: () => undefined,
-        browserProxyApply: async () => undefined,
+        browserProxyApply: async () => {
+            throw new Error("The browser content renderer is not connected.");
+        },
         browserOpenSubscribe: () => () => undefined,
         browserStatusSubscribe: () => () => undefined,
         cloudAuthCallbackSubscribe: () => () => undefined,
@@ -146,6 +152,19 @@ export function browserDevBridgeCreate(): HappyDesktopBridge {
         daemonRestart: async () => {
             throw new Error("Happy Agent is restarted from the Electron desktop window.");
         },
+        legacyCliConnect: async () => {
+            throw new Error("Connect the terminal CLI from the Electron desktop window.");
+        },
+        legacyCliPrepare: async () => {
+            throw new Error("Install the terminal CLI from the Electron desktop window.");
+        },
+        legacyCliStatus: async () => ({
+            snapshot: {
+                status: "unavailable",
+                message:
+                    "Terminal CLI status and sign-out are available in the Electron desktop window.",
+            },
+        }),
         daemonStart: async () => {
             throw new Error("Happy Agent is started from the Electron desktop window.");
         },
@@ -181,8 +200,9 @@ export function browserDevBridgeCreate(): HappyDesktopBridge {
         onboardingGet: async () => ({ busy: false, freshness: "used", stage: "complete" }) as const,
         onboardingSubscribe: () => () => undefined,
         onboardingAssistantsContinue: async () => undefined,
-        onboardingProfileCreate: async () => undefined,
+        onboardingStepBack: async () => undefined,
         onboardingProjectChoose: async () => undefined,
+        onboardingChiefOfStaffComplete: async () => undefined,
         runtimeGet: async () => {
             const snapshot = await request<DesktopRuntimeSnapshot>("runtimeGet");
             if (snapshot.phase !== "ready" || snapshot.activeTarget.mode !== "local")

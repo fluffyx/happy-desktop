@@ -23,9 +23,24 @@ export interface SegmentedProgressSegment {
      * there is a share of it to show.
      */
     readonly fraction?: number;
+    /**
+     * Returns to this step. Present only on a step the sequence can actually go
+     * back to; the track and its label become one button, because they name one
+     * place and two hit targets for one destination is two chances to miss.
+     */
+    onSelect?(): void;
 }
 
 export interface SegmentedProgressProps {
+    /** User-paced steps highlight the current stage without implying background work. */
+    readonly mode?: "progress" | "steps";
+    readonly tone?: "default" | "inverse";
+    /**
+     * Whether each step names itself under its track. `hidden` is for a host that
+     * already names the live step in its own words; the tracks keep their names
+     * for a screen reader either way. Defaults to `visible`.
+     */
+    readonly labels?: "visible" | "hidden";
     readonly className?: string;
     readonly "data-testid"?: string;
     readonly style?: CSSProperties;
@@ -62,15 +77,23 @@ export function SegmentedProgress(props: SegmentedProgressProps) {
             aria-label={props.label}
             className={["happy-segmented-progress", props.className].filter(Boolean).join(" ")}
             data-happy-desktop-ui="segmented-progress"
+            data-mode={props.mode}
+            data-labels={props.labels === "hidden" ? "hidden" : undefined}
+            data-tone={props.tone}
             data-testid={props["data-testid"]}
-            role="group"
+            role={props.mode === "steps" ? "list" : "group"}
             style={props.style}
         >
             {props.segments.map((segment) => {
                 const fraction = segmentFraction(segment);
+                const Segment = segment.onSelect ? "button" : "div";
                 return (
-                    <div
+                    <Segment
                         className="happy-segmented-progress__segment"
+                        {...(segment.onSelect
+                            ? { onClick: segment.onSelect, type: "button" as const }
+                            : {})}
+                        data-selectable={segment.onSelect ? "" : undefined}
                         data-happy-desktop-ui="segmented-progress-segment"
                         // Whether this segment has any ink in it, which is what
                         // decides between a position and a sweep. Zero counts as
@@ -82,22 +105,37 @@ export function SegmentedProgress(props: SegmentedProgressProps) {
                         // inferring it from the fill's width.
                         data-empty={(fraction ?? 0) === 0 ? "true" : "false"}
                         data-state={segment.state}
+                        role={props.mode === "steps" ? "listitem" : undefined}
+                        aria-current={
+                            props.mode === "steps" &&
+                            (segment.state === "running" || segment.state === "failed")
+                                ? "step"
+                                : undefined
+                        }
+                        aria-label={
+                            props.mode === "steps"
+                                ? `${segment.label}: ${segment.state === "done" ? "complete" : segment.state === "pending" ? "upcoming" : segment.state === "failed" ? "needs attention" : "current step"}${segment.onSelect ? ", go back to this step" : ""}`
+                                : undefined
+                        }
                         key={segment.id}
                     >
                         <span
-                            aria-label={segment.label}
-                            aria-valuemax={100}
-                            aria-valuemin={0}
+                            aria-hidden={props.mode === "steps" ? true : undefined}
+                            aria-label={props.mode === "steps" ? undefined : segment.label}
+                            aria-valuemax={props.mode === "steps" ? undefined : 100}
+                            aria-valuemin={props.mode === "steps" ? undefined : 0}
                             // Absent exactly where nothing is known: a step that
                             // is running without counting, and a step the
                             // sequence stopped on. Either way a number here
                             // would be invented.
                             aria-valuenow={
-                                fraction === undefined ? undefined : Math.round(fraction * 100)
+                                props.mode === "steps" || fraction === undefined
+                                    ? undefined
+                                    : Math.round(fraction * 100)
                             }
                             className="happy-segmented-progress__track"
                             data-happy-desktop-ui="segmented-progress-track"
-                            role="progressbar"
+                            role={props.mode === "steps" ? undefined : "progressbar"}
                         >
                             <span
                                 className="happy-segmented-progress__fill"
@@ -111,7 +149,7 @@ export function SegmentedProgress(props: SegmentedProgressProps) {
                         >
                             {segment.label}
                         </span>
-                    </div>
+                    </Segment>
                 );
             })}
         </div>

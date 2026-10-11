@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { expect, it } from "vitest";
 import { userEvent } from "vitest/browser";
 import "./theme.css";
+import "./styles/scrollbar.css";
 import "./styles/modal-overlay.css";
 import "./styles/modal.css";
 import "./styles/button.css";
@@ -175,7 +176,9 @@ it("caps a taller-than-window card inside the gutter so its body scrolls, not th
     const overlay = view.$('[data-testid="ov"]');
     const dialog = view.$('[data-testid="ov"] [data-happy-desktop-ui="modal-dialog"]');
     const header = view.$('[data-testid="ov"] [data-happy-desktop-ui="modal-header"]');
-    const body = view.$('[data-testid="ov"] [data-happy-desktop-ui="modal-body"]');
+    const body = view.$(
+        '[data-testid="ov"] [data-happy-desktop-ui="modal-body"] [data-scrollbar-viewport]',
+    );
     /* ---- Card keeps a clear margin; it never fills the window height ------ */
     const overlayBounds = overlay.bounds();
     const dialogBounds = dialog.bounds();
@@ -267,7 +270,7 @@ it("keeps explicit center byte-identical to the attribute-free default placement
     ).toEqual(view.$('[data-testid="default"] [data-happy-desktop-ui="modal-dialog"]').bounds());
 }, 120000);
 
-it("anchors top placement at the 720x480 Electron minimum and dismisses from real backdrop coordinates", async () => {
+it("anchors top placement in a constrained 720x480 host and dismisses from real backdrop coordinates", async () => {
     const dismissed: string[] = [];
     const view = createRenderer();
     view.render(

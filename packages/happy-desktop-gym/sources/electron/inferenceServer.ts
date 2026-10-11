@@ -311,7 +311,10 @@ class DeterministicInferenceServer implements GymInferenceServer {
                 type: "toolCall",
                 name: "exec_command",
                 arguments: {
-                    cmd: "printf 'gym deterministic tool output\\n'",
+                    cmd:
+                        process.platform === "win32"
+                            ? "Write-Output 'gym deterministic tool output'"
+                            : "printf 'gym deterministic tool output\\n'",
                     max_output_tokens: 200,
                 },
             });
@@ -338,8 +341,13 @@ class DeterministicInferenceServer implements GymInferenceServer {
                           textDeltaDelayMs: 4,
                       }
                     : {
-                          textDeltaChunkSize: longChat ? 16_384 : 96,
-                          textDeltaDelayMs: this.#manifest.profile === "smoke" ? 0 : 1,
+                          textDeltaChunkSize:
+                              latestUserText.includes("gym-history-") || longChat ? 16_384 : 96,
+                          textDeltaDelayMs:
+                              latestUserText.includes("gym-history-") ||
+                              this.#manifest.profile === "smoke"
+                                  ? 0
+                                  : 1,
                       }),
             completionDelayMs: replay ? 20 : this.#manifest.profile === "smoke" ? 0 : 2,
         };
@@ -447,6 +455,12 @@ function liveToolMutationCommand(sessionId: string, lineCount: number): string {
         (_, index) =>
             `Gym live tool mutation · mixed replay · session ${sessionId} · line ${String(index + 1).padStart(3, "0")}`,
     );
+    if (process.platform === "win32") {
+        return (
+            `@(${lines.map((line) => `'${line.replaceAll("'", "''")}'`).join(",")}) ` +
+            "| Add-Content -LiteralPath 'src/changes/modified/deep/large-modified.md' -Encoding UTF8"
+        );
+    }
     return (
         // The command runs in the session's own workspace checkout, so the path is relative.
         `printf '%s\\n' ${lines.map(shellQuote).join(" ")} ` +

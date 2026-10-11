@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 import { AppShell } from "../../src/AppShell";
 import { Button } from "../../src/Button";
+import { Sidebar } from "../../src/Sidebar";
 import { commandShortcut } from "../../src/keyboardShortcut";
 import { ComponentPage, DimensionRule, Specimen } from "../kit";
 
@@ -83,9 +84,9 @@ function windowAtMinimum(children: ReactNode) {
                 width: `${String(WINDOW_MIN)}px`,
             }}
         >
-            <div style={{ height: "480px", width: `${String(WINDOW_MIN)}px` }}>{children}</div>
+            <div style={{ height: "640px", width: `${String(WINDOW_MIN)}px` }}>{children}</div>
             <DimensionRule
-                label={`${String(WINDOW_MIN)}px × 480px — 64 rail + ${String(LANE_MIN)} + ${String(WORKSPACE_MIN)} + ${String(LANE_MIN)}`}
+                label={`${String(WINDOW_MIN)}px × 640px — 64 rail + ${String(LANE_MIN)} + ${String(WORKSPACE_MIN)} + ${String(LANE_MIN)}`}
             />
         </div>
     );
@@ -225,6 +226,52 @@ export function AppShellPage() {
             </Specimen>
 
             <Specimen
+                detail="The collapse control keeps its header lane when Bots is first, leaving the section's create action clear. A leading Create row can share the compact fullscreen lane."
+                label="Fullscreen sidebar actions"
+                number="05b"
+                stage="chrome"
+            >
+                {[false, true].map((compose) => (
+                    <div key={String(compose)}>
+                        {window1024(
+                            <AppShell
+                                connectionRail
+                                rail={railSlot()}
+                                sidebar={
+                                    <Sidebar
+                                        activeItemId=""
+                                        onCompose={compose ? () => {} : undefined}
+                                        onItemSelect={() => {}}
+                                        onSectionAction={() => {}}
+                                        sections={[
+                                            {
+                                                action: { icon: "plus", label: "Create bot" },
+                                                id: "bots",
+                                                label: "Bots",
+                                                items: [
+                                                    {
+                                                        id: "chief-of-staff",
+                                                        kind: "agent",
+                                                        label: "Chief of Staff",
+                                                        icon: "chat",
+                                                    },
+                                                ],
+                                            },
+                                        ]}
+                                    />
+                                }
+                                sidebarCollapsible
+                                windowControls
+                                windowFullScreen
+                            >
+                                <Slot label="workspace" />
+                            </AppShell>,
+                        )}
+                    </div>
+                ))}
+            </Specimen>
+
+            <Specimen
                 detail="trace + input: the panel body (live trace) fills the column while a panelFooter keeps the composer pinned at the bottom; the panel body identity is unaffected as the footer mounts"
                 label="Trace with composer footer"
                 number="06"
@@ -277,7 +324,7 @@ export function AppShellPage() {
             </Specimen>
 
             <Specimen
-                detail="Happy's 720×480 desktop minimum. The two side lanes shrink to their 250px floors and the workspace keeps the remaining 140px after the 64px rail. Drag the blueprint narrower and the shell stops here and the page scrolls instead, matching the native window contract."
+                detail="Happy's 720×640 desktop minimum. The two side lanes shrink to their 250px floors and the workspace keeps the remaining 140px after the 64px rail. Drag the blueprint narrower and the shell stops here and the page scrolls instead, matching the native window contract."
                 label="Every lane at its minimum"
                 number="10"
                 stage="chrome"

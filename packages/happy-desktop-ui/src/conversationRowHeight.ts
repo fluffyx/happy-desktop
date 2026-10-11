@@ -1,4 +1,10 @@
-import { entryKey, type ConversationEntry, type ConversationRequest } from "happy-desktop-state";
+import {
+    entryKey,
+    type AgentTurnTraceSummary,
+    type ConversationEntry,
+    type ConversationErrorAssistance,
+    type ConversationRequest,
+} from "happy-desktop-state";
 import {
     conversationAgentRowStartsGroup,
     conversationEntryPrecedesActivity,
@@ -10,6 +16,7 @@ import {
 } from "./conversationMessageGrouped";
 import {
     asideTimeWidth,
+    errorTextHeight,
     markdownBodyHeight,
     messageTextLayoutCacheCreate,
     messageTextLayoutCacheRefresh,
@@ -20,7 +27,15 @@ import {
     uiTextNaturalWidth,
     type MessageTextLayoutCache,
 } from "./messageTextLayout";
+import {
+    messageReferencesResolve,
+    messageReferencesSignature,
+    type MessageReferences,
+} from "./messageReferences";
 import { SYSTEM_NOTIFICATION_HEIGHT } from "./systemNotification";
+import { agentTraceMetaStats, agentTraceMetaTitle } from "./agentTraceMeta";
+import { conversationErrorTitle } from "./conversationErrorTitle";
+import { conversationErrorAssistanceText } from "./conversationErrorAssistanceText";
 
 /**
  * Height of one conversation row, computed from the entry and the list's measure
@@ -54,6 +69,15 @@ export type ConversationRowContext = {
     readonly activityTreatment?: "detailed" | "focused";
     /** Explicit disclosure state supplied by the UI owner; never inferred from a row. */
     readonly expanded?: boolean;
+    /** A live status footer follows the final agent message. */
+    readonly liveStatus?: boolean;
+    readonly errorAssistance?: ConversationErrorAssistance;
+    /**
+     * What the Happy references in message bodies read as now. A reference is
+     * laid out as its live title, the words the reader sees, so the row is
+     * sized from the same resolution the body renders.
+     */
+    readonly references?: MessageReferences;
 };
 type CachedRowHeight = { readonly value: number | undefined };
 type Dictionary<T> = Record<string, T | undefined>;
@@ -68,7 +92,7 @@ export interface ConversationRowHeightCache {
     /** Prepared text and final text-layout results owned by this conversation. */
     readonly text: MessageTextLayoutCache;
 }
-/** Creates the virtually unbounded row-layout cache owned by one conversation. */
+/** Creates the row-layout cache for one conversation; the view bounds its lifetime. */
 export function conversationRowHeightCacheCreate(): ConversationRowHeightCache {
     return {
         rows: dictionaryCreate(),
@@ -124,8 +148,6 @@ const CONVERSATION_AGENT_PADDING_TOP = { leading: 16, grouped: 2 } as const;
 const CONTINUES_PADDING_BOTTOM = 8;
 const CLOSING_PADDING_BOTTOM = 4;
 const CONVERSATION_AGENT_PADDING_BOTTOM = { leading: 16, grouped: 2 } as const;
-/** `.happy-message__meta` — 20px row plus its 5px separation from the body. */
-const META_ROW = 25;
 /** Horizontal chrome: row padding, then the 76% bubble cap, then bubble padding. */
 const AGENT_INSET = 94;
 const INCOMING_INSET = 50;
@@ -136,6 +158,13 @@ const BUBBLE_PADDING = 24;
 const ASIDE_TIME_GAP = 8;
 /** Inline grouped-message metadata: NBSP plus `.happy-message__hover-meta` padding. */
 const GROUPED_TRAILING_META_PADDING = 8;
+/** Six-pixel flex gaps on both sides of the metadata separator. */
+const GROUPED_TRAILING_META_GAPS = 12;
+/** Two-pixel dot separating a trace accessory from the timestamp. */
+const GROUPED_TRAILING_META_SEPARATOR = 2;
+/** Gaps around the optional two-pixel separator inside trace metadata. */
+const TRACE_META_GAPS = 12;
+const TRACE_META_SEPARATOR = 2;
 /** `.happy-message__media` — top margin, inter-tile gap, and its own cap. */
 const MEDIA_GAP = 4;
 const MEDIA_MARGIN = 8;
@@ -181,6 +210,10 @@ export const DIVIDER_HEIGHT = 60;
 /** Centered `.happy-system-notice`: 16px padding above and below. */
 const NOTICE_CHROME_CENTER = 32;
 const NOTICE_INSET = 50;
+/** Error card: 14px icon and the 8px gap beside the text. */
+const ERROR_TEXT_INSET = 22;
+/** Error card: 6px vertical padding per side, plus 4px between heading and reason. */
+const ERROR_TEXT_CHROME = 16;
 /* A steering notice keeps the notice row's 16px lead but closes to 4px above the
    quote it introduces; the quote itself wraps at 560px, inset 20px per side, and
    closes the row with the notice's usual 16px. */
@@ -331,7 +364,9 @@ export function messageRowHeight(input: {
     readonly bodyVisible: boolean;
     readonly grouped: boolean;
     readonly mermaidEnabled?: boolean;
-    readonly metaAccessory: boolean;
+    readonly references?: MessageReferences;
+    readonly streaming?: boolean;
+    readonly trailingExtraWidth: number;
     readonly surface: ConversationSurface;
     readonly textCache?: MessageTextLayoutCache;
     readonly time: string;
@@ -339,31 +374,51 @@ export function messageRowHeight(input: {
     readonly width: number;
 }): number {
     const [leading, tight] = MESSAGE_CHROME[input.surface][input.treatment];
-    /* A grouped follow-up drops the identity row, unless a settled turn's trace
-       control rides it — Message keeps the meta row for the accessory alone. */
-    const chrome =
-        (input.grouped ? tight : leading) + (input.grouped && input.metaAccessory ? META_ROW : 0);
+    const chrome = input.grouped ? tight : leading;
     if (!input.bodyVisible) return chrome;
     const measure = messageBodyMeasure(input.width, input.treatment, input.time, input.textCache);
     /* Grouped incoming/agent rows append their hover time to the final word in
        one non-wrapping inline run. Include that run in the text model: at a
        narrow width it can move the final word and timestamp onto the next line. */
-    const trailingExtraWidth =
-        input.grouped && input.treatment !== "own" && input.time
-            ? GROUPED_TRAILING_META_PADDING +
-              uiTextNaturalWidth("\u00a0", 16, input.textCache) +
-              asideTimeWidth(input.time, input.textCache)
-            : 0;
     return (
         chrome +
         markdownBodyHeight(
-            input.body,
+            /* Rendered from the same resolution `renderMessageMarkdown` makes:
+               every reference as the words it reads as, and a tag still
+               arriving held back. */
+            messageReferencesResolve(input.body, input.references, input.streaming === true),
             measure,
             input.textCache,
-            trailingExtraWidth,
+            input.trailingExtraWidth,
             input.mermaidEnabled,
+            input.streaming,
         )
     );
+}
+
+/** Width of the one non-wrapping run Message appends to a grouped reply. */
+function groupedTrailingMetaWidth(
+    time: string,
+    trace: AgentTurnTraceSummary | undefined,
+    cache: MessageTextLayoutCache | undefined,
+): number {
+    if (!time && !trace) return 0;
+    let width = GROUPED_TRAILING_META_PADDING + uiTextNaturalWidth("\u00a0", 16, cache);
+    if (trace) {
+        width += Math.max(
+            monoTextNaturalWidth(agentTraceMetaTitle(false), 11, cache),
+            monoTextNaturalWidth(agentTraceMetaTitle(true), 11, cache),
+        );
+        const stats = agentTraceMetaStats(trace.toolCallCount, trace.totalTokens);
+        if (stats)
+            width +=
+                TRACE_META_GAPS + TRACE_META_SEPARATOR + monoTextNaturalWidth(stats, 11, cache);
+    }
+    if (time) {
+        if (trace) width += GROUPED_TRAILING_META_GAPS + GROUPED_TRAILING_META_SEPARATOR;
+        width += asideTimeWidth(time, cache);
+    }
+    return width;
 }
 
 /** Height of the structured question form or its compact answered history. */
@@ -494,15 +549,23 @@ export function conversationRowHeight(
                           entry.activity.output,
                           width - activityInset - SHELL_ACTIVITY_OUTPUT_INSET,
                           cache?.text,
+                          entry.activity.running,
                       )
                     : ACTIVITY_HEIGHT.reasoning
                 : entry.activity.kind === "reasoning" && expanded
                   ? REASONING_ACTIVITY_CHROME +
-                    markdownBodyHeight(entry.activity.text, width - activityInset - 16, cache?.text)
+                    markdownBodyHeight(
+                        messageReferencesResolve(entry.activity.text, context.references, false),
+                        width - activityInset - 16,
+                        cache?.text,
+                        0,
+                        true,
+                        entry.activity.streaming,
+                    )
                   : entry.activity.kind === "agentMessage" && expanded
                     ? AGENT_MESSAGE_ACTIVITY_CHROME +
                       markdownBodyHeight(
-                          entry.activity.text,
+                          messageReferencesResolve(entry.activity.text, context.references, false),
                           width - activityInset - 16,
                           cache?.text,
                       )
@@ -510,7 +573,11 @@ export function conversationRowHeight(
         return rowHeightCached(
             cache,
             entry,
-            `activity:${context.surface}:${context.activityTreatment ?? "detailed"}:${String(width)}:${expanded ? "expanded" : "collapsed"}:${startsGroup ? "lead" : "plain"}`,
+            `activity:${context.surface}:${context.activityTreatment ?? "detailed"}:${String(width)}:${expanded ? "expanded" : "collapsed"}:${startsGroup ? "lead" : "plain"}:${
+                entry.activity.kind === "reasoning" || entry.activity.kind === "agentMessage"
+                    ? messageReferencesSignature(entry.activity.text, context.references)
+                    : ""
+            }`,
             () =>
                 activityHeight === undefined
                     ? undefined
@@ -561,6 +628,29 @@ export function conversationRowHeight(
             context.surface === "conversation" && conversationAgentRowStartsGroup(entries, index)
                 ? ACTIVITY_LEAD_CHROME
                 : 0;
+        if (entry.level === "error" || entry.retry !== undefined) {
+            const measure = width - (lead > 0 ? AGENT_INSET : 126) - ERROR_TEXT_INSET;
+            const assistance = context.errorAssistance
+                ? conversationErrorAssistanceText(context.errorAssistance)
+                : undefined;
+            return rowHeightCached(
+                cache,
+                entry,
+                `error:${String(width)}:${String(lead)}:${assistance?.label ?? ""}:${assistance?.detail ?? ""}`,
+                () =>
+                    lead +
+                    ERROR_TEXT_CHROME +
+                    errorTextHeight(conversationErrorTitle(entry), measure, cache?.text, true) +
+                    errorTextHeight(entry.text, measure, cache?.text) +
+                    (assistance
+                        ? 4 +
+                          errorTextHeight(assistance.label, measure, cache?.text) +
+                          (assistance.detail
+                              ? 4 + errorTextHeight(assistance.detail, measure, cache?.text)
+                              : 0)
+                        : 0),
+            );
+        }
         return rowHeightCached(
             cache,
             entry,
@@ -607,7 +697,8 @@ export function conversationRowHeight(
         context.surface === "conversation" &&
         conversationEntryPrecedesActivity(entries, index);
     const closedByStatus =
-        context.surface === "conversation" && conversationMessageClosedByStatus(entries, index);
+        context.surface === "conversation" &&
+        conversationMessageClosedByStatus(entries, index, context.liveStatus);
     const cacheKey = [
         "message",
         String(width),
@@ -617,17 +708,29 @@ export function conversationRowHeight(
         traceCollapsible ? "trace" : "plain",
         resumesAfterActivity ? "resumed" : "continuous",
         precedesActivity ? "continues" : closedByStatus ? "closing" : "open",
+        // What the body's references read as: a title changing re-sizes the row.
+        messageReferencesSignature(message.text, context.references),
     ].join(":");
     return rowHeightCached(cache, entry, cacheKey, () => {
+        const time = messageTimeSample(message.createdAt);
         let height = messageRowHeight({
             body: message.text,
             bodyVisible: hasBody || message.generationStatus !== undefined || traceCollapsible,
             grouped,
             mermaidEnabled: message.generationStatus !== "streaming",
-            metaAccessory: !own && traceCollapsible,
+            ...(context.references ? { references: context.references } : {}),
+            streaming: message.generationStatus === "streaming",
             surface: context.surface,
             textCache: cache?.text,
-            time: messageTimeSample(message.createdAt),
+            time,
+            trailingExtraWidth:
+                grouped && !own
+                    ? groupedTrailingMetaWidth(
+                          time,
+                          traceCollapsible ? trace : undefined,
+                          cache?.text,
+                      )
+                    : 0,
             treatment,
             width,
         });

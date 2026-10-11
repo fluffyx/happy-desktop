@@ -1,4 +1,6 @@
 import { type ReactNode } from "react";
+import type { ConversationAuthor } from "happy-desktop-state";
+import { ConversationEntryView } from "../../src/ConversationEntryView";
 import { DiffSnippet } from "../../src/DiffSnippet";
 import { FileAttachment } from "../../src/FileAttachment";
 import { DayDivider, Message, MessageList, SteeringNotice, SystemNotice } from "../../src/Message";
@@ -11,6 +13,30 @@ const column: Record<string, string> = {
     flexDirection: "column",
     gap: "14px",
 };
+const teamAuthors: readonly ConversationAuthor[] = [
+    {
+        id: "team-maya",
+        userId: "team-maya",
+        displayName: "Maya Johnson",
+        username: "Maya Johnson",
+        kind: "human",
+        avatar: { thumbhash: "HAgGXxBVauaQSKZWmNmKFmhmhjAoCYMC" },
+    },
+    {
+        id: "team-jun",
+        userId: "team-jun",
+        displayName: "Jun Park",
+        username: "Jun Park",
+        kind: "human",
+    },
+    {
+        id: "team-deleted",
+        userId: "team-deleted",
+        displayName: "DELETED",
+        username: "DELETED",
+        kind: "human",
+    },
+];
 /* Screenshot-safe inline artwork so the blueprint never loads a network asset. */
 function demoImage(width: number, height: number, from: string, to: string): string {
     const svg =
@@ -357,6 +383,32 @@ export function MessagePage() {
             </Specimen>
 
             <Specimen
+                detail="A written file reference becomes the click it looks like. A path with a line or a run of lines links, in prose and in backticks alike; a fenced block is code being shown rather than cited, a time of day is not a file, and a link that is already a link is left alone"
+                label="Message — file references"
+                number="17"
+                stage="app"
+            >
+                {channelFrame(
+                    <Message
+                        agent
+                        author="Codex"
+                        body={
+                            "The reveal lives in packages/happy-desktop-ui/src/CodeEditor.tsx:84-112, " +
+                            "and the tab that carries it is `happyAgentWorkspaceStore.ts:3628`.\n\n" +
+                            "Standup is at 10:30, and nothing in\n\n" +
+                            "```ts\nconst at = doc.line(3);\n```\n\n" +
+                            "is a citation."
+                        }
+                        generationStatus="complete"
+                        initials="CX"
+                        onFileOpen={() => {}}
+                        time="11:20"
+                        tone="mint"
+                    />,
+                )}
+            </Specimen>
+
+            <Specimen
                 detail="String body renders as Markdown — headings, lists, emphasis, inline + fenced code, isolated Mermaid diagrams, and safe links, all on theme tokens"
                 label="Message — Markdown body (complete)"
                 number="08"
@@ -377,6 +429,7 @@ export function MessagePage() {
                         }
                         generationStatus="complete"
                         initials="CX"
+                        onLinkOpen={() => {}}
                         time="10:58"
                         tone="mint"
                     />,
@@ -719,6 +772,36 @@ export function MessagePage() {
                     </>,
                 )}
                 <DimensionRule label="12/16 secondary line · shares the author line's 12 px inset" />
+            </Specimen>
+            <Specimen
+                detail="User ID and minimal profile travel with the message · API ThumbHash avatar, initials-only, and deleted identity"
+                label="Message — team user profiles"
+                number="18"
+                stage="app"
+            >
+                {channelFrame(
+                    teamAuthors.map((sender) => (
+                        <ConversationEntryView
+                            key={sender.id}
+                            entry={{
+                                kind: "message",
+                                source: "server",
+                                delivery: "sent",
+                                message: {
+                                    id: `message:${sender.id}`,
+                                    chatId: "team-conversation",
+                                    sequence: "1",
+                                    changePts: "1",
+                                    sender,
+                                    text: "This message keeps its author's current name and avatar.",
+                                    reactions: [],
+                                    attachments: [],
+                                    createdAt: "2026-01-01T10:00:00.000Z",
+                                },
+                            }}
+                        />
+                    )),
+                )}
             </Specimen>
         </ComponentPage>
     );

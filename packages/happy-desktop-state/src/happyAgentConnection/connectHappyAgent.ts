@@ -1,3 +1,4 @@
+import { agentTreeFind, agentTreeUpdate } from "./agentSubtasks.js";
 import {
     applyMessageDelta,
     HappyAgentClient,
@@ -9,37 +10,46 @@ import {
     type Bot,
     type BackgroundProcess,
     type DaemonConfig,
-    type GitState,
     type HappyAgentEvent,
     type Message,
     type MessageBlock,
     type MessageMode,
+    type Profile,
     type Project,
     type Question,
     type Run,
     type SendMessageRequest,
     type SendMessageResponse,
     type SlashCommand,
+    type Task,
+    type TaskMembership,
     type UsageBreakdown,
     type Workspace,
 } from "@slopus/happy-agent-client";
 import { createStore } from "zustand/vanilla";
 import { happyAgentServiceTierToWire } from "../happyAgentServiceTier.js";
 import { ChatStore } from "./ChatStore.js";
+import { userProfilesCreate } from "./userProfiles.js";
+import { happyAgentSyncCreate } from "./happyAgentSync.js";
+import { happyAgentSyncRead } from "./happyAgentSyncRead.js";
+import { gitSnapshotStateUpdate, type GitSnapshotState } from "./gitSnapshotState.js";
 import { CHECKING_SERVER_COMPATIBILITY, serverCompatibility } from "./compatibility.js";
 import { projectRegistrationError } from "./errors.js";
 import { deepEqual } from "../happyAgent/happyAgentSupport.js";
 import type { HappyAgentDebugLogInput } from "../happyAgent/happyAgentDebugLogStore.js";
 import {
     applyChanges,
+    archivedAgentsMerge,
     defaultMode,
     elementsReuse,
     modeOf,
+    ownerResourceReplace,
     projectElements,
     projectBots,
     projectGroups,
     projectNumericIdentity,
     projectSession,
+    projectTasks,
     replaceResource,
     type SessionProjectionInput,
     type TranscriptMessage,
@@ -57,6 +67,7 @@ import type {
     HappyAgentGroupsSubscriptionOptions,
     HappyAgentSessionSubscriptionOptions,
     ServerCompatibility,
+    TaskOwner,
 } from "./types.js";
 
 const INITIAL_RECONNECT_MS = 250;
@@ -65,6 +76,16 @@ const DEFAULT_HISTORY_LIMIT = 100;
 const GIT_WATCH_RENEW_MS = 2 * 60 * 1000;
 const RECENT_EVENT_RETENTION_MS = 60_000;
 const SNAPSHOT_RESPONSE_TIMEOUT_MS = 60_000;
+
+/**
+ * The desktop bootstrap as a current daemon serves it: beside the owners and their active
+ * agents, the most recently archived agents of those owners, newest first, as full agent
+ * objects. The published client this package pins does not describe that additive field yet;
+ * this widening goes away with the client release that does.
+ */
+type DesktopBootstrapWithArchivedAgents = Awaited<
+    ReturnType<HappyAgentClient["getDesktopBootstrap"]>
+> & { readonly archivedAgents?: readonly Agent[] };
 /*
  * Deadline for mutations the daemon answers without doing model work. A
  * create, send, or abort whose response never arrives would otherwise pend
@@ -77,8 +98,8 @@ const SEND_ATTEMPTS = 3;
 const INITIAL_SEND_RETRY_MS = 250;
 /**
  * Draft text is optimistic, so it is projected immediately while persistence
- * waits for a short pause in typing. Emptying a draft stays immediate: submit
- * relies on that clear entering the agent mutation lane before the message.
+ * waits for a short pause in typing. Emptying a draft is persisted immediately,
+ * but message delivery never waits for draft persistence.
  */
 const DRAFT_SAVE_DEBOUNCE_MS = 300;
 
@@ -103,6 +124,7 @@ interface SessionEntry {
     store: ChatStore;
     subscribers: Set<SessionSubscriber>;
     messages: Map<string, TranscriptMessage>;
+    userIds: Set<string>;
     /** Cumulative block offset of the provider segment currently streaming per agent message. */
     messageBlockOffsets: Map<string, number>;
     runs: Map<string, Run>;
@@ -125,6 +147,8 @@ interface SessionEntry {
     activityRevision: number;
     /** A journal gap made this cached session incomplete; reconcile when it is next observed. */
     reconcileRequired: boolean;
+    /** One follow-up snapshot is queued when an inactive run changes during a load. */
+    inactiveRefreshPending: boolean;
     /** Deltas ignored until a complete message snapshot repairs their message. */
     corruptedMessageIds: Set<string>;
     questionRecovery: Promise<void> | undefined;
@@ -161,6 +185,7 @@ interface PendingDraftSave extends DraftSave {
 }
 
 export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgentConnection {
+    const sync = happyAgentSyncCreate();
     const client = options.client ?? new HappyAgentClient(options);
     const endpoint = options.endpoint.toString();
     const rootController = new AbortController();
@@ -169,13 +194,78 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     const reportDebug = (entry: HappyAgentDebugLogInput): void => options.onDebugEntry?.(entry);
     const nextId = createCuid2(now);
     const sessions = new Map<string, SessionEntry>();
+    const userSessions = new Map<string, Set<SessionEntry>>();
+    const users = userProfilesCreate({
+        client,
+        signal: rootController.signal,
+        changed: (id) => {
+            // Version/timestamp-only changes never reach here. Only conversations
+            // referencing this identity need their denormalized rows reconciled.
+            for (const entry of userSessions.get(id) ?? []) {
+                if (!entry.hydrating) publishSession(entry, true);
+            }
+            // A task row wears its owner's face, so the catalog is published
+            // again when the person who owns one changes.
+            if (groupsStore.getState().tasks.some((task) => task.ownerUserId === id))
+                publishGroups();
+        },
+    });
+    const ensureMessageUsers = (messages: readonly Message[]): Promise<void> =>
+        users.ensure(
+            messages.flatMap((message) =>
+                message.role === "user" && message.metadata.userId !== undefined
+                    ? [message.metadata.userId]
+                    : [],
+            ),
+        );
+    const indexMessageUser = (entry: SessionEntry, message: Message): void => {
+        if (message.role !== "user" || message.metadata.userId === undefined) return;
+        const id = message.metadata.userId;
+        entry.userIds.add(id);
+        let references = userSessions.get(id);
+        if (!references) userSessions.set(id, (references = new Set()));
+        references.add(entry);
+    };
+    const clearUserIndex = (entry: SessionEntry): void => {
+        for (const id of entry.userIds) {
+            const references = userSessions.get(id);
+            references?.delete(entry);
+            if (references?.size === 0) userSessions.delete(id);
+        }
+        entry.userIds.clear();
+    };
+    const ingestSessionHistory = (
+        entry: SessionEntry,
+        runs: readonly (Run & { messages: Message[] })[],
+        pending: readonly Message[],
+    ): void => {
+        ingestHistory(entry, runs, pending);
+        for (const run of runs)
+            for (const message of run.messages) indexMessageUser(entry, message);
+        for (const message of pending) indexMessageUser(entry, message);
+    };
     const groupSubscribers = new Set<GroupsSubscriber>();
     const intendedModes = new Map<string, MessageMode>();
     const agentDrafts = new Map<string, AgentDraftSnapshot>();
     const agentModes = new Map<string, MessageMode | null>();
     const draftRevisions = new Map<string, number>();
     const pendingDraftSaves = new Map<string, PendingDraftSave>();
+    /*
+     * Routine writes the window makes while someone simply reads and types —
+     * saving a draft, marking a conversation read — are held while the daemon
+     * cannot take them: while it drains for an update, and while the
+     * connection is down. Only the latest of each per session is kept, and it
+     * is sent once a daemon that admits work is live again. Nothing about a
+     * held write is reported, because nothing has gone wrong: the draft is
+     * still on screen and will be saved.
+     */
+    const heldDraftSaves = new Map<string, DraftSave>();
+    const heldReads = new Set<string>();
+    // Whether the daemon answering admits mutations. A daemon's drain is
+    // sticky, so this only becomes true again for a replacement process.
+    let admitting = true;
     const draftSaveCancel = (sessionId: string): void => {
+        heldDraftSaves.delete(sessionId);
         const pending = pendingDraftSaves.get(sessionId);
         if (pending === undefined) return;
         clearTimeout(pending.timer);
@@ -190,11 +280,41 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
      */
     const unannouncedAgents = new Set<string>();
     const sendConfirmations = new Map<string, () => void>();
+    const sessionCreationOutcomes = new Map<string, Promise<void>>();
+    const workspaceCreationOutcomes = new Map<string, Promise<void>>();
+    const sendAcceptance = new Map<string, Promise<void>>();
+    const sendAcceptanceCreate = (id: string) => {
+        let resolve!: () => void;
+        let reject!: (error: Error) => void;
+        const promise = new Promise<void>((accepted, refused) => {
+            resolve = accepted;
+            reject = refused;
+        });
+        // The ordinary optimistic send has no promise consumer.
+        void promise.catch(() => undefined);
+        sendAcceptance.set(id, promise);
+        let settled = false;
+        const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            rootController.signal.removeEventListener("abort", aborted);
+            if (error) reject(error);
+            else resolve();
+            queueMicrotask(() => sendAcceptance.delete(id));
+        };
+        const aborted = () =>
+            finish(new Error("The connection ended before message acceptance was confirmed."));
+        rootController.signal.addEventListener("abort", aborted, { once: true });
+        return { accept: () => finish(), reject: (error: Error) => finish(error) };
+    };
     const mutationQueues = new Map<string, Promise<void>>();
+    const sessionCreations = new Map<string, Promise<void>>();
     const sessionMutationCounts = new Map<string, number>();
-    const gitStates = new Map<string, GitState>();
+    const gitStates = new Map<string, GitSnapshotState>();
     const processOwners = new Map<string, string>();
     let config: DaemonConfig | undefined;
+    let currentUserId: string | undefined;
+    let viewerProfileLoading: Promise<void> | undefined;
     let cursor: string | undefined;
     let resyncTask: Promise<void> | undefined;
     const resyncBufferedEvents: HappyAgentEvent[] = [];
@@ -211,11 +331,17 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         readonly projects: readonly Project[];
         readonly workspaces: readonly Workspace[];
         readonly bots: readonly Bot[];
+        /** Every task the host holds, archived ones included. */
+        readonly tasks: readonly Task[];
+        /** The caller's own memberships; order is by `orderKey`, not array position. */
+        readonly taskMemberships: readonly TaskMembership[];
         readonly connection: GroupsState["connection"];
         /** The published group projection, rebuilt by `publishGroups`. */
         readonly groups: ReturnType<typeof projectGroups>;
         /** The published bot projection, rebuilt beside `groups`. */
         readonly botGroups: ReturnType<typeof projectBots>;
+        /** The published task projection, rebuilt beside `groups`. */
+        readonly taskGroups: ReturnType<typeof projectTasks>;
     }
 
     const groupsStore = createStore<GroupsStoreState>()(() => ({
@@ -224,6 +350,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         connection: "connecting",
         groups: [],
         projects: [],
+        taskGroups: [],
+        taskMemberships: [],
+        tasks: [],
         workspaces: [],
     }));
 
@@ -238,6 +367,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         compatibility = next;
         options.onCompatibilityChange?.(next);
     };
+
+    // The daemon process the managed feed last named. It outlives any one
+    // `updates()` iterator, so a replacement that happened while the feed was
+    // being reopened is still recognized as one.
+    let daemonId: string | undefined;
+    // Set when the process answering may no longer be the one whose health
+    // admitted this connection. Until its own health is read and found
+    // compatible and ready, nothing is taken from it: no bootstrap, no feed.
+    let daemonVerify = false;
 
     const reportMutationFailure = (
         action: MutationAction,
@@ -297,6 +435,47 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         sessionsComplete: config !== undefined,
     });
 
+    /**
+     * The person a task belongs to, as this connection can name them.
+     *
+     * A team task names its owner, who is resolved through the user directory
+     * like any other identity this connection renders. A team task that names
+     * nobody is left without a face rather than given the viewer's, because in
+     * a team the viewer is not everybody. A standalone daemon has one person,
+     * every task is theirs, and so it shows no owner at all: `null`.
+     */
+    const taskOwnerOf = (task: Task): TaskOwner | null => {
+        const base = endpoint.replace(/\/$/, "");
+        if (task.ownerUserId !== null) {
+            const profile = users.profiles.get(task.ownerUserId);
+            return {
+                userId: task.ownerUserId,
+                ...(profile === undefined || profile.name === "DELETED"
+                    ? {}
+                    : { name: profile.name }),
+                ...(profile?.avatar
+                    ? {
+                          avatar: {
+                              url: `${base}/v0/users/${encodeURIComponent(task.ownerUserId)}/photo`,
+                              thumbhash: profile.avatar.thumbhash,
+                          },
+                      }
+                    : {}),
+            };
+        }
+        return currentUserId === undefined ? null : {};
+    };
+
+    /** Reads the people who own tasks, so their rows can wear their faces. */
+    const taskOwnersEnsure = (tasks: readonly Task[]): void => {
+        const ids = [
+            ...new Set(
+                tasks.flatMap((task) => (task.ownerUserId === null ? [] : [task.ownerUserId])),
+            ),
+        ].filter((id) => !users.profiles.has(id));
+        if (ids.length > 0) background(users.ensure(ids));
+    };
+
     const publishGroupDeltas = (deltas: readonly GroupDelta[]): void => {
         for (const subscriber of groupSubscribers) {
             if (subscriber.closed) continue;
@@ -325,13 +504,23 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     agentDrafts,
                     agentModes,
                 ),
+                taskGroups: projectTasks(
+                    current.tasks,
+                    current.taskMemberships,
+                    current.workspaces,
+                    endpoint,
+                    daemonConfig,
+                    taskOwnerOf,
+                    agentDrafts,
+                    agentModes,
+                ),
             }));
         }
         const state = groupState();
-        const { botGroups, groups } = groupsStore.getState();
+        const { botGroups, groups, taskGroups } = groupsStore.getState();
         for (const subscriber of groupSubscribers) {
             if (subscriber.closed) continue;
-            subscriber.onChange(groups, state, botGroups);
+            subscriber.onChange(groups, state, botGroups, taskGroups);
             for (const delta of deltas) subscriber.onDelta?.(delta);
         }
     };
@@ -359,6 +548,8 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             endpoint,
             hasMore: entry.hasMore,
             messages: [...entry.messages.values()],
+            userProfiles: users.profiles,
+            currentUserId,
             intendedMode: intendedModes.get(entry.id),
             ...(entry.mode === undefined ? {} : { mode: entry.mode }),
             ...(entry.draft === undefined ? {} : { draft: entry.draft }),
@@ -373,10 +564,17 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         };
     };
 
-    const publishSession = (entry: SessionEntry): void => {
+    const publishSession = (entry: SessionEntry, force = false): void => {
+        // The connection-wide cache still owns inactive sessions, but there is
+        // nobody to consume a projected ChatStore snapshot while a session is
+        // not subscribed. In particular, do not parse/project the whole
+        // transcript for every token in a background run. Authoritative loads
+        // pass `force` so a later acquisition sees the complete cached state.
+        if (!force && entry.subscribers.size === 0) return;
         const projection = projectionOf(entry);
         if (projection === undefined) return;
         let session = projectSession(projection);
+        if (!entry.historyLoaded) session = { ...session, historyLoading: true };
         if (entry.loadingMore) session = { ...session, loadingMore: true };
         if (entry.loadMoreError !== undefined) {
             session = { ...session, loadMoreError: entry.loadMoreError };
@@ -391,6 +589,51 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             subscriber.onChange(elements, session);
             for (const delta of deltas) subscriber.onDelta?.(delta);
         }
+    };
+
+    /** Ownership is scoped to this authenticated connection, never the host's account. */
+    const viewerIdentityUpdate = (profile: Profile): void => {
+        const next = profile.userId ?? undefined;
+        // Whether there is a viewer user at all decides whether this is a team,
+        // and so whether task rows show an owner.
+        const taskOwnersChanged = next !== currentUserId;
+        if (next !== currentUserId) {
+            const previous = currentUserId;
+            currentUserId = next;
+            const affected = new Set<SessionEntry>();
+            for (const id of [previous, next]) {
+                if (id === undefined) continue;
+                for (const entry of userSessions.get(id) ?? []) affected.add(entry);
+            }
+            for (const entry of affected) {
+                if (!entry.hydrating) publishSession(entry, true);
+            }
+        }
+        if (taskOwnersChanged && config !== undefined && groupsStore.getState().tasks.length > 0)
+            publishGroups();
+    };
+
+    const reloadViewerProfile = (): Promise<void> => {
+        if (viewerProfileLoading !== undefined) return viewerProfileLoading;
+        const loading = happyAgentSyncRead(
+            rootController.signal,
+            () => client.getProfile({ signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS) }),
+            (error) =>
+                reportDebug({
+                    detail: errorDetail(error),
+                    level: "warning",
+                    message: "Current user profile read failed; retrying",
+                    source: "sync",
+                }),
+        )
+            .then(({ profile }) => {
+                if (!closed) viewerIdentityUpdate(profile);
+            })
+            .finally(() => {
+                if (viewerProfileLoading === loading) viewerProfileLoading = undefined;
+            });
+        viewerProfileLoading = loading;
+        return loading;
     };
 
     /** Preserve the context measurement that belongs to a concrete settled run. */
@@ -433,8 +676,19 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     const botOf = (botId: string): Bot | undefined =>
         groupsStore.getState().bots.find((candidate) => candidate.id === botId);
 
+    const taskOf = (taskId: string): Task | undefined =>
+        groupsStore.getState().tasks.find((candidate) => candidate.id === taskId);
+
     const agentOf = (agentId: string): Agent | undefined => {
-        const { bots, projects, workspaces } = groupsStore.getState();
+        const { bots, projects, tasks, workspaces } = groupsStore.getState();
+        for (const bot of bots) {
+            const agent = agentTreeFind(bot.agent, agentId);
+            if (agent !== undefined) return agent;
+        }
+        for (const task of tasks) {
+            const agent = agentTreeFind(task.agent, agentId);
+            if (agent !== undefined) return agent;
+        }
         for (const workspace of workspaces) {
             const agent = workspace.agents.find((candidate) => candidate.id === agentId);
             if (agent !== undefined) return agent;
@@ -442,11 +696,6 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         for (const project of projects) {
             const agent = project.agents.find((candidate) => candidate.id === agentId);
             if (agent !== undefined) return agent;
-        }
-        // A bot carries its one agent itself, and on a daemon that lists the
-        // bot's workspace without its agents this is the only copy there is.
-        for (const bot of bots) {
-            if (bot.agent.id === agentId) return bot.agent;
         }
         const materialized = sessions.get(agentId)?.agent;
         if (materialized !== undefined) return materialized;
@@ -482,7 +731,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             // A bot's row is drawn from the agent embedded in the bot, so the
             // same versioned agent event has to reach that copy too — otherwise
             // the bot keeps reporting the status it was created with.
-            bots: current.bots.map((bot) => (bot.agent.id === agent.id ? { ...bot, agent } : bot)),
+            bots: current.bots.map((bot) => {
+                const next = agentTreeUpdate(bot.agent, agent);
+                return next === bot.agent ? bot : { ...bot, agent: next };
+            }),
+            // A task's row is drawn from its embedded agent the same way.
+            tasks: current.tasks.map((task) => {
+                const next = agentTreeUpdate(task.agent, agent);
+                return next === task.agent ? task : { ...task, agent: next };
+            }),
         }));
         const entry = sessions.get(agent.id);
         if (entry !== undefined) {
@@ -541,6 +798,11 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             draftSaveCancel(agentId);
             if (draftRevisions.get(agentId) === pending.revision) draftRevisions.delete(agentId);
         }
+        const held = heldDraftSaves.get(agentId);
+        if (held !== undefined && draft.updatedAt !== null && draft.updatedAt >= held.updatedAt) {
+            heldDraftSaves.delete(agentId);
+            if (draftRevisions.get(agentId) === held.revision) draftRevisions.delete(agentId);
+        }
         replaceDraft(agentId, draft);
         return true;
     };
@@ -550,7 +812,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             .getState()
             .projects.find((candidate) => candidate.id === project.id);
         if (!shouldAdoptVersion(current, project)) return false;
-        groupsStore.setState((state) => ({ projects: replaceResource(state.projects, project) }));
+        groupsStore.setState((state) => ({
+            projects: ownerResourceReplace(state.projects, project),
+        }));
         publishGroups(deltas);
         return true;
     };
@@ -558,7 +822,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     const adoptWorkspace = (workspace: Workspace, deltas: readonly GroupDelta[] = []): boolean => {
         if (!shouldAdoptVersion(workspaceOf(workspace.id), workspace)) return false;
         groupsStore.setState((state) => ({
-            workspaces: replaceResource(state.workspaces, workspace),
+            workspaces: ownerResourceReplace(state.workspaces, workspace),
         }));
         publishGroups(deltas);
         return true;
@@ -699,11 +963,12 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             entry.historyLoaded = true;
             entry.reconcileRequired = false;
             entry.loadCompletedRevision = entry.loadRequestedRevision;
-            publishSession(entry);
+            publishSession(entry, true);
             return Promise.resolve();
         }
         entry.hydrating = true;
         const revision = entry.loadRequestedRevision;
+        const draftRevision = draftRevisions.get(entry.id);
         const signal = deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS);
         const loading = Promise.all([
             client.getMessages(
@@ -711,36 +976,54 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 { limit: DEFAULT_HISTORY_LIMIT, omitToolData: false },
                 { signal },
             ),
-            client.getAgentBootstrap(entry.id, { signal }),
+            client.getAgentBootstrap(entry.id, { signal }).then((bootstrap) => {
+                if (closed || entry.loading !== loading || sessions.get(entry.id) !== entry)
+                    return bootstrap;
+                // The controls need the session's own selection, not its history.
+                // Keep local draft edits made while this snapshot was in flight.
+                entry.agent = bootstrap.agent;
+                entry.workspace = workspaceOf(bootstrap.agent.workspaceId);
+                agentModes.set(entry.id, bootstrap.mode);
+                entry.mode = bootstrap.mode;
+                if (draftRevisions.get(entry.id) === draftRevision && !intendedModes.has(entry.id))
+                    adoptDraft(entry.id, bootstrap.draft);
+                entry.draft = agentDrafts.get(entry.id);
+                publishSession(entry, true);
+                return bootstrap;
+            }),
             optional(() => client.getAgentActivity(entry.id, { signal })),
             optional(() => client.getPendingQuestion(entry.id, { signal })),
         ])
-            .then(([history, bootstrap, activity, question]) => {
+            .then(async ([history, bootstrap, activity, question]) => {
+                await ensureMessageUsers([
+                    ...history.runs.flatMap((run) => run.messages),
+                    ...bootstrap.pending,
+                ]);
                 if (closed) return;
                 entry.agent = bootstrap.agent;
                 entry.workspace = workspaceOf(bootstrap.agent.workspaceId);
                 entry.context = bootstrap.context;
-                entry.draft = bootstrap.draft;
-                entry.mode = bootstrap.mode;
+                entry.draft = agentDrafts.get(entry.id);
+                entry.mode = agentModes.get(entry.id);
                 entry.slashCommands = bootstrap.slashCommands;
                 entry.usage = bootstrap.usage;
-                agentDrafts.set(entry.id, bootstrap.draft);
-                agentModes.set(entry.id, bootstrap.mode);
                 const pendingSends = [...entry.messages.values()].filter(
                     (message) => message.pendingSend,
                 );
                 entry.messages.clear();
+                clearUserIndex(entry);
                 entry.messageBlockOffsets.clear();
                 entry.runs.clear();
                 entry.runsOrdered = undefined;
                 entry.corruptedMessageIds.clear();
-                ingestHistory(entry, history.runs, bootstrap.pending);
+                ingestSessionHistory(entry, history.runs, bootstrap.pending);
                 captureLatestIdleRunFinalContext(entry);
                 for (const message of pendingSends) {
                     if (entry.messages.has(message.message.id)) {
                         sendConfirmations.get(message.message.id)?.();
                     } else {
                         entry.messages.set(message.message.id, message);
+                        indexMessageUser(entry, message.message);
                     }
                 }
                 entry.hasMore = history.hasMore;
@@ -764,7 +1047,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     entry.bufferedEvents.splice(0),
                 );
                 replaceAgent(bootstrap.agent);
-                publishSession(entry);
+                publishSession(entry, true);
                 for (const event of buffered) applyEventNow(event);
                 drainHydrationBroadcastEvents();
                 if (
@@ -785,6 +1068,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 scheduleSessionLoadRetry(entry, error);
             })
             .finally(() => {
+                entry.inactiveRefreshPending = false;
                 if (entry.loading === loading) {
                     entry.loading = undefined;
                     if (
@@ -813,6 +1097,34 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         return requestSessionLoad(entry);
     };
 
+    /**
+     * An inactive session deliberately does not assemble a live assistant
+     * message. `message.updated` is a provider-segment snapshot, not a reliable
+     * cumulative transcript, so retaining it after skipping deltas would lose or
+     * duplicate text. Marking the cache stale lets the next authoritative load
+     * repair it without doing work for every streaming event.
+     */
+    const markInactiveTranscriptStale = (entry: SessionEntry): void => {
+        entry.reconcileRequired = true;
+    };
+
+    /** Refresh an inactive cache once, at a non-streaming run boundary. */
+    const refreshInactiveTranscript = (entry: SessionEntry): void => {
+        if (entry.subscribers.size > 0) return;
+        markInactiveTranscriptStale(entry);
+        if (entry.loading !== undefined) {
+            // The in-flight snapshot may have started before the run settled.
+            // Ask its finally-block for one follow-up load after buffered events
+            // have been applied, while still coalescing all intervening events.
+            if (!entry.inactiveRefreshPending) {
+                entry.inactiveRefreshPending = true;
+                entry.loadRequestedRevision += 1;
+            }
+            return;
+        }
+        background(requestSessionLoad(entry));
+    };
+
     const resync = (reconcileSessions: boolean): Promise<void> => {
         if (resyncTask !== undefined) return resyncTask;
         reportDebug({
@@ -822,9 +1134,13 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             source: "sync",
         });
         const running = (async (): Promise<void> => {
-            const bootstrap = await client.getDesktopBootstrap({
+            const bootstrap: DesktopBootstrapWithArchivedAgents = await client.getDesktopBootstrap({
                 signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS),
             });
+            if (rootController.signal.aborted) return;
+            viewerIdentityUpdate(bootstrap.profile);
+            if (reconcileSessions) await users.refresh();
+            sync.writer.bootstrapReceived(bootstrap);
             const watchedGit = await optional(() =>
                 client.watchGit(
                     {
@@ -837,16 +1153,40 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 ),
             );
             config = bootstrap.config;
+            // The daemon lists a project's or workspace's active agents on the owner and its
+            // most recently archived ones apart, in `archivedAgents`; a daemon too old to carry
+            // that field remembers no archived agent for this connection at all.
+            const owners = archivedAgentsMerge(
+                bootstrap.projects,
+                bootstrap.workspaces,
+                bootstrap.archivedAgents ?? [],
+            );
             groupsStore.setState({
                 // A daemon too old to know about bots omits the field entirely,
                 // which is an empty catalog rather than an unknown one.
                 bots: bootstrap.bots ?? [],
-                projects: bootstrap.projects,
-                workspaces: bootstrap.workspaces,
+                projects: owners.projects,
+                // The same for tasks: absent together on a daemon that predates them.
+                taskMemberships: bootstrap.taskMemberships ?? [],
+                tasks: bootstrap.tasks ?? [],
+                workspaces: owners.workspaces,
             });
-            gitStates.clear();
-            for (const [workspaceId, git] of Object.entries(watchedGit?.snapshots ?? {})) {
-                gitStates.set(workspaceId, git);
+            taskOwnersEnsure(bootstrap.tasks ?? []);
+            const gitWorkspaceIds = new Set(
+                activeGitWorkspaceIds(bootstrap.projects, bootstrap.workspaces),
+            );
+            for (const workspaceId of gitStates.keys()) {
+                if (!gitWorkspaceIds.has(workspaceId)) gitStates.delete(workspaceId);
+            }
+            for (const workspaceId of gitWorkspaceIds) {
+                const previous = gitStates.get(workspaceId);
+                const git = watchedGit?.snapshots[workspaceId];
+                if (git !== undefined) {
+                    gitStates.set(workspaceId, gitSnapshotStateUpdate(previous, git));
+                } else if (previous !== undefined) {
+                    // A reconnecting watch can fail before the daemon has a fresh scan.
+                    gitStates.set(workspaceId, { ...previous, invalidated: true });
+                }
             }
             advanceCursor(bootstrap.cursor);
             for (const entry of sessions.values()) {
@@ -857,8 +1197,8 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 }
             }
             const projectedProjects = projectGroups(
-                bootstrap.projects,
-                bootstrap.workspaces,
+                owners.projects,
+                owners.workspaces,
                 endpoint,
                 config,
                 gitStates,
@@ -955,8 +1295,13 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         let changed = false;
         for (const [workspaceId, git] of Object.entries(watchedGit.snapshots)) {
             const current = gitStates.get(workspaceId);
-            if (current !== undefined && current.scannedAt >= git.scannedAt) continue;
-            gitStates.set(workspaceId, git);
+            if (
+                current !== undefined &&
+                !current.invalidated &&
+                current.current.scannedAt >= git.scannedAt
+            )
+                continue;
+            gitStates.set(workspaceId, gitSnapshotStateUpdate(gitStates.get(workspaceId), git));
             groupsStore.setState((state) => ({
                 workspaces: state.workspaces.map((workspace) =>
                     workspace.id === workspaceId ? { ...workspace, git: git.facts } : workspace,
@@ -1003,6 +1348,97 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     // bootstrap plus every materialized conversation snapshot.
     const refetchResource = (refetch: Promise<void>): void => background(refetch);
 
+    // A busy agent emits a steady stream of versioned updates, and every one of
+    // them misses while its repair read is outstanding. Keep one read per agent
+    // in flight and follow it with exactly one more when events arrived
+    // meanwhile, so a slow connection cannot pile up a request per event.
+    const agentRefetches = new Map<string, { again: boolean }>();
+    // Agents whose full read found nowhere to land: no loaded workspace,
+    // project, bot, or open session carries them. Reading them again on every
+    // update would never change that, so their updates are ignored until
+    // something that does carry them (a snapshot, a session, a parent's
+    // activity) makes them known again.
+    const untrackedAgents = new Set<string>();
+
+    const refetchAgent = (agentId: string): void => {
+        const running = agentRefetches.get(agentId);
+        if (running !== undefined) {
+            running.again = true;
+            return;
+        }
+        const refetch = { again: false };
+        agentRefetches.set(agentId, refetch);
+        const read = async (): Promise<void> => {
+            do {
+                refetch.again = false;
+                const { agent } = await client.getAgent(agentId, {
+                    signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS),
+                });
+                const latest = agentOf(agent.id);
+                if (latest === undefined || latest.version.localeCompare(agent.version) <= 0) {
+                    replaceAgent(agent);
+                }
+                if (agentOf(agent.id) === undefined) {
+                    untrackedAgents.add(agent.id);
+                    return;
+                }
+            } while (refetch.again);
+        };
+        refetchResource(read().finally(() => agentRefetches.delete(agentId)));
+    };
+
+    /**
+     * Reads one task whole and adopts it with the caller's membership. It is
+     * how a task known only from an event learns whether the caller may
+     * archive it, and how a broken version chain is repaired.
+     */
+    const taskRefetch = (taskId: string): void =>
+        refetchResource(
+            client
+                .getTask(taskId, { signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS) })
+                .then(taskResponseAdopt),
+        );
+
+    /** Adopts a task route's answer: the task, and the caller's place in it or none. */
+    const taskResponseAdopt = ({
+        task,
+        membership,
+    }: {
+        readonly task: Task;
+        readonly membership: TaskMembership | null;
+    }): void => {
+        const latest = taskOf(task.id);
+        const adoptTask =
+            latest === undefined ||
+            latest.version.localeCompare(task.version) <= 0 ||
+            (latest.canArchive === undefined && task.canArchive !== undefined);
+        groupsStore.setState((state) => ({
+            ...(adoptTask ? { tasks: replaceResource(state.tasks, task) } : {}),
+            taskMemberships:
+                membership === null
+                    ? state.taskMemberships.filter((entry) => entry.taskId !== task.id)
+                    : taskMembershipsReplace(state.taskMemberships, membership),
+        }));
+        taskOwnersEnsure([task]);
+        publishGroups();
+    };
+
+    const taskMembershipAdopt = (membership: TaskMembership): void => {
+        groupsStore.setState((state) => ({
+            taskMemberships: taskMembershipsReplace(state.taskMemberships, membership),
+        }));
+        publishGroups();
+    };
+
+    const taskMembershipRemove = (taskId: string): void => {
+        if (!groupsStore.getState().taskMemberships.some((entry) => entry.taskId === taskId))
+            return;
+        groupsStore.setState((state) => ({
+            taskMemberships: state.taskMemberships.filter((entry) => entry.taskId !== taskId),
+        }));
+        publishGroups();
+    };
+
     const reloadConfig = async (): Promise<void> => {
         const response = await client.getConfig({
             signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS),
@@ -1039,7 +1475,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             })
                             .then(({ project }) => {
                                 groupsStore.setState((state) => ({
-                                    projects: replaceResource(state.projects, project),
+                                    projects: ownerResourceReplace(state.projects, project),
                                 }));
                                 publishGroups();
                             }),
@@ -1061,7 +1497,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                                     latest.version.localeCompare(project.version) <= 0
                                 ) {
                                     groupsStore.setState((state) => ({
-                                        projects: replaceResource(state.projects, project),
+                                        projects: ownerResourceReplace(state.projects, project),
                                     }));
                                     publishGroups();
                                 }
@@ -1070,7 +1506,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     return;
                 }
                 groupsStore.setState((state) => ({
-                    projects: replaceResource(state.projects, {
+                    projects: ownerResourceReplace(state.projects, {
                         ...applyChanges(current, event.payload.changes),
                         version: event.payload.version,
                     }),
@@ -1138,6 +1574,51 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 publishGroups();
                 return;
             }
+            case "task.created":
+                // The event carries no `canArchive`: that answer is the caller's
+                // own and only the task route states it. The task is listed at
+                // once and read whole for the rest.
+                groupsStore.setState((state) => {
+                    const known = state.tasks.find(
+                        (candidate) => candidate.id === event.payload.task.id,
+                    )?.canArchive;
+                    return {
+                        tasks: replaceResource(
+                            state.tasks,
+                            known === undefined
+                                ? event.payload.task
+                                : { ...event.payload.task, canArchive: known },
+                        ),
+                    };
+                });
+                taskOwnersEnsure([event.payload.task]);
+                publishGroups();
+                taskRefetch(event.payload.task.id);
+                return;
+            case "task.updated": {
+                const current = taskOf(event.payload.taskId);
+                if (current === undefined || current.version !== event.payload.previousVersion) {
+                    taskRefetch(event.payload.taskId);
+                    return;
+                }
+                const updated: Task = {
+                    ...applyChanges(current, event.payload.changes),
+                    version: event.payload.version,
+                };
+                groupsStore.setState((state) => ({ tasks: replaceResource(state.tasks, updated) }));
+                taskOwnersEnsure([updated]);
+                publishGroups();
+                return;
+            }
+            case "task.joined":
+            case "task.reordered":
+                taskMembershipAdopt(event.payload.membership);
+                if (taskOf(event.payload.membership.taskId) === undefined)
+                    taskRefetch(event.payload.membership.taskId);
+                return;
+            case "task.left":
+                taskMembershipRemove(event.payload.membership.taskId);
+                return;
             case "workspace.updated": {
                 const current = workspaceOf(event.payload.workspaceId);
                 if (current === undefined) {
@@ -1148,7 +1629,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             })
                             .then(({ workspace }) => {
                                 groupsStore.setState((state) => ({
-                                    workspaces: replaceResource(state.workspaces, workspace),
+                                    workspaces: ownerResourceReplace(state.workspaces, workspace),
                                 }));
                                 publishGroups();
                             }),
@@ -1168,7 +1649,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                                     latest.version.localeCompare(workspace.version) <= 0
                                 ) {
                                     groupsStore.setState((state) => ({
-                                        workspaces: replaceResource(state.workspaces, workspace),
+                                        workspaces: ownerResourceReplace(
+                                            state.workspaces,
+                                            workspace,
+                                        ),
                                     }));
                                     publishGroups();
                                 }
@@ -1177,7 +1661,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     return;
                 }
                 groupsStore.setState((state) => ({
-                    workspaces: replaceResource(state.workspaces, {
+                    workspaces: ownerResourceReplace(state.workspaces, {
                         ...applyChanges(current, event.payload.changes),
                         version: event.payload.version,
                     }),
@@ -1192,35 +1676,14 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             case "agent.updated": {
                 const current = agentOf(event.payload.agentId);
                 if (current === undefined) {
-                    refetchResource(
-                        client
-                            .getAgent(event.payload.agentId, { signal: rootController.signal })
-                            .then(({ agent }) => {
-                                const latest = agentOf(agent.id);
-                                if (
-                                    latest === undefined ||
-                                    latest.version.localeCompare(agent.version) <= 0
-                                ) {
-                                    replaceAgent(agent);
-                                }
-                            }),
-                    );
+                    if (!untrackedAgents.has(event.payload.agentId)) {
+                        refetchAgent(event.payload.agentId);
+                    }
                     return;
                 }
+                untrackedAgents.delete(event.payload.agentId);
                 if (current.version !== event.payload.previousVersion) {
-                    refetchResource(
-                        client
-                            .getAgent(event.payload.agentId, { signal: rootController.signal })
-                            .then(({ agent }) => {
-                                const latest = agentOf(agent.id);
-                                if (
-                                    latest === undefined ||
-                                    latest.version.localeCompare(agent.version) <= 0
-                                ) {
-                                    replaceAgent(agent);
-                                }
-                            }),
-                    );
+                    refetchAgent(event.payload.agentId);
                     return;
                 }
                 replaceAgent({
@@ -1270,6 +1733,11 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             case "run.finished":
                 updateRun(event.payload.agentId, event.payload.run);
                 recoverCorruptedMessages(event.payload.agentId);
+                {
+                    const entry = sessions.get(event.payload.agentId);
+                    if (entry !== undefined && entry.subscribers.size === 0)
+                        refreshInactiveTranscript(entry);
+                }
                 if (agentOf(event.payload.agentId)?.parentAgentId === null) {
                     options.onTopLevelSessionFinished?.(event.payload.agentId);
                 }
@@ -1290,6 +1758,11 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             case "message.deleted": {
                 const entry = sessions.get(event.payload.agentId);
                 entry?.messages.delete(event.payload.messageId);
+                if (entry !== undefined) {
+                    clearUserIndex(entry);
+                    for (const message of entry.messages.values())
+                        indexMessageUser(entry, message.message);
+                }
                 entry?.messageBlockOffsets.delete(event.payload.messageId);
                 entry?.corruptedMessageIds.delete(event.payload.messageId);
                 if (entry !== undefined) publishSession(entry);
@@ -1353,7 +1826,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 return;
             case "git.updated": {
                 const { git, workspaceId } = event.payload;
-                gitStates.set(workspaceId, git);
+                const current = gitStates.get(workspaceId);
+                if (current && !current.invalidated && current.current.scannedAt >= git.scannedAt)
+                    return;
+                gitStates.set(workspaceId, gitSnapshotStateUpdate(gitStates.get(workspaceId), git));
                 groupsStore.setState((state) => ({
                     workspaces: state.workspaces.map((workspace) =>
                         workspace.id === workspaceId ? { ...workspace, git: git.facts } : workspace,
@@ -1375,6 +1851,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 return;
             }
             case "profile.updated":
+                if (event.payload.userId !== undefined) {
+                    background(users.refresh([event.payload.userId]));
+                    if (currentUserId === undefined || event.payload.userId === currentUserId) {
+                        background(reloadViewerProfile());
+                    }
+                } else {
+                    background(reloadViewerProfile());
+                }
+                return;
             case "secret.created":
             case "secret.updated":
             case "secret.attached":
@@ -1403,7 +1888,20 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         if (message.role === "user") sendConfirmations.get(message.id)?.();
         const entry = sessions.get(agentId);
         if (entry === undefined) return;
+        const current = entry.messages.get(message.id)?.message;
+        // HTTP replies and stream events can arrive independently. Acceptance
+        // is final for a message ID: a late send reply must not put it back in
+        // the pending tail after run.started or run.boundary already took it.
+        if (
+            current?.role === "user" &&
+            current.status === "accepted" &&
+            message.role === "user" &&
+            message.status === "pending"
+        ) {
+            return;
+        }
         entry.messages.set(message.id, { message, runId });
+        indexMessageUser(entry, message);
         if (message.role === "user") {
             entry.mode = message.mode;
             agentModes.set(agentId, message.mode);
@@ -1418,6 +1916,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
 
     const updateMessageSnapshot = (agentId: string, message: Message, runId: string): void => {
         const entry = sessions.get(agentId);
+        if (entry !== undefined && entry.subscribers.size === 0 && message.role === "agent") {
+            // There is no reliable wire-level distinction between a complete
+            // assistant transcript and the current provider segment. Without
+            // the deltas that precede it, merging this snapshot would silently
+            // lose or duplicate earlier segments. The run boundary refreshes
+            // the cache from authoritative history instead.
+            markInactiveTranscriptStale(entry);
+            return;
+        }
         const current = entry?.messages.get(message.id);
         if (
             current?.message.role === "agent" &&
@@ -1449,6 +1956,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
 
     const createMessage = (agentId: string, message: Message, runId: string | null): void => {
         const entry = sessions.get(agentId);
+        if (entry !== undefined && entry.subscribers.size === 0 && message.role === "agent") {
+            markInactiveTranscriptStale(entry);
+            return;
+        }
         const current = entry?.messages.get(message.id);
         if (current !== undefined) {
             /*
@@ -1495,6 +2006,13 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     ): void => {
         const entry = sessions.get(payload.agentId);
         if (entry === undefined) return;
+        if (entry.subscribers.size === 0) {
+            // Token events are intentionally not assembled for a background
+            // session. A single authoritative history read at run completion
+            // gives it every message without the per-token projection cost.
+            markInactiveTranscriptStale(entry);
+            return;
+        }
         if (entry.corruptedMessageIds.has(payload.messageId)) return;
         const current = entry?.messages.get(payload.messageId);
         const blockIndex =
@@ -1531,6 +2049,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         const entry = sessions.get(agentId);
         if (entry === undefined || entry.corruptedMessageIds.size === 0) return;
         entry.reconcileRequired = true;
+        if (entry.subscribers.size === 0) return;
         background(requestSessionLoad(entry));
     };
 
@@ -1710,8 +2229,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 // Health gates startup because it is the only route guaranteed
                 // while the daemon is booting. Once the first bootstrap lands,
                 // the client's managed update feed owns reachability and
-                // reconnection.
-                if (config === undefined) {
+                // reconnection — until a different process may be answering
+                // it, which passes the same gate before anything of its is used.
+                if (config === undefined || daemonVerify) {
                     reportDebug({
                         level: "info",
                         message: "Checking Happy Agent health before managed updates",
@@ -1731,10 +2251,14 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             : "Happy Agent is not ready",
                         source: "connection",
                     });
+                    // Health is read for every new process, so this is where a
+                    // replacement that admits work again is first known.
+                    admitting = health.draining !== true && health.shuttingDown !== true;
                     const nextCompatibility = serverCompatibility(health.version);
                     reportCompatibility(nextCompatibility);
                     if (nextCompatibility.status !== "compatible" || !health.ready) {
-                        publishConnection("connecting");
+                        if (config === undefined) sync.writer.onboardingUnavailable();
+                        publishConnection(config === undefined ? "connecting" : "reconnecting");
                         reportDebug({
                             detail: debugDetail({ delayMs: reconnectMs }),
                             level: "warning",
@@ -1746,7 +2270,44 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                         continue;
                     }
                 }
+                if (config === undefined) {
+                    // Team members without a profile can read these endpoints,
+                    // but cannot read config/bootstrap or open the event stream.
+                    // Keep that authorization boundary identical for every route.
+                    // A solo Happy Agent has no such boundary: it reports a
+                    // missing profile too, but authorizes bootstrap regardless.
+                    const signal = AbortSignal.any([
+                        attemptSignal,
+                        AbortSignal.timeout(SNAPSHOT_RESPONSE_TIMEOUT_MS),
+                    ]);
+                    const [onboarding, profile] = await Promise.all([
+                        client.getOnboarding({ signal }),
+                        client.getProfile({ signal }),
+                    ]);
+                    if (attemptSignal.aborted) continue;
+                    sync.writer.onboardingReceived({ onboarding, profile: profile.profile });
+                    if (
+                        options.memberProfileRequired !== false &&
+                        !onboarding.completed &&
+                        !onboarding.steps.profile.done
+                    ) {
+                        // There is no authorized SSE channel yet. Reconcile
+                        // narrow startup state until this member can bootstrap.
+                        reconnectMs = INITIAL_RECONNECT_MS;
+                        await reconnectPause(2_000);
+                        continue;
+                    }
+                }
                 if (config === undefined) await resync(false);
+                else if (daemonVerify) {
+                    // A replacement carries none of the previous process's
+                    // journal, so everything applied so far is only as good as
+                    // a snapshot taken again. Cleared only once that snapshot
+                    // lands; a failure goes back through the gate on the
+                    // ordinary reconnect backoff.
+                    await resync(true);
+                    daemonVerify = false;
+                }
                 let reopen = false;
                 reportDebug({
                     detail: debugDetail({ after: cursor ?? null }),
@@ -1758,6 +2319,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     after: cursor,
                     signal: attemptSignal,
                 })) {
+                    if (
+                        update.kind === "event" &&
+                        (update.event.type === "message.created" ||
+                            update.event.type === "message.updated")
+                    ) {
+                        await ensureMessageUsers([update.event.payload.message]);
+                    }
+                    if (rootController.signal.aborted) return;
+                    sync.writer.updateReceived(update);
                     if (update.kind === "connected") {
                         reportDebug({
                             detail: debugDetail({ cursor: update.cursor }),
@@ -1766,6 +2336,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             source: "sse",
                         });
                         publishConnection("live");
+                        heldWritesFlush();
                         reconnectMs = INITIAL_RECONNECT_MS;
                     } else if (update.kind === "state_lost") {
                         reportDebug({
@@ -1775,35 +2346,46 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             source: "sse",
                         });
                         publishConnection("reconnecting");
-                        await resync(true);
+                        // A lost journal is also how a replacement that does
+                        // not name its process shows itself, so the process is
+                        // verified before it is reconciled.
+                        daemonVerify = true;
                         reopen = true;
                         break;
                     } else if (update.kind === "daemon_started") {
+                        // Each `updates()` iterator only compares against the
+                        // processes it saw itself; the connection remembers
+                        // across the reopen that follows a failed attempt.
+                        const replaced =
+                            update.replaced ||
+                            (daemonId !== undefined && daemonId !== update.daemonId);
+                        daemonId = update.daemonId;
                         reportDebug({
                             detail: debugDetail({
                                 cursor: update.cursor,
                                 daemonId: update.daemonId,
-                                replaced: update.replaced,
+                                replaced,
                             }),
-                            level: update.replaced ? "warning" : "info",
-                            message: update.replaced
+                            level: replaced ? "warning" : "info",
+                            message: replaced
                                 ? "A different Happy Agent process is answering; reconciling"
                                 : "Managed update feed named its Happy Agent process",
                             source: "sse",
                         });
-                        // A replacement carries none of the previous process's
-                        // journal, so everything applied so far is only as good
-                        // as a snapshot taken again.
-                        if (update.replaced) {
+                        // Nothing from a replacement is used until its own
+                        // health admits it; the gate at the top of the loop
+                        // reads that and then reconciles.
+                        if (replaced) {
                             publishConnection("reconnecting");
-                            await resync(true);
+                            daemonVerify = true;
                             reopen = true;
                             break;
                         }
                     } else if (update.kind === "draining") {
-                        // Reported rather than acted on: a draining agent still
-                        // answers and still streams, and the feed says so itself
-                        // when it finally stops.
+                        // A draining agent still answers and still streams, and
+                        // the feed says so itself when it finally stops. It no
+                        // longer admits writes, so routine ones are held.
+                        admitting = false;
                         reportDebug({
                             detail: debugDetail({
                                 cursor: update.cursor,
@@ -1854,6 +2436,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 if (rootController.signal.aborted) break;
                 publishConnection(config === undefined ? "connecting" : "reconnecting");
                 if (!retryRequested) {
+                    // An intentional restart (including a just-saved profile)
+                    // is not a failed request to display on the setup form.
+                    sync.writer.errorReceived(error);
                     reportDebug({
                         detail: errorDetail(error),
                         level: "error",
@@ -1933,10 +2518,30 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         if (sessionId !== undefined) {
             sessionMutationCounts.set(sessionId, (sessionMutationCounts.get(sessionId) ?? 0) + 1);
         }
-        void queued
-            .then((value) => {
-                if (!closed) applied?.(value);
-            })
+        const completed = queued.then((value) => {
+            if (!closed) applied?.(value);
+        });
+        const creationOutcomes =
+            action === "create_session"
+                ? sessionCreationOutcomes
+                : action === "create_workspace"
+                  ? workspaceCreationOutcomes
+                  : undefined;
+        if (creationOutcomes) {
+            creationOutcomes.set(
+                mutationId,
+                completed.then(() => undefined),
+            );
+            void creationOutcomes.get(mutationId)!.catch(() => undefined);
+            while (creationOutcomes.size > 256)
+                creationOutcomes.delete(creationOutcomes.keys().next().value!);
+        }
+        // An optimistic conversation can accept input before its backend resource
+        // exists. Sends wait for this dependency only, not the agent's work queue.
+        if (action === "create_session" && sessionId !== undefined) {
+            sessionCreations.set(sessionId, completed);
+        }
+        void completed
             .catch((error: unknown) => {
                 if (!rootController.signal.aborted) {
                     const shouldReport = rejected?.() !== false;
@@ -1954,6 +2559,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             .finally(() => {
                 if (mutationQueues.get(queueKey) === settled) mutationQueues.delete(queueKey);
                 if (sessionId !== undefined) {
+                    if (sessionCreations.get(sessionId) === completed) {
+                        sessionCreations.delete(sessionId);
+                    }
                     const pending = (sessionMutationCounts.get(sessionId) ?? 1) - 1;
                     if (pending === 0) sessionMutationCounts.delete(sessionId);
                     else sessionMutationCounts.set(sessionId, pending);
@@ -1964,21 +2572,88 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         return mutationId;
     };
 
-    const draftSave = (sessionId: string, save: DraftSave): string =>
-        mutation(
+    /**
+     * Archives or unarchives a task for everyone, guarded by the version this
+     * connection holds. The host refuses a caller it does not let archive the
+     * task, and a version someone else has already moved past; both refusals
+     * are reworded here because the host's own message names neither the task
+     * nor what to do next.
+     */
+    const taskArchivalSet = (taskId: string, archived: boolean): string => {
+        const mutationId = nextId();
+        const action = archived ? "archive_task" : "unarchive_task";
+        const verb = archived ? "archive" : "unarchive";
+        return mutation(
+            action,
+            mutationId,
+            async () => {
+                const task = taskOf(taskId);
+                if (task === undefined) throw new Error("The task is not loaded.");
+                const options = { ifMatch: task.version, mutationId, signal: deadlineSignal() };
+                try {
+                    return await (archived
+                        ? client.archiveTask(taskId, options)
+                        : client.unarchiveTask(taskId, options));
+                } catch (error) {
+                    if (error instanceof HappyAgentApiError && error.status === 403)
+                        throw new Error(
+                            `You can’t ${verb} “${task.name}”. Only its owner or the team owner can.`,
+                        );
+                    if (error instanceof HappyAgentApiError && error.status === 409) {
+                        // The version moved under us; read the task again so a
+                        // second try is made against what the host now holds.
+                        taskRefetch(taskId);
+                        throw new Error(
+                            `“${task.name}” changed while you were looking at it. Try again.`,
+                        );
+                    }
+                    throw error;
+                }
+            },
+            taskResponseAdopt,
+            undefined,
+            undefined,
+            `task:${taskId}`,
+        );
+    };
+
+    const writesHeld = (): boolean => !admitting || groupsStore.getState().connection !== "live";
+
+    /** The daemon's own refusal of a mutation because it is draining. */
+    const drainingRefusal = (error: unknown): boolean =>
+        error instanceof HappyAgentApiError && error.code === "draining";
+
+    const draftSave = (sessionId: string, save: DraftSave): string => {
+        if (writesHeld()) {
+            heldDraftSaves.set(sessionId, save);
+            return save.mutationId;
+        }
+        return mutation(
             "set_draft",
             save.mutationId,
-            () =>
-                client.saveAgentDraft(
-                    sessionId,
-                    {
-                        draft: save.draft.value,
-                        mutationId: save.mutationId,
-                        updatedAt: save.updatedAt,
-                    },
-                    { signal: rootController.signal },
-                ),
-            ({ draft: saved }) => {
+            async () => {
+                try {
+                    return await client.saveAgentDraft(
+                        sessionId,
+                        {
+                            draft: save.draft.value,
+                            mutationId: save.mutationId,
+                            updatedAt: save.updatedAt,
+                        },
+                        { signal: deadlineSignal() },
+                    );
+                } catch (error) {
+                    if (!drainingRefusal(error)) throw error;
+                    // The drain began while this was on its way. Held, with
+                    // the same idempotency key, unless a newer save already is.
+                    admitting = false;
+                    if (!heldDraftSaves.has(sessionId)) heldDraftSaves.set(sessionId, save);
+                    return undefined;
+                }
+            },
+            (response) => {
+                if (response === undefined) return;
+                const saved = response.draft;
                 if (draftRevisions.get(sessionId) !== save.revision) return;
                 draftRevisions.delete(sessionId);
                 replaceDraft(sessionId, saved);
@@ -1991,6 +2666,54 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             sessionId,
             `agent:${sessionId}`,
         );
+    };
+
+    const sessionReadMark = (sessionId: string): string => {
+        const mutationId = nextId();
+        if (writesHeld()) {
+            heldReads.add(sessionId);
+            return mutationId;
+        }
+        return mutation(
+            "mark_session_read",
+            mutationId,
+            async () => {
+                try {
+                    return await client.markAgentRead(
+                        sessionId,
+                        { mutationId },
+                        { signal: deadlineSignal() },
+                    );
+                } catch (error) {
+                    if (!drainingRefusal(error)) throw error;
+                    admitting = false;
+                    heldReads.add(sessionId);
+                    return undefined;
+                }
+            },
+            (response) => {
+                if (response !== undefined) adoptAgent(response.agent);
+            },
+            undefined,
+            sessionId,
+            `agent:${sessionId}`,
+        );
+    };
+
+    /** Sends what was held, once a daemon that admits work is live again. */
+    const heldWritesFlush = (): void => {
+        if (closed || writesHeld()) return;
+        for (const [sessionId, save] of [...heldDraftSaves]) {
+            heldDraftSaves.delete(sessionId);
+            // A newer edit is already scheduled and supersedes this one.
+            if (pendingDraftSaves.has(sessionId)) continue;
+            draftSave(sessionId, save);
+        }
+        for (const sessionId of [...heldReads]) {
+            heldReads.delete(sessionId);
+            sessionReadMark(sessionId);
+        }
+    };
 
     const draftSaveSchedule = (sessionId: string, save: DraftSave): void => {
         draftSaveCancel(sessionId);
@@ -2051,7 +2774,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                         mutationId,
                         updatedAt,
                     },
-                    { signal: rootController.signal },
+                    { signal: deadlineSignal() },
                 ),
             ({ draft: saved }) => {
                 if (draftRevisions.get(sessionId) !== revision) return;
@@ -2076,6 +2799,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
 
     return {
         compatibility: () => compatibility,
+        sync: sync.source,
         retry: retryUpdates,
         connectGroups(subscription) {
             if (closed) throw new Error("This Happy Agent connection is closed.");
@@ -2085,10 +2809,12 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 groupsStore.getState().groups,
                 groupState(),
                 groupsStore.getState().botGroups,
+                groupsStore.getState().taskGroups,
             );
             return {
                 projects: () => groupsStore.getState().groups,
                 bots: () => groupsStore.getState().botGroups,
+                tasks: () => groupsStore.getState().taskGroups,
                 state: groupState,
                 close: () => {
                     subscriber.closed = true;
@@ -2105,6 +2831,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     store: new ChatStore(subscription.sessionId),
                     subscribers: new Set(),
                     messages: new Map(),
+                    userIds: new Set(),
                     messageBlockOffsets: new Map(),
                     runs: new Map(),
                     runFinalContextTokens: new Map(),
@@ -2121,6 +2848,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     activityLoading: undefined,
                     activityRevision: 0,
                     reconcileRequired: false,
+                    inactiveRefreshPending: false,
                     corruptedMessageIds: new Set(),
                     questionRecovery: undefined,
                     slashCommands: [],
@@ -2129,12 +2857,28 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 if (known !== undefined) {
                     entry.agent = known;
                     entry.workspace = workspaceOf(known.workspaceId);
+                    entry.draft = agentDrafts.get(subscription.sessionId);
+                    entry.mode = agentModes.get(subscription.sessionId);
                 }
                 sessions.set(subscription.sessionId, entry);
             }
+            const wasInactive = entry.subscribers.size === 0;
             const subscriber: SessionSubscriber = { ...subscription, closed: false };
             entry.subscribers.add(subscriber);
-            subscriber.onChange(entry.store.elements(), entry.store.session());
+            if (
+                wasInactive &&
+                !entry.reconcileRequired &&
+                entry.agent !== undefined &&
+                config !== undefined
+            ) {
+                // Metadata can change while the session has no subscribers, so
+                // the retained store may be older even when no transcript
+                // reload is required. Re-project once on reactivation before
+                // handing the snapshot to the new reader.
+                publishSession(entry, true);
+            } else {
+                subscriber.onChange(entry.store.elements(), entry.store.session());
+            }
             void ensureSessionLoaded(entry);
             const connectedEntry = entry;
             return {
@@ -2473,26 +3217,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             );
         },
         markSessionRead(sessionId) {
-            const mutationId = nextId();
-            return mutation(
-                "mark_session_read",
-                mutationId,
-                () =>
-                    client.markAgentRead(
-                        sessionId,
-                        { mutationId },
-                        { signal: rootController.signal },
-                    ),
-                ({ agent }) => adoptAgent(agent),
-                undefined,
-                sessionId,
-                `agent:${sessionId}`,
-            );
+            return sessionReadMark(sessionId);
         },
         sendMessage(sessionId, message) {
             const mutationId = nextId();
+            const acceptance = sendAcceptanceCreate(mutationId);
+            const created = sessionCreations.get(sessionId);
             const agent = sessions.get(sessionId)?.agent ?? agentOf(sessionId);
             if (agent === undefined || config === undefined) {
+                acceptance.reject(new Error("The agent is not loaded."));
                 reportMutationFailure(
                     "send_message",
                     mutationId,
@@ -2519,11 +3252,18 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             const richContent = content.filter((block) => block.type !== "text");
             // The composer deliberately permits an image-only turn, while the
             // daemon's send contract requires non-empty display text. Happy Agent uses
-            // the image media types as the canonical display fallback.
+            // the image media types as the canonical display fallback; a tool
+            // request names the tool it asks for.
             const requestText =
                 input.text.trim().length > 0
                     ? input.text
-                    : richContent.map((block) => `[image:${block.mimeType}]`).join("");
+                    : richContent
+                          .map((block) =>
+                              block.type === "image"
+                                  ? `[image:${block.mimeType}]`
+                                  : `[tool:${block.name}]`,
+                          )
+                          .join("");
             // Always steer: a message sent mid-run interrupts the run rather
             // than waiting behind it, and on an idle agent the daemon treats
             // steer and queue identically.
@@ -2555,8 +3295,10 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             return mutation(
                 "send_message",
                 mutationId,
-                () =>
-                    sendMessageWithRetry(
+                async () => {
+                    if (created !== undefined) await created;
+                    rootController.signal.throwIfAborted();
+                    const response = await sendMessageWithRetry(
                         sessionId,
                         {
                             id: mutationId,
@@ -2566,12 +3308,16 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             mode,
                         },
                         confirmed,
-                    ),
+                    );
+                    if (response !== undefined) await ensureMessageUsers([response.message]);
+                    return response;
+                },
                 (response) => {
                     sendConfirmations.delete(mutationId);
                     if (response !== undefined) {
                         updateMessage(sessionId, response.message, response.message.runId);
                     }
+                    acceptance.accept();
                 },
                 () => {
                     sendConfirmations.delete(mutationId);
@@ -2580,15 +3326,47 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                     if (current !== undefined && message?.pendingSend) {
                         current.messages.delete(mutationId);
                         publishSession(current);
+                        acceptance.reject(
+                            new Error(
+                                "The message was not accepted. Your local draft is retained.",
+                            ),
+                        );
                         return true;
                     }
                     // The event stream or bootstrap already confirmed this ID;
                     // a lost HTTP response must not turn a delivered message
                     // into a visible failure.
+                    if (message === undefined)
+                        acceptance.reject(
+                            new Error(
+                                "Message acceptance could not be confirmed. Check the conversation before retrying.",
+                            ),
+                        );
+                    else acceptance.accept();
                     return message === undefined;
                 },
                 sessionId,
-                `agent:${sessionId}`,
+                // Each send starts independently, including while another send
+                // retries. Its mode is captured above and retries reuse its ID.
+            );
+        },
+        sendMessageConfirmed(sessionId, message) {
+            const id = this.sendMessage(sessionId, message);
+            return (
+                sendAcceptance.get(id) ??
+                Promise.reject(new Error("Message acceptance is unavailable."))
+            );
+        },
+        sessionCreationWait(sessionId) {
+            return (
+                sessionCreationOutcomes.get(sessionId) ??
+                Promise.reject(new Error("This session creation is no longer tracked."))
+            );
+        },
+        workspaceCreationWait(workspaceId) {
+            return (
+                workspaceCreationOutcomes.get(workspaceId) ??
+                Promise.reject(new Error("This workspace creation is no longer tracked."))
             );
         },
         invokeSlashCommand(sessionId, name, argumentsValue) {
@@ -2685,12 +3463,15 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             return mutation(
                 "compact_session",
                 mutationId,
-                () =>
-                    client.compactAgent(
+                async () => {
+                    const response = await client.compactAgent(
                         sessionId,
                         { mutationId },
                         { signal: rootController.signal },
-                    ),
+                    );
+                    await ensureMessageUsers([response.message]);
+                    return response;
+                },
                 ({ agent, message, run }) => {
                     adoptAgent(agent);
                     const entry = sessions.get(sessionId);
@@ -2783,12 +3564,12 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                             ),
                             mutationId,
                         },
-                        { signal: rootController.signal },
+                        { signal: deadlineSignal() },
                     ),
                 ({ question }) => updateQuestion(sessionId, question),
                 undefined,
                 sessionId,
-                `agent:${sessionId}`,
+                // A human answer must not wait behind unrelated agent work.
             );
         },
         setSessionArchived(sessionId, archived) {
@@ -2829,21 +3610,74 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         renameGroup(target, name) {
             return renameGroup(target, name);
         },
-        async createBot(name) {
-            // One id for the whole attempt: the daemon takes it as the bot's
-            // own id and as the mutation key, so a request repeated after a
-            // dropped answer settles on the bot that was already made.
+        createBot(name) {
+            // All three identities are named here and handed to the daemon,
+            // which takes them as the bot's own. The bot id doubles as the
+            // mutation key, so a request repeated after a dropped answer
+            // settles on the bot that was already made rather than a second.
             const botId = nextId();
-            const { bot } = await client.createBot(
-                { id: botId, mutationId: botId, name },
-                { signal: rootController.signal },
+            const workspaceId = nextId();
+            const agentId = nextId();
+            const bot = (async () => {
+                const { bot } = await client.createBot(
+                    {
+                        agentId,
+                        id: botId,
+                        mutationId: botId,
+                        // Left out rather than sent blank: the daemon reads an
+                        // absent name as "name it from the first message", and
+                        // an empty string as a name it must refuse.
+                        ...(name === undefined ? {} : { name }),
+                        workspaceId,
+                    },
+                    { signal: rootController.signal },
+                );
+                groupsStore.setState((state) => ({ bots: replaceResource(state.bots, bot) }));
+                // The same delta `bot.created` publishes. The event will arrive
+                // too and land on the identical record; announcing it here is
+                // what puts the bot in the catalog for the caller that is about
+                // to open it.
+                publishGroups([{ type: "bot_added", botId: bot.id, workspaceId: bot.workspaceId }]);
+                return bot;
+            })();
+            return { agentId, bot, botId, workspaceId };
+        },
+        setBotAvatar(botId, image) {
+            const mutationId = nextId();
+            const bot = botOf(botId);
+            if (bot === undefined) {
+                return mutation(
+                    "set_bot_avatar",
+                    mutationId,
+                    () => Promise.reject(new Error("The bot is not loaded.")),
+                    undefined,
+                    undefined,
+                    undefined,
+                    `bot:${botId}`,
+                );
+            }
+            return mutation(
+                "set_bot_avatar",
+                mutationId,
+                () =>
+                    client.setBotAvatar(
+                        botId,
+                        { contentType: image.contentType, data: image.data },
+                        {
+                            ifMatch: botOf(botId)?.version ?? bot.version,
+                            signal: rootController.signal,
+                        },
+                    ),
+                ({ bot: updated }) => {
+                    groupsStore.setState((state) => ({
+                        bots: replaceResource(state.bots, updated),
+                    }));
+                    publishGroups();
+                },
+                undefined,
+                undefined,
+                `bot:${botId}`,
             );
-            groupsStore.setState((state) => ({ bots: replaceResource(state.bots, bot) }));
-            // The same delta `bot.created` publishes. The event will arrive too
-            // and land on the identical record; announcing it here is what puts
-            // the bot in the catalog for the caller that is about to open it.
-            publishGroups([{ type: "bot_added", botId: bot.id, workspaceId: bot.workspaceId }]);
-            return bot;
         },
         archiveBot(botId) {
             const mutationId = nextId();
@@ -2914,6 +3748,118 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 undefined,
                 undefined,
                 `bot:${botId}`,
+            );
+        },
+        joinTask(taskId) {
+            const mutationId = nextId();
+            return mutation(
+                "join_task",
+                mutationId,
+                () =>
+                    client.joinTask(taskId, {
+                        mutationId,
+                        signal: deadlineSignal(),
+                    }),
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
+            );
+        },
+        leaveTask(taskId) {
+            const mutationId = nextId();
+            return mutation(
+                "leave_task",
+                mutationId,
+                () =>
+                    client.leaveTask(taskId, {
+                        mutationId,
+                        signal: deadlineSignal(),
+                    }),
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
+            );
+        },
+        reorderTask(taskId, afterId) {
+            const mutationId = nextId();
+            return mutation(
+                "reorder_task",
+                mutationId,
+                () =>
+                    client.reorderTask(
+                        taskId,
+                        { afterId, mutationId },
+                        { signal: deadlineSignal() },
+                    ),
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
+            );
+        },
+        archiveTask(taskId) {
+            return taskArchivalSet(taskId, true);
+        },
+        unarchiveTask(taskId) {
+            return taskArchivalSet(taskId, false);
+        },
+        createTask(name) {
+            // As with a bot, all three identities are named here, and the task
+            // id doubles as the mutation key so a request repeated after a
+            // dropped answer settles on the task already made.
+            const taskId = nextId();
+            const workspaceId = nextId();
+            const agentId = nextId();
+            const task = (async () => {
+                const response = await client.createTask(
+                    {
+                        agentId,
+                        id: taskId,
+                        mutationId: taskId,
+                        // Left out rather than sent blank: an absent name is
+                        // what asks the host to name it from the first message.
+                        ...(name === undefined ? {} : { name }),
+                        workspaceId,
+                    },
+                    { signal: rootController.signal },
+                );
+                // The task and the caller's place at the top of their list,
+                // adopted now so the caller about to open it finds it listed.
+                taskResponseAdopt(response);
+                return response.task;
+            })();
+            return { agentId, task, taskId, workspaceId };
+        },
+        renameTask(taskId, name) {
+            const mutationId = nextId();
+            return mutation(
+                "rename_task",
+                mutationId,
+                async () => {
+                    const task = taskOf(taskId);
+                    if (task === undefined) throw new Error("The task is not loaded.");
+                    try {
+                        return await client.renameTask(
+                            taskId,
+                            { mutationId, name },
+                            { ifMatch: task.version, signal: deadlineSignal() },
+                        );
+                    } catch (error) {
+                        if (error instanceof HappyAgentApiError && error.status === 409) {
+                            taskRefetch(taskId);
+                            throw new Error(
+                                `“${task.name}” changed while you were renaming it. Try again.`,
+                            );
+                        }
+                        throw error;
+                    }
+                },
+                taskResponseAdopt,
+                undefined,
+                undefined,
+                `task:${taskId}`,
             );
         },
         reorderProject(projectId, afterId) {
@@ -3003,6 +3949,23 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 `agent:${sessionId}`,
             );
         },
+        reorderSubtask(sessionId, afterId) {
+            const mutationId = nextId();
+            return mutation(
+                "reorder_subtask",
+                mutationId,
+                () =>
+                    client.reorderSubtask(
+                        sessionId,
+                        { afterId, mutationId },
+                        { signal: rootController.signal },
+                    ),
+                ({ agent }) => adoptAgent(agent),
+                undefined,
+                sessionId,
+                `agent:${sessionId}`,
+            );
+        },
         close() {
             if (closed) return;
             closed = true;
@@ -3012,6 +3975,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 source: "connection",
             });
             rootController.abort();
+            sync.writer.close();
             updatesAttemptController?.abort();
             retryWake?.();
             retryWake = undefined;
@@ -3021,12 +3985,14 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             groupSubscribers.clear();
             for (const entry of sessions.values()) entry.subscribers.clear();
             sessions.clear();
+            userSessions.clear();
             intendedModes.clear();
             agentModes.clear();
             agentDrafts.clear();
             sendConfirmations.clear();
             draftRevisions.clear();
             mutationQueues.clear();
+            sessionCreations.clear();
             sessionMutationCounts.clear();
             processOwners.clear();
             hydrationBroadcastEvents.length = 0;
@@ -3048,7 +4014,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 { before: token, limit: DEFAULT_HISTORY_LIMIT, omitToolData: false },
                 { signal: deadlineSignal(SNAPSHOT_RESPONSE_TIMEOUT_MS) },
             );
-            ingestHistory(entry, page.runs, []);
+            await ensureMessageUsers(page.runs.flatMap((run) => run.messages));
+            if (closed) return;
+            ingestSessionHistory(entry, page.runs, []);
             entry.hasMore = page.hasMore;
         } catch (error) {
             entry.loadMoreError = error instanceof Error ? error.message : String(error);
@@ -3060,6 +4028,29 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
 
     function renameGroup(target: GroupTarget, name: string): string {
         const mutationId = nextId();
+        if (target.kind === "bot") {
+            return mutation(
+                "rename_group",
+                mutationId,
+                () => {
+                    const bot = botOf(target.botId);
+                    if (bot === undefined) throw new Error("The bot is not loaded.");
+                    return client.renameBot(
+                        bot.id,
+                        { name, mutationId },
+                        { ifMatch: bot.version, signal: rootController.signal },
+                    );
+                },
+                ({ bot }) => {
+                    groupsStore.setState((state) => ({ bots: replaceResource(state.bots, bot) }));
+                    adoptAgent(bot.agent);
+                    publishGroups();
+                },
+                undefined,
+                undefined,
+                `bot:${target.botId}`,
+            );
+        }
         if (target.kind === "project") {
             const project = groupsStore
                 .getState()
@@ -3237,7 +4228,12 @@ function ingestHistory(
             entry.messages.set(message.id, { message, runId: run.id });
     }
     entry.runsOrdered = undefined;
-    for (const message of pending) entry.messages.set(message.id, { message, runId: null });
+    // History and pending bootstrap are independent snapshots. A message
+    // already present in accepted history cannot become pending again.
+    for (const message of pending) {
+        if (!entry.messages.has(message.id))
+            entry.messages.set(message.id, { message, runId: null });
+    }
 }
 
 function resolveWorkspaceId(
@@ -3305,6 +4301,24 @@ function activeGitWorkspaceIds(
                 .map((workspace) => workspace.id),
         ]),
     ];
+}
+
+/**
+ * The caller's memberships with one replaced or added. Order is carried by the
+ * membership's own `orderKey`, so the array position means nothing.
+ */
+function taskMembershipsReplace(
+    memberships: readonly TaskMembership[],
+    membership: TaskMembership,
+): readonly TaskMembership[] {
+    const index = memberships.findIndex((entry) => entry.taskId === membership.taskId);
+    if (index < 0) return [...memberships, membership];
+    const current = memberships[index]!;
+    if (current.orderKey === membership.orderKey && current.joinedAt === membership.joinedAt)
+        return memberships;
+    const next = [...memberships];
+    next[index] = membership;
+    return next;
 }
 
 function agentIdOfEvent(event: HappyAgentEvent): string | undefined {

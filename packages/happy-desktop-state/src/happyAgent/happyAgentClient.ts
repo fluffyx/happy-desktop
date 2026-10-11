@@ -4,6 +4,10 @@ import type {
 } from "../modules/terminal/terminalState.js";
 import type { HappyAgentClient } from "@slopus/happy-agent-client";
 import { happyAgentProjectAddError } from "./happyAgentProjectRegistration.js";
+import {
+    happyAgentAgentIdentitySourceCreate,
+    type HappyAgentAgentIdentitySource,
+} from "./happyAgentAgentIdentities.js";
 import type { MutationRejectedDelta } from "../happyAgentConnection/index.js";
 import type { HappyAgentConnection } from "../happyAgentConnection/index.js";
 import {
@@ -92,18 +96,8 @@ import {
     type HappyAgentCloudHost,
     type HappyAgentCloudStore,
 } from "./happyAgentCloudStore.js";
-import {
-    happyAgentCloudDevicesStoreCreate,
-    type HappyAgentCloudDevicesStore,
-} from "./happyAgentCloudDevicesStore.js";
-import {
-    happyAgentSocialStoreCreate,
-    type HappyAgentSocialStore,
-} from "./happyAgentSocialStore.js";
-import {
-    happyAgentSocialJoinStoreCreate,
-    type HappyAgentSocialJoinStore,
-} from "./happyAgentSocialJoinStore.js";
+import { happyAgentTeamsStoreCreate, type HappyAgentTeamsStore } from "./happyAgentTeamsStore.js";
+import { happyAgentArtifactsCreate, type HappyAgentArtifacts } from "../artifacts/artifacts.js";
 
 /** A disposable view lease on one retained session chat store. */
 export interface HappyAgentChatHandle {
@@ -127,7 +121,7 @@ export interface HappyAgentWorkspaceClient {
      * read and write the one document the host persists.
      */
     readonly memory: HappyAgentWorkspaceMemoryStore;
-    /** Loads (once) and returns the model catalog; cached for the client's lifetime. */
+    /** Loads the model catalog once, then answers with the current one `models` follows. */
     catalogRead(): Promise<HappyAgentModelCatalog>;
     /** The single session-list store; materialized on first access. */
     sessionList(): HappyAgentSessionListStore;
@@ -150,14 +144,10 @@ export interface HappyAgentWorkspaceClient {
     providerUsage(): HappyAgentProviderUsageStore | undefined;
     /** The installation-wide Happy Mobile connection, materialized on first access. */
     happyIntegration(): HappyAgentIntegrationStore;
-    /** The installation-wide Happy Social account, materialized on first access. */
+    /** The installation-wide WorkOS account, materialized on first access. */
     cloud(): HappyAgentCloudStore;
-    /** Every installation signed into that account, read while a surface watches. */
-    cloudDevices(): HappyAgentCloudDevicesStore;
-    /** Friends and requests for the enrolled Happy Social account. */
-    social(): HappyAgentSocialStore;
-    /** The ordered errand that carries this account from signed out to live. */
-    socialJoin(): HappyAgentSocialJoinStore;
+    /** WorkOS organizations shown as teams, on agents that support the organization API. */
+    teams(): HappyAgentTeamsStore;
     /** The one host-owned identity work is authored as. */
     profile(): HappyAgentProfileStore | undefined;
     /**
@@ -177,6 +167,12 @@ export interface HappyAgentWorkspaceClient {
     securityPolicy(): HappyAgentSecurityPolicyStore;
     /** Global write-only environment bundles, materialized while Settings reads them. */
     secrets(): HappyAgentSecretsStore;
+    /**
+     * This Happy Agent's published artifacts: the catalog, the list beside a
+     * chat, and the viewer. Materialized on first access; a daemon too old to
+     * have artifacts says so through each surface's availability.
+     */
+    artifacts(): HappyAgentArtifacts;
     /** Reads one bounded page of one checkout directory. */
     workspaceFileTreeRead(
         groupId: HappyAgentGroupId,
@@ -220,13 +216,18 @@ export interface HappyAgentWorkspaceClient {
      * that renders the document rather than its source.
      */
     htmlPreviewOpen(groupId: HappyAgentGroupId, path: string): Promise<string>;
-    /** Writes one existing text file back to its checkout. */
+    /**
+     * Writes one existing text file back to its checkout, answering with the
+     * identity the file now has. An accepted write is first-hand knowledge of
+     * what the file says, so the surface that wrote it does not have to read it
+     * back to find out.
+     */
     workspaceFileWrite(
         groupId: HappyAgentGroupId,
         path: string,
         content: string,
         expectedHash: string | null,
-    ): Promise<void>;
+    ): Promise<{ readonly hash: string }>;
     /** Where a file the reader chose lives on this machine, when it lives anywhere. */
     attachmentSourcePath(file: File): string | undefined;
     /**
@@ -272,10 +273,11 @@ export interface HappyAgentWorkspaceClient {
      * Acquires a retained chat store for one session. Concurrent and later
      * acquisitions share its messages and model state. Releasing the last lease
      * pauses this store's projection; the Happy Agent-wide SSE cache continues following
-     * the session and catches the store up when it is acquired again.
+     * the session and catches the store up when it is acquired again. A bounded
+     * recent-chat cache disposes released stores when the live-store limit is exceeded.
      */
     chat(sessionId: HappyAgentSessionId): Promise<HappyAgentChatHandle>;
-    /** Stops background synchronization for an archived chat without evicting its memory. */
+    /** Stops background synchronization for an archived chat; its store remains subject to the bounded cache. */
     chatArchive(sessionId: HappyAgentSessionId): void;
     /** Lets a restored chat resume background synchronization when it is acquired again. */
     chatRestore(sessionId: HappyAgentSessionId): void;
@@ -290,6 +292,14 @@ export interface HappyAgentWorkspaceClient {
 }
 
 export interface HappyAgentWorkspaceClientDeps {
+    /** The local desktop pairs Happy Mobile through the guided setup. */
+    readonly guidedMobileSetup?: boolean;
+    readonly readLegacyCli?: () => Promise<
+        import("./happyTerminalCli.js").HappyTerminalCliInspection
+    >;
+    readonly resetLegacyCli?: (
+        request: import("./happyTerminalCli.js").HappyTerminalCliResetRequest,
+    ) => Promise<import("./happyTerminalCli.js").HappyTerminalCliResetOutcome>;
     readonly client: HappyAgentClient;
     readonly cloudHost: HappyAgentCloudHost;
     readonly connection: HappyAgentConnection;
@@ -302,6 +312,12 @@ export interface HappyAgentWorkspaceClientDeps {
      */
     readonly inboxSource?: HappyAgentInboxSource;
     /**
+     * Whether this host renders a document artifact of this media type inline,
+     * such as a PDF where the window has a PDF viewer. Omitted offers every
+     * document as its file.
+     */
+    readonly artifactDocumentInline?: (mimeType: string) => boolean;
+    /**
      * Repeating read of each provider account's plan usage. Omitted leaves usage
      * unavailable rather than empty.
      */
@@ -311,6 +327,8 @@ export interface HappyAgentWorkspaceClientDeps {
     readonly profileActions?: HappyAgentProfileActions;
     /** Opens the core transcript stream for one materialized chat. */
     readonly transcriptConnect: HappyAgentChatTranscriptConnect;
+    /** Maximum number of leased chat stores that may keep a live transcript subscription. */
+    readonly maxLiveChatSubscriptions?: number;
     /** Terminal failures emitted by the shared Happy Agent mutation authority. */
     readonly connectMutationSubscribe: (
         listener: (rejection: MutationRejectedDelta) => void,
@@ -342,6 +360,7 @@ interface ChatBinding {
     store?: HappyAgentChatStore;
     activeUnsubscribe?: () => void;
     archived: boolean;
+    lastUsedOrder: number;
     /** Ignores the archived snapshot retained until an unarchive is confirmed. */
     restoring: boolean;
 }
@@ -417,29 +436,94 @@ async function changedFileRead(
 export function happyAgentWorkspaceClientCreate(
     deps: HappyAgentWorkspaceClientDeps,
 ): HappyAgentWorkspaceClient {
+    const configuredMaxLiveChatSubscriptions = deps.maxLiveChatSubscriptions;
+    const maxLiveChatSubscriptions =
+        configuredMaxLiveChatSubscriptions === undefined ||
+        !Number.isFinite(configuredMaxLiveChatSubscriptions)
+            ? 8
+            : Math.max(1, Math.floor(configuredMaxLiveChatSubscriptions));
     const models = happyAgentModelStoreCreate({
         catalogRead: async () =>
             happyAgentModelCatalogProject((await deps.client.getConfig()).config),
+        sync: deps.connection.sync,
         ...(deps.modelPreferencePersistence
             ? { preferencePersistence: deps.modelPreferencePersistence }
             : {}),
     });
     const memory = happyAgentWorkspaceMemoryStoreCreate(deps.workspaceMemoryPersistence);
     let sessionListStore: HappyAgentSessionListStore | undefined;
+    let agentIdentities: HappyAgentAgentIdentitySource | undefined;
     let inboxStore: HappyAgentInboxStore | undefined;
     let providerUsageStore: HappyAgentProviderUsageStore | undefined;
     let happyIntegrationStore: HappyAgentIntegrationStore | undefined;
     let cloudStore: HappyAgentCloudStore | undefined;
-    let cloudDevicesStore: HappyAgentCloudDevicesStore | undefined;
-    let socialStore: HappyAgentSocialStore | undefined;
-    let socialJoinStore: HappyAgentSocialJoinStore | undefined;
+    let teamsStore: HappyAgentTeamsStore | undefined;
     let profileStore: HappyAgentProfileStore | undefined;
     let providersStore: HappyAgentProvidersStore | undefined;
     let instructionsStore: HappyAgentInstructionsStore | undefined;
     let securityPolicyStore: HappyAgentSecurityPolicyStore | undefined;
     let secretsStore: HappyAgentSecretsStore | undefined;
+    let artifacts: HappyAgentArtifacts | undefined;
     const chats = new Map<HappyAgentSessionId, ChatBinding>();
     let disposed = false;
+    let chatUseOrder = 0;
+
+    /**
+     * The owner-only catalog input every materialized conversation follows:
+     * this connection's catalog, as the model store holds it now and whenever
+     * it changes.
+     */
+    const catalogFollow = (listener: (catalog: HappyAgentModelCatalog) => void): (() => void) => {
+        let last: HappyAgentModelCatalog | undefined;
+        const deliver = (): void => {
+            const snapshot = models.get();
+            if (snapshot.type !== "ready" || snapshot.catalog === last) return;
+            last = snapshot.catalog;
+            listener(snapshot.catalog);
+        };
+        const unsubscribe = models.subscribe(deliver);
+        deliver();
+        return unsubscribe;
+    };
+
+    /**
+     * A released chat has no transcript listener, but its ChatStore used to
+     * remain in this map forever (including its mutation listener and projected
+     * entries). Keep a small recent set and dispose the oldest released stores;
+     * the connection-wide session cache remains responsible for complete
+     * inactive messages.
+     */
+    const evictReleasedChats = (protectedSessionId?: HappyAgentSessionId): void => {
+        while (chats.size > maxLiveChatSubscriptions) {
+            const candidate = [...chats.entries()]
+                .filter(
+                    ([sessionId, binding]) =>
+                        sessionId !== protectedSessionId &&
+                        binding.count === 0 &&
+                        binding.store !== undefined &&
+                        !binding.store.hasPendingMutations(),
+                )
+                .sort((left, right) => left[1].lastUsedOrder - right[1].lastUsedOrder)[0];
+            if (candidate === undefined) return;
+            const [sessionId, binding] = candidate;
+            binding.activeUnsubscribe?.();
+            binding.activeUnsubscribe = undefined;
+            binding.store?.[Symbol.dispose]();
+            chats.delete(sessionId);
+        }
+    };
+
+    const admitChat = (sessionId: HappyAgentSessionId): void => {
+        evictReleasedChats(sessionId);
+        const binding = chats.get(sessionId);
+        if (binding !== undefined && binding.count > 0) return;
+        const live = [...chats.values()].filter((candidate) => candidate.count > 0).length;
+        if (live >= maxLiveChatSubscriptions) {
+            throw new Error(
+                `The maximum of ${String(maxLiveChatSubscriptions)} live chat subscriptions is already in use.`,
+            );
+        }
+    };
 
     const chatDeactivate = (binding: ChatBinding): void => {
         binding.activeUnsubscribe?.();
@@ -473,7 +557,7 @@ export function happyAgentWorkspaceClientCreate(
         archivedRead();
     };
 
-    return {
+    const workspace: HappyAgentWorkspaceClient = {
         models,
         memory,
         catalogRead: () => models.load().then((snapshot) => snapshot.catalog),
@@ -510,11 +594,12 @@ export function happyAgentWorkspaceClientCreate(
             deps.hostServices.workspaceFileBytesRead(groupId, path, signal),
         htmlPreviewOpen: (groupId, path) => deps.hostServices.htmlPreviewOpen(groupId, path),
         workspaceFileWrite: async (groupId, path, content, expectedHash) => {
-            await deps.client.writeFile(groupId, {
+            const written = await deps.client.writeFile(groupId, {
                 path,
                 content: happyAgentTextEncodeBase64(content),
                 expectedHash,
             });
+            return { hash: written.hash };
         },
         attachmentSourcePath: (file) => deps.hostServices.attachmentSourcePath(file),
         attachmentSourceReachable: (groupId, sourcePath) =>
@@ -549,6 +634,22 @@ export function happyAgentWorkspaceClientCreate(
             }
             return sessionListStore;
         },
+        artifacts() {
+            if (disposed) throw new Error("The Happy Agent client is disposed.");
+            artifacts ??= happyAgentArtifactsCreate({
+                client: deps.client,
+                sync: deps.connection.sync,
+                ...(deps.artifactDocumentInline
+                    ? { documentInline: deps.artifactDocumentInline }
+                    : {}),
+                ...(deps.hostServices.artifactSiteOpen
+                    ? {
+                          siteOpen: deps.hostServices.artifactSiteOpen.bind(deps.hostServices),
+                      }
+                    : {}),
+            });
+            return artifacts;
+        },
         inbox() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
             const source = deps.inboxSource;
@@ -575,38 +676,28 @@ export function happyAgentWorkspaceClientCreate(
         },
         happyIntegration() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
-            happyIntegrationStore ??= happyAgentIntegrationStoreCreate({ client: deps.client });
+            happyIntegrationStore ??= happyAgentIntegrationStoreCreate({
+                client: deps.client,
+                sync: deps.connection.sync,
+                guidedMobileSetup: deps.guidedMobileSetup,
+                readLegacyCli: deps.readLegacyCli,
+                resetLegacyCli: deps.resetLegacyCli,
+            });
             return happyIntegrationStore;
         },
         cloud() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
             cloudStore ??= happyAgentCloudStoreCreate({
                 client: deps.client,
+                sync: deps.connection.sync,
                 host: deps.cloudHost,
             });
             return cloudStore;
         },
-        cloudDevices() {
+        teams() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
-            cloudDevicesStore ??= happyAgentCloudDevicesStoreCreate({ client: deps.client });
-            return cloudDevicesStore;
-        },
-        social() {
-            if (disposed) throw new Error("The Happy Agent client is disposed.");
-            socialStore ??= happyAgentSocialStoreCreate({ client: deps.client });
-            return socialStore;
-        },
-        socialJoin() {
-            if (disposed) throw new Error("The Happy Agent client is disposed.");
-            cloudStore ??= happyAgentCloudStoreCreate({
-                client: deps.client,
-                host: deps.cloudHost,
-            });
-            socialJoinStore ??= happyAgentSocialJoinStoreCreate({
-                client: deps.client,
-                cloud: cloudStore,
-            });
-            return socialJoinStore;
+            teamsStore ??= happyAgentTeamsStoreCreate({ client: deps.client });
+            return teamsStore;
         },
         profile() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
@@ -643,15 +734,28 @@ export function happyAgentWorkspaceClientCreate(
         async chat(sessionId) {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
             let binding = chats.get(sessionId);
+            admitChat(sessionId);
             if (!binding) {
-                const storePromise = models.load().then(({ catalog }) => {
+                const storePromise = models.load().then((loaded) => {
+                    // The catalog may have moved on since this load answered.
+                    const latest = models.get();
                     const chatDeps: HappyAgentChatDeps = {
-                        catalog,
+                        catalog: latest.type === "ready" ? latest.catalog : loaded.catalog,
+                        catalogFollow,
                         transcriptConnect: deps.transcriptConnect,
                         connectActions: deps.connection,
                         connectMutationSubscribe: deps.connectMutationSubscribe,
                         selectionUsed: (selection) => models.selectionUsed(selection),
                         modelSelect: (current, input) => models.modelSelect(current, input),
+                        effortRemembered: (providerId, modelId) =>
+                            models.effortRemembered(providerId, modelId),
+                        // A conversation is opened through the workspace that
+                        // already lists everything, so the list is there to
+                        // name whoever writes into it.
+                        agentIdentities: (agentIdentities ??= happyAgentAgentIdentitySourceCreate({
+                            client: deps.client,
+                            list: workspace.sessionList(),
+                        })),
                         output: deps.chatOutput
                             ? (event) => deps.chatOutput?.(sessionId, event)
                             : undefined,
@@ -664,10 +768,17 @@ export function happyAgentWorkspaceClientCreate(
                     }
                     return store;
                 });
-                binding = { count: 0, storePromise, archived: false, restoring: false };
+                binding = {
+                    count: 0,
+                    storePromise,
+                    archived: false,
+                    lastUsedOrder: 0,
+                    restoring: false,
+                };
                 chats.set(sessionId, binding);
             }
             binding.count += 1;
+            binding.lastUsedOrder = ++chatUseOrder;
             chatActivate(binding);
             let store: HappyAgentChatStore;
             try {
@@ -677,6 +788,7 @@ export function happyAgentWorkspaceClientCreate(
                 if (current === binding) chats.delete(sessionId);
                 throw error;
             }
+            evictReleasedChats(sessionId);
             let released = false;
             return {
                 store,
@@ -689,6 +801,7 @@ export function happyAgentWorkspaceClientCreate(
                     if (current.count <= 0) {
                         current.count = 0;
                         chatDeactivate(current);
+                        evictReleasedChats(sessionId);
                     }
                 },
             };
@@ -733,14 +846,10 @@ export function happyAgentWorkspaceClientCreate(
             providerUsageStore = undefined;
             happyIntegrationStore?.[Symbol.dispose]();
             cloudStore?.[Symbol.dispose]();
-            cloudDevicesStore?.[Symbol.dispose]();
-            socialStore?.[Symbol.dispose]();
-            socialJoinStore?.[Symbol.dispose]();
+            teamsStore?.[Symbol.dispose]();
             happyIntegrationStore = undefined;
             cloudStore = undefined;
-            cloudDevicesStore = undefined;
-            socialStore = undefined;
-            socialJoinStore = undefined;
+            teamsStore = undefined;
             profileStore?.[Symbol.dispose]();
             profileStore = undefined;
             providersStore?.[Symbol.dispose]();
@@ -751,6 +860,8 @@ export function happyAgentWorkspaceClientCreate(
             securityPolicyStore = undefined;
             secretsStore?.[Symbol.dispose]();
             secretsStore = undefined;
+            artifacts?.[Symbol.dispose]();
+            artifacts = undefined;
             deps.catalogSource[Symbol.dispose]();
             for (const binding of chats.values()) {
                 chatDeactivate(binding);
@@ -759,4 +870,5 @@ export function happyAgentWorkspaceClientCreate(
             chats.clear();
         },
     };
+    return workspace;
 }

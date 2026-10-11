@@ -17,7 +17,7 @@ import { compactCount, changeCountLabel } from "./countText";
 import { haptic } from "./haptics";
 import { CountBadge, KeyCap } from "./Badge";
 import { Button } from "./Button";
-import { happyLogoBlackUrl } from "./assets";
+import { happyWordmarkLightUrl } from "./assets";
 import { Icon, type IconName } from "./Icon";
 import {
     commandShortcut,
@@ -37,10 +37,12 @@ export type SidebarItemAction = {
     /** Keeps the control visible in its lane while refusing an unavailable action. */
     disabled?: boolean;
     reveal?: "hover";
-    /** Command-N discovery for the current project's new-workspace control. */
+    /** Shift-Command-N discovery for the current project's new-workspace control. */
     shortcut?: KeyboardShortcut;
 };
 export type SidebarItem = {
+    /** False for parent-owned entries whose ordering cannot be changed locally. */
+    reorderable?: boolean;
     /** Marks a row as archived; the row keeps its position but paints muted. */
     archived?: boolean;
     badge?: number;
@@ -81,6 +83,15 @@ export type SidebarItem = {
      * are marks something chose, and this one is only ever a stand-in.
      */
     avatarId?: string;
+    /** Small owner/location avatars in the leading lane, rather than the row's own face. */
+    contextAvatars?: readonly {
+        id: string;
+        label: string;
+        avatarId?: string;
+        imageUrl?: string;
+        initials?: string;
+        icon?: IconName;
+    }[];
     /** The row's glyph. A `person`/`agent`/`project` row paints it inside the avatar tile. */
     icon?: IconName;
     id: string;
@@ -197,13 +208,25 @@ export type SidebarSectionAction = {
      * default because that is what a heading control has always done here.
      */
     reveal?: "hover" | "always";
+    /** The window chord that does the same thing, shown under the control on hover. */
+    shortcut?: KeyboardShortcut;
 };
 
-/** Which control in a section reported an act: its heading, or its empty state. */
-export type SidebarSectionActionSource = "heading" | "empty";
+/**
+ * Which control in a section reported an act: its heading, the heading's
+ * secondary control, or its empty state.
+ */
+export type SidebarSectionActionSource = "heading" | "secondary" | "empty";
 
 export type SidebarSection = {
     action?: SidebarSectionAction;
+    /**
+     * A second heading control, drawn just before `action` and reported as
+     * `secondary`. A hover-revealed one shows while the pointer is anywhere over
+     * the section rather than only its heading, and while keyboard focus is
+     * inside it, so it can be found from the rows it acts on.
+     */
+    secondaryAction?: SidebarSectionAction;
     empty?: {
         /**
          * The one act an empty section offers, reported through
@@ -378,6 +401,7 @@ function leadingIcon(item: SidebarItem): IconName {
  * carries it.
  */
 function showsLeadingSlot(item: SidebarItem): boolean {
+    if (item.contextAvatars?.length) return true;
     if ((item.depth ?? 0) === 0) return true;
     if (item.kind === "person" || item.kind === "agent" || item.kind === "project") return true;
     return item.icon !== undefined || item.emoji !== undefined;
@@ -1112,6 +1136,23 @@ function SidebarRow({
             ? 0
             : controls * SIDEBAR_SLOT_CELL + (controls - 1) * SIDEBAR_CONTROL_GAP;
     };
+    const foldInBranch = () => !showsLeadingSlot(item()) && !activityLeading();
+    // The row is already a button, so its pointer disclosure stays a span.
+    const foldControl = () =>
+        props.onCollapseToggle ? (
+            <span
+                aria-hidden="true"
+                className="happy-sidebar__item-fold"
+                data-happy-desktop-ui="sidebar-item-fold"
+                onClick={(event) => {
+                    event.stopPropagation();
+                    props.onCollapseToggle?.();
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+            >
+                <Icon name={item().collapsed ? "chevron-right" : "chevron-down"} size={12} />
+            </span>
+        ) : null;
     return (
         <button
             aria-current={props.active ? "page" : undefined}
@@ -1127,6 +1168,7 @@ function SidebarRow({
                is shut while the pointer is elsewhere. */
             data-collapsed={props.onCollapseToggle && item().collapsed ? "" : undefined}
             data-foldable={props.onCollapseToggle ? "" : undefined}
+            data-fold-in-branch={props.onCollapseToggle && foldInBranch() ? "" : undefined}
             data-depth={depth() > 0 ? String(depth()) : undefined}
             data-item-id={item().id}
             data-kind={item().kind}
@@ -1163,12 +1205,15 @@ function SidebarRow({
                     aria-hidden="true"
                     className="happy-sidebar__item-branch"
                     data-happy-desktop-ui="sidebar-item-branch"
-                />
+                >
+                    {foldInBranch() ? foldControl() : null}
+                </span>
             ) : null}
-            {showsLeadingSlot(item()) || activityLeading() || props.onCollapseToggle ? (
+            {showsLeadingSlot(item()) || activityLeading() ? (
                 <span
                     className="happy-sidebar__item-leading"
                     data-happy-desktop-ui="sidebar-item-leading"
+                    data-context={item().contextAvatars?.length ? "" : undefined}
                 >
                     {/* Identity, unless the window asked for work to be reported
                         here. By default it is not: what the row is doing is
@@ -1185,6 +1230,30 @@ function SidebarRow({
                         put back the glyph that line replaced. */}
                     {activityLeading() ? (
                         activityMark()
+                    ) : item().contextAvatars?.length ? (
+                        item().contextAvatars?.map((avatar) => (
+                            <span
+                                key={avatar.id}
+                                aria-label={avatar.label}
+                                role="img"
+                                title={avatar.label}
+                                className="happy-sidebar__item-context-avatar"
+                                data-happy-desktop-ui="sidebar-item-context-avatar"
+                            >
+                                {avatar.avatarId !== undefined && avatar.imageUrl === undefined ? (
+                                    <AvatarBrutalist id={avatar.avatarId} size={16} />
+                                ) : (
+                                    <Avatar
+                                        imageUrl={avatar.imageUrl}
+                                        initials={avatar.initials ?? ""}
+                                        icon={avatar.icon}
+                                        size="xs"
+                                        style={{ width: 16, height: 16, borderRadius: 4 }}
+                                        type="agent"
+                                    />
+                                )}
+                            </span>
+                        ))
                     ) : !showsLeadingSlot(item()) ? null : item().kind === "person" ||
                       item().kind === "agent" ||
                       item().kind === "project" ? (
@@ -1227,25 +1296,7 @@ function SidebarRow({
                         row. A row that is shut keeps it showing: the reader has
                         to be able to find the work they folded away without
                         sweeping the column to see which rows answer. */}
-                    {props.onCollapseToggle ? (
-                        /* A `span`, because the row itself is the button and a
-                           button inside a button is invalid. */
-                        <span
-                            aria-hidden="true"
-                            className="happy-sidebar__item-fold"
-                            data-happy-desktop-ui="sidebar-item-fold"
-                            onClick={(event) => {
-                                event.stopPropagation();
-                                props.onCollapseToggle?.();
-                            }}
-                            onPointerDown={(event) => event.stopPropagation()}
-                        >
-                            <Icon
-                                name={item().collapsed ? "chevron-right" : "chevron-down"}
-                                size={12}
-                            />
-                        </span>
-                    ) : null}
+                    {foldControl()}
                 </span>
             ) : null}
             <span className="happy-sidebar__item-label" data-happy-desktop-ui="sidebar-item-label">
@@ -1945,11 +1996,21 @@ export function Sidebar(props: SidebarProps) {
             y: event.clientY,
         });
     };
+    // A heading with nothing to say: no product mark, no title, no drill-down,
+    // nothing trailing. The band still stands where the window needs a drag
+    // lane; the shell decides whether it may fold away.
+    const headingEmpty =
+        !local.onBack &&
+        !local.brand &&
+        local.title === undefined &&
+        !local.subtitle &&
+        !local.headerTrailing;
     return (
         <nav
             {...rest}
             className={["happy-sidebar", local.className].filter(Boolean).join(" ")}
             data-back={local.onBack ? "" : undefined}
+            data-heading-empty={headingEmpty ? "" : undefined}
             data-happy-desktop-ui="sidebar"
             style={local.style}
         >
@@ -1976,12 +2037,12 @@ export function Sidebar(props: SidebarProps) {
                     <div className="happy-sidebar__heading" data-happy-desktop-ui="sidebar-heading">
                         {local.brand ? (
                             <img
-                                alt=""
-                                aria-hidden="true"
-                                className="happy-brand-logo happy-sidebar__brand-logo"
+                                alt="Happy Engineering"
+                                aria-label="Happy Engineering"
+                                className="happy-wordmark happy-sidebar__brand-logo"
                                 data-happy-desktop-ui="sidebar-brand-logo"
                                 draggable={false}
-                                src={happyLogoBlackUrl}
+                                src={happyWordmarkLightUrl}
                             />
                         ) : local.title !== undefined ? (
                             <span className="happy-sidebar__title-row">
@@ -2161,32 +2222,74 @@ export function Sidebar(props: SidebarProps) {
                                         >
                                             {section.label}
                                         </span>
-                                        {section.action
-                                            ? ((action) => (
-                                                  <button
-                                                      aria-busy={action.busy ? true : undefined}
-                                                      aria-label={action.label}
-                                                      className="happy-sidebar__section-action"
-                                                      data-busy={action.busy ? "" : undefined}
-                                                      data-happy-desktop-ui="sidebar-section-action"
-                                                      data-reveal={action.reveal ?? "hover"}
-                                                      disabled={action.busy || action.disabled}
-                                                      onClick={() =>
-                                                          local.onSectionAction?.(
-                                                              section.id,
-                                                              "heading",
-                                                          )
-                                                      }
-                                                      type="button"
-                                                  >
-                                                      {action.busy ? (
-                                                          <Spinner size={12} tone="muted" />
-                                                      ) : (
-                                                          <Icon name={action.icon} size={12} />
-                                                      )}
-                                                  </button>
-                                              ))(section.action)
-                                            : null}
+                                        {section.action || section.secondaryAction ? (
+                                            // The controls share one lane, a row's
+                                            // control gap apart, and the lane rather
+                                            // than either control hangs into the padding.
+                                            <span
+                                                className="happy-sidebar__section-actions"
+                                                data-happy-desktop-ui="sidebar-section-actions"
+                                                style={{ columnGap: SIDEBAR_CONTROL_GAP }}
+                                            >
+                                                {(
+                                                    [
+                                                        ["secondary", section.secondaryAction],
+                                                        ["heading", section.action],
+                                                    ] as const
+                                                ).map(([source, action]) =>
+                                                    action ? (
+                                                        <button
+                                                            aria-busy={
+                                                                action.busy ? true : undefined
+                                                            }
+                                                            aria-keyshortcuts={
+                                                                action.shortcut?.aria
+                                                            }
+                                                            aria-label={action.label}
+                                                            className="happy-sidebar__section-action"
+                                                            data-busy={action.busy ? "" : undefined}
+                                                            data-shortcut-hint={
+                                                                action.shortcut ? "" : undefined
+                                                            }
+                                                            data-happy-desktop-ui={
+                                                                source === "heading"
+                                                                    ? "sidebar-section-action"
+                                                                    : "sidebar-section-secondary-action"
+                                                            }
+                                                            data-reveal={action.reveal ?? "hover"}
+                                                            data-slot={source}
+                                                            disabled={
+                                                                action.busy || action.disabled
+                                                            }
+                                                            key={source}
+                                                            onClick={() =>
+                                                                local.onSectionAction?.(
+                                                                    section.id,
+                                                                    source,
+                                                                )
+                                                            }
+                                                            type="button"
+                                                        >
+                                                            {action.busy ? (
+                                                                <Spinner size={12} tone="muted" />
+                                                            ) : (
+                                                                <Icon
+                                                                    name={action.icon}
+                                                                    size={12}
+                                                                />
+                                                            )}
+                                                            {action.shortcut ? (
+                                                                <KeyCap
+                                                                    className="happy-shortcut-hint--floating"
+                                                                    decorative
+                                                                    keys={action.shortcut.caps}
+                                                                />
+                                                            ) : null}
+                                                        </button>
+                                                    ) : null,
+                                                )}
+                                            </span>
+                                        ) : null}
                                     </div>
                                 ) : null}
                                 {section.error !== undefined ? (
@@ -2224,6 +2327,9 @@ export function Sidebar(props: SidebarProps) {
                                             }}
                                         />
                                         {shown.map(({ foldable, item }, index) => {
+                                            const reorderable =
+                                                local.onItemReorder !== undefined &&
+                                                item.reorderable !== false;
                                             const drag = sectionDrag;
                                             const dragging = drag?.moved === true;
                                             const shortcut = shortcutByRow.get(
@@ -2252,7 +2358,7 @@ export function Sidebar(props: SidebarProps) {
                                                     item={item}
                                                     onContextMenu={openItemMenu}
                                                     onKeyDown={
-                                                        local.onItemReorder
+                                                        reorderable
                                                             ? (event) =>
                                                                   moveByKey(
                                                                       event,
@@ -2263,7 +2369,7 @@ export function Sidebar(props: SidebarProps) {
                                                             : undefined
                                                     }
                                                     onPointerDown={
-                                                        local.onItemReorder
+                                                        reorderable
                                                             ? (event) =>
                                                                   dragStart(
                                                                       event,
@@ -2274,17 +2380,17 @@ export function Sidebar(props: SidebarProps) {
                                                             : undefined
                                                     }
                                                     onPointerCancel={
-                                                        local.onItemReorder ? dragCancel : undefined
+                                                        reorderable ? dragCancel : undefined
                                                     }
                                                     onPointerMove={
-                                                        local.onItemReorder ? dragMove : undefined
+                                                        reorderable ? dragMove : undefined
                                                     }
                                                     onPointerUp={
-                                                        local.onItemReorder
+                                                        reorderable
                                                             ? (event) => dragEnd(event, shownItems)
                                                             : undefined
                                                     }
-                                                    reorderable={local.onItemReorder !== undefined}
+                                                    reorderable={reorderable}
                                                     shortcutActive={numberShortcutNavigation}
                                                     shortcut={shortcut}
                                                     onCollapseToggle={

@@ -1,6 +1,8 @@
 import { SetupChoice } from "../../src/SetupChoice";
-import { LocalOnboardingScreen } from "../../src/LocalOnboardingScreen";
-import { SetupPage } from "../../src/SetupPage";
+import { DesktopMobileSetup, type DesktopMobileSetupStep } from "../../src/DesktopMobileSetup";
+import { LocalOnboardingScreen, type LocalOnboardingView } from "../../src/LocalOnboardingScreen";
+import { ProfileSetupScreen } from "../../src/ProfileSetupScreen";
+import { SetupHandoff, SetupPage } from "../../src/SetupPage";
 import { ThemeScope } from "../../src/ThemeScope";
 import { ComponentPage, DimensionRule, Specimen } from "../kit";
 
@@ -8,6 +10,57 @@ import { ComponentPage, DimensionRule, Specimen } from "../kit";
 export const componentNumber = "C-252";
 
 const noop = () => undefined;
+
+const desktopSteps: readonly { label: string; view: LocalOnboardingView }[] = [
+    { label: "Progress · setup", view: { kind: "agent-setup", phase: { kind: "preparing" } } },
+    { label: "Progress · assistants", view: { kind: "examining" } },
+    {
+        label: "Progress · retry",
+        view: {
+            kind: "connect-failed",
+            message: "Happy Agent could not connect. Try again.",
+            retrying: false,
+        },
+    },
+];
+
+const handoffSteps: readonly { label: string; busy: boolean; message?: string }[] = [
+    { label: "Handoff · opening the conversation", busy: true },
+    {
+        label: "Handoff · setup retry",
+        busy: false,
+        message: "The conversation could not be opened. Try again.",
+    },
+];
+
+const mobileSteps: readonly { label: string; step: DesktopMobileSetupStep }[] = [
+    { label: "Mobile · get the app", step: { kind: "intro", platform: "ios" } },
+    { label: "Mobile · Android", step: { kind: "intro", platform: "android" } },
+    { label: "Mobile · code on its way", step: { kind: "link", phase: { kind: "checking" } } },
+    {
+        label: "Mobile · device QR",
+        step: {
+            kind: "link",
+            phase: {
+                kind: "pairing",
+                data: "happy://terminal?AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                expiresAt: 1924992000000,
+            },
+        },
+    },
+    {
+        label: "Mobile · code expired",
+        step: {
+            kind: "link",
+            phase: {
+                kind: "failed",
+                message: "The pairing code expired or was cancelled. Try again for a new code.",
+            },
+        },
+    },
+    { label: "Mobile · connected", step: { kind: "connected", online: true } },
+    { label: "Mobile · linked and offline", step: { kind: "connected", online: false } },
+];
 
 /** Setup fills the window, so every specimen gets a window-shaped frame. */
 const frame = {
@@ -258,10 +311,6 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{
                                 kind: "agent-setup",
                                 phase: {
@@ -278,7 +327,7 @@ export function SetupPagePage() {
             </Specimen>
 
             <Specimen
-                detail="subscription search begins with all three vendor columns already mounted and a reserved empty action slot"
+                detail="subscription search begins with all three vendor columns already mounted and Continue already standing there, inert"
                 label="Subscription discovery"
                 number="11"
                 stage="surface"
@@ -291,10 +340,6 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{ kind: "examining" }}
                         />
                     </ThemeScope>
@@ -302,7 +347,7 @@ export function SetupPagePage() {
             </Specimen>
 
             <Specimen
-                detail="same retained vendor columns · daemon checks update their labels in place without moving the owl, title, copy, or action slot"
+                detail="same retained vendor columns · daemon checks update their labels in place without moving the owl, title, copy, or the inert Continue"
                 label="Authentication checking"
                 number="12"
                 stage="surface"
@@ -315,10 +360,6 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{
                                 assistants: [
                                     {
@@ -339,8 +380,9 @@ export function SetupPagePage() {
                                         status: "missing",
                                     },
                                 ],
-                                complete: false,
+                                custom: { authentication: "checking", providers: [] },
                                 kind: "provider-authentication",
+                                installShell: "posix",
                             }}
                         />
                     </ThemeScope>
@@ -348,7 +390,7 @@ export function SetupPagePage() {
             </Specimen>
 
             <Specimen
-                detail="authentication-level daemon results only · no quota inference · Continue appears after every check settles"
+                detail="one successful inference proves a subscription works · local sign-in checks continue without repeating successful inference · Continue turns on without waiting for the rest"
                 label="Authentication verified"
                 number="13"
                 stage="surface"
@@ -361,10 +403,6 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{
                                 assistants: [
                                     {
@@ -385,8 +423,9 @@ export function SetupPagePage() {
                                         status: "missing",
                                     },
                                 ],
-                                complete: true,
+                                custom: { authentication: "invalid", providers: [] },
                                 kind: "provider-authentication",
+                                installShell: "posix",
                             }}
                         />
                     </ThemeScope>
@@ -394,7 +433,72 @@ export function SetupPagePage() {
             </Specimen>
 
             <Specimen
-                detail="no valid local sign-in · Continue stays absent · Skip becomes the sole primary action"
+                detail="nothing installed · each column carries the vendor install link · Continue stays inert without a subscription"
+                label="Subscriptions missing"
+                number="14a"
+                stage="surface"
+            >
+                <div style={frame}>
+                    <ThemeScope mode="dark">
+                        <LocalOnboardingScreen
+                            appearance="dark"
+                            onAssistantsContinue={noop}
+                            onConnectRetry={noop}
+                            onHappyMobileConnect={noop}
+                            onHappyMobileSkip={noop}
+                            view={{
+                                assistants: [
+                                    {
+                                        authentication: "unavailable",
+                                        id: "claude",
+                                        status: "missing",
+                                    },
+                                    {
+                                        authentication: "unavailable",
+                                        id: "codex",
+                                        status: "missing",
+                                    },
+                                    {
+                                        authentication: "unavailable",
+                                        id: "grok",
+                                        status: "missing",
+                                    },
+                                ],
+                                custom: { authentication: "invalid", providers: [] },
+                                kind: "provider-authentication",
+                                installShell: "posix",
+                            }}
+                        />
+                    </ThemeScope>
+                </div>
+            </Specimen>
+
+            <Specimen
+                detail="the first step, revisited from the step bar · reports what is installed and returns to the live step"
+                label="Setup revisited"
+                number="14b"
+                stage="surface"
+            >
+                <div style={frame}>
+                    <ThemeScope mode="dark">
+                        <LocalOnboardingScreen
+                            appearance="dark"
+                            onAssistantsContinue={noop}
+                            onConnectRetry={noop}
+                            onHappyMobileConnect={noop}
+                            onHappyMobileSkip={noop}
+                            view={{
+                                kind: "agent-ready",
+                                nodeVersion: "v22.11.0",
+                                version: "0.0.86",
+                            }}
+                        />
+                    </ThemeScope>
+                </div>
+            </Specimen>
+
+            <Specimen
+                detail="no valid local sign-in · every column says what to run · Continue stays inert, because there is nothing to continue to"
                 label="Authentication unavailable"
                 number="14"
                 stage="surface"
@@ -407,10 +511,6 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{
                                 assistants: [
                                     {
@@ -432,8 +532,9 @@ export function SetupPagePage() {
                                         status: "found",
                                     },
                                 ],
-                                complete: true,
+                                custom: { authentication: "invalid", providers: [] },
                                 kind: "provider-authentication",
+                                installShell: "posix",
                             }}
                         />
                     </ThemeScope>
@@ -454,10 +555,6 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{ busy: false, kind: "happy-mobile-offer" }}
                         />
                     </ThemeScope>
@@ -478,10 +575,6 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{
                                 data: "happy://terminal?eyJ2IjoxLCJwYWlyaW5nSWQiOiJibHVlcHJpbnQtcGFpcmluZyIsIm5vbmNlIjoiaGFwcHktbW9iaWxlIn0",
                                 expiresAt: 1_900_000_000_000,
@@ -506,16 +599,97 @@ export function SetupPagePage() {
                             onConnectRetry={noop}
                             onHappyMobileConnect={noop}
                             onHappyMobileSkip={noop}
-                            onProfileCreate={noop}
-                            onProfileEmailChange={noop}
-                            onProfileNameChange={noop}
-                            onProjectChoose={noop}
                             view={{
                                 busy: false,
                                 kind: "happy-mobile-failed",
                                 message:
                                     "The pairing code expired before Happy Mobile approved it.",
                             }}
+                        />
+                    </ThemeScope>
+                </div>
+            </Specimen>
+            {desktopSteps.map(({ label, view }, index) => (
+                <Specimen
+                    key={label}
+                    detail="Stable overall stages · completed and remaining counts · current step is not a loading animation"
+                    label={label}
+                    number={String(index + 18)}
+                    stage="surface"
+                >
+                    <div style={{ ...frame, height: "800px" }} data-progress-specimen={label}>
+                        <ThemeScope mode="dark">
+                            <LocalOnboardingScreen
+                                appearance="dark"
+                                showSteps
+                                view={view}
+                                onAssistantsContinue={noop}
+                                onConnectRetry={noop}
+                                onHappyMobileConnect={noop}
+                                onHappyMobileSkip={noop}
+                            />
+                        </ThemeScope>
+                    </div>
+                </Specimen>
+            ))}
+            {mobileSteps.map(({ label, step }, index) => (
+                <Specimen
+                    key={label}
+                    detail="Optional mobile setup · bundled animated sticker · no runtime or account required"
+                    label={label}
+                    number={String(index + 18 + desktopSteps.length)}
+                    stage="surface"
+                >
+                    <div style={{ ...frame, height: "800px" }} data-mobile-specimen={label}>
+                        <ThemeScope mode="dark">
+                            <DesktopMobileSetup
+                                appearance="dark"
+                                onboarding
+                                step={step}
+                                onContinue={noop}
+                                onSkip={noop}
+                                onPlatformSelect={noop}
+                            />
+                        </ThemeScope>
+                    </div>
+                </Specimen>
+            ))}
+            {handoffSteps.map(({ label, busy, message }, index) => (
+                <Specimen
+                    key={label}
+                    detail="Link Mobile App is the last page · the app opens to an unsent editable Chief of Staff draft · manual projects use the sidebar + button"
+                    label={label}
+                    number={String(index + 18 + desktopSteps.length + mobileSteps.length)}
+                    stage="surface"
+                >
+                    <div style={{ ...frame, height: "800px" }} data-handoff-specimen={label}>
+                        <ThemeScope mode="dark">
+                            <SetupHandoff error={message} busy={busy} onRetry={noop}>
+                                <SetupPage
+                                    title="Workspace stays open"
+                                    copy="The conversation and sidebar remain usable while the draft is prepared."
+                                />
+                            </SetupHandoff>
+                        </ThemeScope>
+                    </div>
+                </Specimen>
+            ))}
+            <Specimen
+                detail="Remote Happy Agent only · a new team member's profile · not part of local setup"
+                label="Remote · profile"
+                number={String(18 + desktopSteps.length + mobileSteps.length + handoffSteps.length)}
+                stage="surface"
+            >
+                <div style={{ ...frame, height: "800px" }}>
+                    <ThemeScope mode="dark">
+                        <ProfileSetupScreen
+                            appearance="dark"
+                            busy={false}
+                            email=""
+                            name=""
+                            onCreate={noop}
+                            onEmailChange={noop}
+                            onNameChange={noop}
                         />
                     </ThemeScope>
                 </div>

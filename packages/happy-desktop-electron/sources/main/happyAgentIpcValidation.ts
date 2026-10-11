@@ -3,19 +3,46 @@
 // the main process's HTTP proxy), so what remains is the install terminal's
 // input and size, and the address a browser tunnel is opened on.
 
-import type { DesktopBrowserProxyTarget } from "../shared/desktopContract";
+import type { DesktopBrowserCommand, DesktopBrowserProxyTarget } from "../shared/desktopContract";
 
-/** The local session a browser tunnel is asked for. */
+export function desktopBrowserCommandValidate(value: unknown): DesktopBrowserCommand {
+    if (typeof value !== "object" || value === null) throw new Error("Invalid browser command.");
+    const command = value as { action?: unknown; url?: unknown };
+    if (
+        command.action === "load" &&
+        Object.keys(value).every((key) => key === "action" || key === "url")
+    )
+        return { action: "load", url: boundedString(command.url, "Browser address", 65536) };
+    if (
+        Object.keys(value).length === 1 &&
+        (command.action === "back" ||
+            command.action === "forward" ||
+            command.action === "reload" ||
+            command.action === "stop")
+    )
+        return { action: command.action };
+    throw new Error("Invalid browser command.");
+}
+
+/** The explicit Happy Agent connection and workspace a browser tunnel is asked for. */
 export function desktopBrowserProxyTargetValidate(value: unknown): DesktopBrowserProxyTarget {
     if (typeof value !== "object" || value === null)
         throw new Error("The Happy Agent browser target is invalid.");
-    const target = value as { readonly sessionId?: unknown };
-    const sessionId = boundedString(
-        target.sessionId,
-        "The Happy Agent browser session identity",
+    const target = value as { readonly connectionId?: unknown; readonly workspaceId?: unknown };
+    const connectionId =
+        target.connectionId === null
+            ? null
+            : boundedString(
+                  target.connectionId,
+                  "The Happy Agent browser connection identity",
+                  256,
+              );
+    const workspaceId = boundedString(
+        target.workspaceId,
+        "The Happy Agent browser workspace identity",
         256,
     );
-    return { sessionId };
+    return { connectionId, workspaceId };
 }
 
 export function happyAgentTerminalInputValidate(value: unknown): string {

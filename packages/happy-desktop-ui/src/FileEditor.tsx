@@ -6,10 +6,11 @@ import {
     type ReactNode,
 } from "react";
 import { Button } from "./Button";
-import { CodeEditor } from "./CodeEditor";
+import { CodeEditor, type CodeEditorReveal } from "./CodeEditor";
 import { FileTreeFamilyIcon, fileTreeFamily } from "./FileTree";
 import { FilePathLabel } from "./FilePathLabel";
 import { SegmentedControl } from "./SegmentedControl";
+import { Ionicon } from "./vectorIcons/VectorIcon";
 export type FileEditorProps = {
     className?: string;
     "data-testid"?: string;
@@ -24,6 +25,8 @@ export type FileEditorProps = {
     onSave?: () => void;
     onRevert?: () => void;
     onClose?: () => void;
+    /** Saves the file to the reader's machine. Absent hides the control. */
+    onDownload?: () => void;
     /** Unsaved local edits exist. Drives Command-S and Revert. */
     dirty?: boolean;
     /** A save is in flight. */
@@ -54,6 +57,12 @@ export type FileEditorProps = {
     /** Whether long lines wrap at the view edge instead of scrolling out of it. */
     wrap?: boolean;
     /**
+     * A region of the file to scroll to and mark, for a file reached through a
+     * reference that named one. A document opened at a region opens on its
+     * source: the lines are a fact about the text, and a rendered page has none.
+     */
+    reveal?: CodeEditorReveal;
+    /**
      * Receives the reader's wrap choice. Without it there is nobody to hand
      * the choice to, so the toggle is not offered at all rather than offered
      * and silently inert.
@@ -81,6 +90,7 @@ export function FileEditor(props: FileEditorProps) {
         "onSave",
         "onRevert",
         "onClose",
+        "onDownload",
         "dirty",
         "saving",
         "saveDisabled",
@@ -94,11 +104,20 @@ export function FileEditor(props: FileEditorProps) {
         "closeLabel",
         "wrap",
         "onWrapChange",
+        "reveal",
     ]);
     // A Markdown file opens as the document it is, and typing in it is the
     // deliberate second step. Which face is showing belongs to this reading of
     // the file, so it lives here rather than in product state.
     const [face, setFace] = useState<"rendered" | "source">(props.initialFace ?? "rendered");
+    // A fresh ask to show some lines turns the document to the face that has
+    // them. Only a new ask does: the reader may turn back to the rendered page
+    // afterwards, and a render that repeats the same ask must leave them there.
+    const [revealed, setRevealed] = useState(props.reveal?.requestId);
+    if (props.reveal !== undefined && props.reveal.requestId !== revealed) {
+        setRevealed(props.reveal.requestId);
+        setFace("source");
+    }
     const reading = local.rendered !== undefined && face === "rendered";
     const name = local.path.slice(local.path.lastIndexOf("/") + 1);
     const family = fileTreeFamily({ kind: "file", name });
@@ -181,6 +200,19 @@ export function FileEditor(props: FileEditorProps) {
                             {local.revertLabel ?? "Revert"}
                         </Button>
                     ) : null}
+                    {local.onDownload ? (
+                        <Button
+                            aria-label="Download"
+                            data-testid="file-editor-download"
+                            iconOnly
+                            onClick={() => local.onDownload?.()}
+                            size="small"
+                            title="Download"
+                            variant="ghost"
+                        >
+                            <Ionicon name="download-outline" size={14} />
+                        </Button>
+                    ) : null}
                     {local.onClose ? (
                         <Button
                             aria-label={local.closeLabel ?? "Close file"}
@@ -214,6 +246,7 @@ export function FileEditor(props: FileEditorProps) {
                     onValueChange={(value) => local.onValueChange?.(value)}
                     placeholder={local.placeholder}
                     readOnly={local.readOnly}
+                    {...(local.reveal === undefined ? {} : { reveal: local.reveal })}
                     value={local.value}
                     wrap={local.wrap}
                 />

@@ -30,6 +30,10 @@ export async function durableHistorySeed(
     projects: readonly GymProject[],
     runtime: StartedHappyAgentRuntime,
     inference: GymInferenceServer,
+    resume?: {
+        readonly sessionIds: readonly string[];
+        readonly turnsBySession: ReadonlyMap<string, number>;
+    },
 ): Promise<SeededHistory> {
     const checkouts = await readyCheckouts(projects, runtime.client);
     if (checkouts.length === 0)
@@ -40,18 +44,22 @@ export async function durableHistorySeed(
     if (clusterCheckout === undefined) {
         throw new Error("No ready managed workspace exists for the durable session cluster.");
     }
-    const sessionIds: string[] = [];
+    const sessionIds: string[] = resume ? [...resume.sessionIds] : [];
     const clusterSessionCount = Math.min(
         Math.max(1, manifest.seed.clusterSessionCount),
         manifest.target.sessions,
     );
-    const clusterSessions = await Promise.all(
-        Array.from({ length: clusterSessionCount }, () =>
-            runtime.client.createAgent(clusterCheckout.workspaceId),
-        ),
-    );
-    const clusterSessionIds = clusterSessions.map((created) => created.agent.id);
-    sessionIds.push(...clusterSessionIds);
+    const clusterSessions = resume
+        ? []
+        : await Promise.all(
+              Array.from({ length: clusterSessionCount }, () =>
+                  runtime.client.createAgent(clusterCheckout.workspaceId),
+              ),
+          );
+    const clusterSessionIds = resume
+        ? sessionIds.slice(0, clusterSessionCount)
+        : clusterSessions.map((created) => created.agent.id);
+    if (!resume) sessionIds.push(...clusterSessionIds);
     const target = manifest.target.sessions;
     for (let index = sessionIds.length; index < target; index += 1) {
         const checkout = checkouts[index % checkouts.length];
@@ -62,8 +70,8 @@ export async function durableHistorySeed(
         }
     }
 
-    let seededTurns = 0;
-    const turnsBySession = new Map<string, number>();
+    const turnsBySession = new Map(resume?.turnsBySession);
+    let seededTurns = [...turnsBySession.values()].reduce((sum, turns) => sum + turns, 0);
     const historySessionCount = Math.min(manifest.seed.historySessions, sessionIds.length);
     const targetTurns = Math.max(0, manifest.target.turns);
     for (
@@ -80,7 +88,11 @@ export async function durableHistorySeed(
                       manifest.seed.clusterTurnsPerSession,
                   )
                 : manifest.seed.historyTurnsPerSession;
-        for (let turn = 0; turn < turnLimit && seededTurns < targetTurns; turn += 1) {
+        for (
+            let turn = turnsBySession.get(sessionId) ?? 0;
+            turn < turnLimit && seededTurns < targetTurns;
+            turn += 1
+        ) {
             const mode = seededTurns < manifest.seed.toolHeavyTurns ? "tool-heavy" : "compact";
             const longChatMarker =
                 sessionIndex < manifest.seed.longChatSessionCount ? " [gym-long-chat-session]" : "";
@@ -94,6 +106,12 @@ export async function durableHistorySeed(
             seededTurns += 1;
             const sessionTurns = (turnsBySession.get(sessionId) ?? 0) + 1;
             turnsBySession.set(sessionId, sessionTurns);
+            await writeFile(
+                `${paths.root}/seed-progress.json`,
+                JSON.stringify({ sessionIds, turnsBySession: [...turnsBySession] }),
+            );
+            if (seededTurns % 50 === 0)
+                console.log(`Gym seeded ${seededTurns}/${targetTurns} durable turns.`);
             if (sessionTurns % historyCompactionInterval === 0) {
                 // Keep the visible durable transcript long while bounding the
                 // provider context used for the next inference. This exercises
@@ -204,9 +222,11 @@ export async function catalogSnapshotRead(
     const workspaces = workspaceLists
         .flatMap((result) => result.workspaces)
         .filter((workspace) => !projectPaths.has(workspace.path));
-    const agentCount = (await client.agentIds()).length;
+    const agentIds = new Set(await client.agentIds());
     if (expectedSessionIds !== undefined) {
-        await persistedSessionIdsVerify(client, expectedSessionIds);
+        const missing = expectedSessionIds.filter((id) => !agentIds.has(id));
+        if (missing.length > 0)
+            throw new Error(`The durable catalog is missing ${missing.length} seeded sessions.`);
     }
     return {
         // The home project is implicit and omitted by the project list.
@@ -218,19 +238,8 @@ export async function catalogSnapshotRead(
         archivedWorktreeCount: workspaces.filter(
             (workspace) => workspace.status === "archived" || workspace.archivedAt != null,
         ).length,
-        sessionCount: agentCount,
+        sessionCount: agentIds.size,
     };
-}
-
-async function persistedSessionIdsVerify(
-    client: GymHappyAgentClient,
-    sessionIds: readonly string[],
-): Promise<void> {
-    const batchSize = 32;
-    for (let offset = 0; offset < sessionIds.length; offset += batchSize) {
-        const batch = sessionIds.slice(offset, offset + batchSize);
-        await Promise.all(batch.map((sessionId) => client.getAgent(sessionId)));
-    }
 }
 
 async function readyCheckouts(

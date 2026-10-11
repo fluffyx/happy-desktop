@@ -8,22 +8,24 @@ import type {
     MutationId,
     Project,
     SlashCommand,
+    Task,
 } from "@slopus/happy-agent-client";
 import type { HappyAgentDebugLogInput } from "../happyAgent/happyAgentDebugLogStore.js";
+import type { HappyAgentAvatarImage } from "../happyAgent/happyAgentTypes.js";
 import type { HappyAgentServiceTier } from "../happyAgentServiceTier.js";
+import type { HappyAgentSync } from "./happyAgentSync.js";
+import type { UserProfile } from "./userProfiles.js";
 
 export type { MutationId };
 
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
 
-interface HappyAgentProfile {
-    id: string;
-    name: string;
-    photo?: { data: string; mediaType: string };
-    version?: number;
-}
-
 export type ToolPresentation =
+    | {
+          kind: "agent_spawn";
+          model?: { modelId: string; providerId: string; name: string };
+          agentId?: string;
+      }
     | {
           kind: "compaction";
           trigger: "manual" | "automatic";
@@ -85,8 +87,12 @@ interface BaseChatElement {
 export interface UserMessageElement extends BaseChatElement {
     kind: "user_message";
     messageId: string;
+    /** Whether the daemon has acknowledged this exact message ID. */
+    authority: "local" | "server";
+    /** Rendering identity: null is the local viewer; userId retains the real account ID. */
     identity: string | null;
-    profile?: HappyAgentProfile;
+    userId?: string;
+    profile?: UserProfile;
     delivery: "pending_steering" | "sent";
     text: string;
     attachments?: readonly { data: string; mediaType: string }[];
@@ -279,6 +285,8 @@ export interface CompactionElement extends BaseChatElement {
 
 export interface FailureElement extends BaseChatElement {
     kind: "failure";
+    /** Durable service message identity; absent on a local-only failure. */
+    messageId?: string;
     outcome: "retried" | "continued" | "failed";
     attempt?: number;
     reason: string;
@@ -364,8 +372,10 @@ export interface SessionUsage {
 }
 
 export interface SessionState {
-    /** The connection's placeholder before the first durable history snapshot arrives. */
+    /** True until the first durable history snapshot arrives, even if selection is already known. */
     historyLoading?: boolean;
+    /** Whether this session's own mode or draft is available, rather than a catalog fallback. */
+    selectionKnown?: boolean;
     activity: {
         kind:
             | "idle"
@@ -479,6 +489,7 @@ export type ChatDelta =
     | MutationRejectedDelta;
 
 export interface GitChangeSnapshot {
+    comparison: "ready" | "stale" | "unavailable";
     changedFiles: number;
     insertions: number;
     deletions: number;
@@ -592,12 +603,77 @@ export interface BotGroup {
     name: string;
     /** Immutable local snake_case name, also the bot's folder name. */
     username: string;
+    /** Daemon-provided built-in bot identity; null or absent for ordinary bots. */
+    systemKey?: string | null;
     orderKey: string;
     path: string;
     /** Present when the bot has a picture; the bytes are fetched separately. */
     avatar?: { url: string; thumbhash: string };
     /** The bot's one permanent conversation. */
     session: GroupSession;
+    /** Active, user-interactive child tasks in the daemon's explicit tree order. */
+    subtasks: readonly BotSubtaskGroup[];
+    unread: { count: number; attentionCount: number; reason?: string; since?: number };
+}
+
+export interface BotSubtaskGroup {
+    workspaceId: string;
+    path: string;
+    session: GroupSession;
+    subtasks: readonly BotSubtaskGroup[];
+}
+
+/**
+ * Who a team task belongs to, as far as this connection can say.
+ *
+ * A task has no face of its own, so in a team its row wears its owner's: a team
+ * member resolved through the user directory. The owner may carry no picture,
+ * and a team task may name nobody at all, so every field is optional and a row
+ * falls back to what is present. A standalone daemon has one person, every
+ * task is theirs, and so there is no owner to show — see `TaskGroup.owner`.
+ */
+export interface TaskOwner {
+    /** The team member, absent when nobody was identified. */
+    userId?: string;
+    /** The owner's display name, once it is known. */
+    name?: string;
+    /** The owner's photo; the bytes are fetched separately. */
+    avatar?: { url: string; thumbhash: string };
+}
+
+/**
+ * A task: a bot-like conversation for one piece of work, with an owner and a
+ * place in each member's own list.
+ *
+ * Every task the host holds is stated here, joined or not, so a surface can
+ * offer the ones the reader has not joined. `membership` is the caller's own
+ * place in it and is what decides whether it is in their list and where.
+ */
+export interface TaskGroup {
+    id: string;
+    /** The task's dedicated workspace, which is what its conversation addresses. */
+    workspaceId: string;
+    name: string;
+    path: string;
+    createdAt: number;
+    archived: boolean;
+    /**
+     * Whether the caller may archive and unarchive it. False when the host has
+     * not said: a task only known from `task.created` carries no answer until
+     * it is read whole.
+     */
+    canArchive: boolean;
+    /** The caller's place in the task, present only while they have joined it. */
+    membership?: { orderKey: string; joinedAt: number };
+    /**
+     * The team member the task belongs to, or `null` on a standalone daemon,
+     * where every task is the viewer's own and no owner is shown.
+     */
+    owner: TaskOwner | null;
+    /** The task's one conversation. */
+    session: GroupSession;
+    /** Active, user-interactive child tasks in the daemon's explicit tree order. */
+    subtasks: readonly BotSubtaskGroup[];
     unread: { count: number; attentionCount: number; reason?: string; since?: number };
 }
 
@@ -621,6 +697,7 @@ export type MutationAction =
     | "create_project"
     | "archive_project"
     | "archive_bot"
+    | "set_bot_avatar"
     | "create_workspace"
     | "archive_workspace"
     | "create_session"
@@ -640,7 +717,14 @@ export type MutationAction =
     | "rename_group"
     | "reorder_group"
     | "reorder_bot"
-    | "reorder_session";
+    | "reorder_session"
+    | "reorder_subtask"
+    | "join_task"
+    | "rename_task"
+    | "leave_task"
+    | "reorder_task"
+    | "archive_task"
+    | "unarchive_task";
 
 export interface MutationRejectedDelta {
     action: string;
@@ -674,6 +758,7 @@ export interface HappyAgentGroupsSubscriptionOptions {
         projects: readonly ProjectGroup[],
         state: GroupsState,
         bots: readonly BotGroup[],
+        tasks: readonly TaskGroup[],
     ) => void;
     onDelta?: (delta: GroupDelta) => void;
     onError?: (error: unknown) => void;
@@ -682,6 +767,8 @@ export interface HappyAgentGroupsSubscriptionOptions {
 export interface HappyAgentGroupsConnection {
     projects: () => readonly ProjectGroup[];
     bots: () => readonly BotGroup[];
+    /** Every task the host holds, oldest first, each with the caller's membership. */
+    tasks: () => readonly TaskGroup[];
     state: () => GroupsState;
     close: () => void;
 }
@@ -690,8 +777,20 @@ export interface SendMessageInput {
     content?: readonly (
         | { type: "text"; text: string }
         | { type: "image"; mediaType: string; data: string }
+        | SendMessageToolCallRequest
     )[];
     text: string;
+}
+
+/**
+ * An explicit request for Happy Agent to execute one tool before inference,
+ * carried inside the user message that asks for it. The daemon runs it,
+ * records the call and its result, then lets the model continue.
+ */
+export interface SendMessageToolCallRequest {
+    type: "tool_call_request";
+    name: string;
+    arguments: Readonly<Record<string, string>>;
 }
 
 export interface DraftUpdate {
@@ -722,6 +821,33 @@ export interface CreateWorkspaceInput {
     projectId: string;
 }
 
+/**
+ * A bot asked for and not yet answered for. The three identities are the
+ * daemon's own from the moment they are named here — the bot's, its dedicated
+ * workspace's, and its one agent's — so the bot's row and its conversation can
+ * be addressed at once. The bot itself, with the folder the daemon chose for
+ * it, arrives through `bot`, which rejects with the daemon's reason when
+ * nothing was made.
+ */
+export interface BotCreationRequest {
+    readonly botId: string;
+    readonly workspaceId: string;
+    readonly agentId: string;
+    readonly bot: Promise<Bot>;
+}
+
+/**
+ * A task being created: its three identities, named by this client before the
+ * host is asked, and the host's answer. The host puts the caller's membership
+ * at the top of their list; both are adopted before `task` settles.
+ */
+export interface TaskCreationRequest {
+    readonly taskId: string;
+    readonly workspaceId: string;
+    readonly agentId: string;
+    readonly task: Promise<Task>;
+}
+
 export interface ProjectAddOptions {
     projectId?: string;
     signal?: AbortSignal;
@@ -735,6 +861,7 @@ export interface CreateRemoteProjectInput {
 }
 
 export type GroupTarget =
+    | { kind: "bot"; botId: string }
     | { kind: "project"; projectId: string }
     | { kind: "workspace"; projectId: string; workspaceId: string };
 
@@ -756,9 +883,18 @@ export interface ConnectHappyAgentOptions {
     onDebugEntry?: (entry: HappyAgentDebugLogInput) => void;
     /** Runs when a top-level session finishes; delegated subagent runs stay silent. */
     onTopLevelSessionFinished?: (sessionId: string) => void;
+    /**
+     * Whether bootstrap and the event stream wait for the member's profile.
+     * A team Happy Agent refuses both to a member who has none yet; the
+     * machine's own solo Happy Agent authorizes them from the start and never
+     * asks for one. Defaults to true.
+     */
+    memberProfileRequired?: boolean;
 }
 
 export interface HappyAgentConnection {
+    /** Shared authoritative transport input for this connection's feature stores. */
+    readonly sync: HappyAgentSync;
     compatibility: () => ServerCompatibility;
     /** Interrupts the managed update feed or startup wait so reconnection starts immediately. */
     retry: () => void;
@@ -770,6 +906,8 @@ export interface HappyAgentConnection {
         clone(input: CreateRemoteProjectInput): MutationId;
     };
     createWorkspace(input: CreateWorkspaceInput): MutationId;
+    /** Resolves the already-issued creation's authoritative response; never starts or retries another creation. */
+    workspaceCreationWait(workspaceId: string): Promise<void>;
     archiveWorkspace(projectId: string, workspaceId: string): MutationId;
     /**
      * Names the agent and returns that name at once, so the session can be
@@ -784,8 +922,11 @@ export interface HappyAgentConnection {
      * either way, so a caller supplying it need do nothing else.
      */
     createSession(input: CreateSessionInput, checkoutReady?: Promise<unknown>): MutationId;
+    sessionCreationWait(sessionId: string): Promise<void>;
     markSessionRead(sessionId: string): MutationId;
     sendMessage(sessionId: string, message: string | SendMessageInput): MutationId;
+    /** Same send/idempotency path, resolving only after authoritative acceptance. */
+    sendMessageConfirmed(sessionId: string, message: string | SendMessageInput): Promise<void>;
     /** Invokes one slash command under the session's current composer selection. */
     invokeSlashCommand(sessionId: string, name: string, argumentsValue?: string): MutationId;
     stopBackgroundProcess(sessionId: string, projectedProcessId: number): MutationId;
@@ -800,35 +941,59 @@ export interface HappyAgentConnection {
     setSessionArchived(sessionId: string, archived: boolean): MutationId;
     renameGroup(target: GroupTarget, name: string): MutationId;
     /**
-     * Creates a bot, its dedicated workspace, and its one agent, and answers
-     * with the bot itself.
+     * Creates a bot, its dedicated workspace, and its one agent.
      *
-     * A promise rather than a named mutation, because nothing here can be named
-     * in advance: the daemon derives the folder name and makes the one agent
-     * that *is* the bot's conversation, and a caller opening the bot it just
-     * asked for needs both. The id is supplied so a repeated attempt creates
-     * the same bot rather than a second one.
+     * The three identities are named here, in the caller's own call stack, and
+     * the daemon takes them as its own: a row can stand in the catalog and be
+     * addressed before the host has answered, and a request repeated after a
+     * dropped answer settles on the bot that was already made rather than a
+     * second one. What only the host can decide — the folder name, the agent
+     * itself — arrives through the promise, which rejects with the host's
+     * reason when nothing was made.
+     *
+     * Without a name the daemon makes the bot as "New Bot" and names it from
+     * the first user message it accepts, so a bot can be asked for and put to
+     * work in one breath.
      */
-    createBot(name: string): Promise<Bot>;
+    createBot(name?: string): BotCreationRequest;
+    /** Puts a picture on a bot, guarded by its version like every other bot mutation. */
+    setBotAvatar(botId: string, image: HappyAgentAvatarImage): MutationId;
     archiveBot(botId: string): MutationId;
     reorderBot(botId: string, afterId: string | null): MutationId;
     reorderProject(projectId: string, afterId: string | null): MutationId;
     reorderWorkspace(workspaceId: string, afterId: string | null): MutationId;
     reorderSession(sessionId: string, afterId: string | null): MutationId;
+    /** Moves one bot subtask among its siblings, after `afterId` or first when null. */
+    reorderSubtask(sessionId: string, afterId: string | null): MutationId;
+    /** Joins a task, putting it at the top of the caller's own list. */
+    joinTask(taskId: string): MutationId;
+    /** Takes a task out of the caller's own list. It never archives the task. */
+    leaveTask(taskId: string): MutationId;
+    /** Moves one joined task after `afterId` in the caller's list, or first when null. */
+    reorderTask(taskId: string, afterId: string | null): MutationId;
+    /** Archives a task for everyone; only a caller the task reports `canArchive` for may. */
+    archiveTask(taskId: string): MutationId;
+    unarchiveTask(taskId: string): MutationId;
+    /**
+     * Creates a task owned by the caller and joined at the top of their list.
+     * Without a name the host calls it "New Task" and names it from its first
+     * message. The task id doubles as the retry key.
+     */
+    createTask(name?: string): TaskCreationRequest;
+    /** Renames a task for everyone, guarded by its version; ends automatic naming. */
+    renameTask(taskId: string, name: string): MutationId;
     close(): void;
 }
 
 export type ServerCompatibility =
     | {
           status: "checking";
-          maximumSupportedProtocolVersion: number;
           minimumSupportedProtocolVersion: number;
           /** The oldest Happy Agent product version this build works with. */
           minimumSupportedVersion: string;
       }
     | {
-          status: "compatible" | "server_outdated" | "client_outdated";
-          maximumSupportedProtocolVersion: number;
+          status: "compatible" | "server_outdated";
           minimumSupportedProtocolVersion: number;
           /** The oldest Happy Agent product version this build works with. */
           minimumSupportedVersion: string;

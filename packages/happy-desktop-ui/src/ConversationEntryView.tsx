@@ -1,16 +1,21 @@
 import { type CSSProperties, type ReactNode } from "react";
-import { thumbHashToDataURL } from "thumbhash";
+import type { FileOpenHandler } from "./fileReference";
+import type { LinkOpenHandler, LinkOpenPlacement } from "./MessageMarkdown";
+import type { MessageReferences } from "./messageReferences";
+import { thumbhashDataUrl } from "./thumbhashDataUrl";
 import type {
     AgentTurnTraceSummary,
     ConversationAttachment,
     ConversationAuthor,
     ConversationEntry,
+    ConversationErrorAssistance,
     ConversationToolCall,
     UserError,
 } from "happy-desktop-state";
 import { AgentActivityRow, type ActivityMotion, type ActivityTreatment } from "./AgentActivityRow";
 import { ConversationComputeEvent } from "./ConversationComputeEvent";
 import { ConversationErrorCard } from "./ConversationErrorCard";
+import { conversationErrorTitle } from "./conversationErrorTitle";
 import { DelegatedAgentActivity } from "./DelegatedAgentActivity";
 import { TurnSummary } from "./TurnSummary";
 import { AgentTraceRow } from "./AgentTraceRow";
@@ -27,6 +32,8 @@ type ConversationLinkedAttachment = Extract<ConversationAttachment, { kind: "lin
 
 export type ConversationEntryViewProps = {
     entry: ConversationEntry;
+    errorAssistance?: ConversationErrorAssistance;
+    onErrorAssistanceRequest?: (entryId: string) => void;
     /** Identity heading for the first activity in an agent turn. */
     activityAuthor?: ConversationAuthor;
     /** Identity id of the reader, so their own messages take the own treatment. */
@@ -64,7 +71,13 @@ export type ConversationEntryViewProps = {
     /** Reference epoch millis used by live delegated-agent timers. */
     now?: number;
     /** Opens a workspace file named by a tool call or linked from a message. */
-    onFileOpen?: (path: string) => void;
+    onFileOpen?: FileOpenHandler;
+    /** Opens a web link from a message where its context menu asked for it. */
+    onLinkOpen?: LinkOpenHandler;
+    /** Which of the two places a plain click on a link goes, marked in its menu. */
+    linkOpenDefault?: LinkOpenPlacement;
+    /** What the Happy references a message names read as, and where opening one goes. */
+    references?: MessageReferences;
     /** Disables request controls while a prior submission is in flight. */
     requestPending?: boolean;
     /** Last failed submission for this request. */
@@ -214,6 +227,7 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
                         : undefined
                 }
                 {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+                {...(props.references ? { references: props.references } : {})}
                 singleLine={entry.activity.kind === "tool"}
                 time={
                     (entry.activity.kind === "tool" || entry.activity.kind === "agentMessage") &&
@@ -316,17 +330,17 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
         const notice =
             entry.level === "error" || entry.retry !== undefined ? (
                 <ConversationErrorCard
+                    assistance={props.errorAssistance}
+                    onAssistanceRequest={
+                        props.onErrorAssistanceRequest
+                            ? () => props.onErrorAssistanceRequest!(entry.id)
+                            : undefined
+                    }
                     className={props.activityAuthor ? undefined : props.className}
                     data-testid={props["data-testid"]}
                     reason={entry.text}
                     style={props.activityAuthor ? undefined : props.style}
-                    title={
-                        entry.retry === undefined
-                            ? (entry.title ?? "Error")
-                            : entry.retry.attempt === undefined || entry.retry.attempt === 1
-                              ? "Connection Error"
-                              : `Connection Error (Attempt ${String(entry.retry.attempt)})`
-                    }
+                    title={conversationErrorTitle(entry)}
                     tone={entry.retry ? "warning" : "error"}
                 />
             ) : (
@@ -400,7 +414,10 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
             agent={author?.kind === "agent"}
             author={author?.displayName ?? "Unknown"}
             {...(author?.sessionId === undefined ? {} : { avatarSessionId: author.sessionId })}
-            {...(author?.imageUrl === undefined ? {} : { imageUrl: author.imageUrl })}
+            imageUrl={
+                author?.imageUrl ??
+                (author?.avatar ? thumbhashDataUrl(author.avatar.thumbhash) : undefined)
+            }
             body={message.text}
             className={props.className}
             {...(props.contextNote === undefined ? {} : { contextNote: props.contextNote })}
@@ -429,6 +446,9 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
                     : undefined
             }
             {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+            {...(props.onLinkOpen ? { onLinkOpen: props.onLinkOpen } : {})}
+            {...(props.linkOpenDefault ? { linkOpenDefault: props.linkOpenDefault } : {})}
+            {...(props.references ? { references: props.references } : {})}
             own={own}
             style={props.style}
             time={messageTime(message.createdAt)}
@@ -508,16 +528,6 @@ function fileSizeFormat(bytes: number): string {
     if (bytes < 1024) return `${String(bytes)} B`;
     if (bytes < 1024 * 1024) return `${String(Math.round(bytes / 102.4) / 10)} KB`;
     return `${String(Math.round(bytes / (102.4 * 1024)) / 10)} MB`;
-}
-
-function thumbhashDataUrl(hash: string): string | undefined {
-    try {
-        const normalized = hash.replace(/-/gu, "+").replace(/_/gu, "/");
-        const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
-        return thumbHashToDataURL(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
-    } catch {
-        return undefined;
-    }
 }
 
 /**

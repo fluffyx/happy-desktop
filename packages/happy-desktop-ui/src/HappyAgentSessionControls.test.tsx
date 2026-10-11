@@ -9,21 +9,33 @@ import "./styles/happy-agent-chat.css";
 import { HappyAgentSessionControls } from "./HappyAgentSessionControls";
 import { createRenderer } from "./testing";
 
-const menus: HappyAgentMenusSnapshot = {
+const menusListed: Omit<HappyAgentMenusSnapshot, "currentOption"> = {
     modelOptions: [
         {
             providerId: "codex",
+            providerType: "codex",
             modelId: "gpt-5.6-sol",
             name: "GPT Sol",
             disabled: false,
             current: true,
+            efforts: [
+                { level: "medium", label: "Medium" },
+                { level: "high", label: "High" },
+            ],
+            defaultEffort: "medium",
         },
         {
             providerId: "claude",
+            providerType: "claude",
             modelId: "opus-4-8",
             name: "Opus",
             disabled: false,
             current: false,
+            efforts: [
+                { level: "medium", label: "Medium" },
+                { level: "high", label: "High" },
+            ],
+            defaultEffort: "medium",
         },
     ],
     effortOptions: [
@@ -40,9 +52,15 @@ const menus: HappyAgentMenusSnapshot = {
     ],
     currentProviderId: "codex",
     currentModelId: "gpt-5.6-sol",
+    currentAccount: "available",
     currentEffort: "medium",
     currentPermissionMode: "auto",
     currentServiceTier: undefined,
+};
+
+const menus: HappyAgentMenusSnapshot = {
+    ...menusListed,
+    currentOption: menusListed.modelOptions[0],
 };
 
 it("opens a control menu, selects an option, and closes on outside pointer-down", async () => {

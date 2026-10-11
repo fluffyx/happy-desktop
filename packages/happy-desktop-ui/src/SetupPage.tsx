@@ -1,12 +1,37 @@
 import { partitionComponentProps } from "./componentProps";
 import { type CSSProperties, type ReactNode } from "react";
 import { Button } from "./Button";
+import { Banner } from "./Banner";
 import type { Dimension } from "./dimensions";
 import { LottieScene, type LottieSceneName } from "./LottieScene";
 import { OnboardingSky } from "./OnboardingSky";
 import { ScrollArea } from "./Scrollbar";
+import { SetupCommand } from "./SetupCommand";
+import { Spinner } from "./Spinner";
 import type { ThemeMode } from "./ThemeScope";
 import { WindowDragRegion } from "./TitleBar";
+
+/** Keep the workspace mounted while first-run draft preparation finishes. */
+export function SetupHandoff(props: {
+    readonly children: ReactNode;
+    readonly error?: string;
+    readonly busy?: boolean;
+    readonly onRetry: () => void;
+}) {
+    return (
+        <div className="happy-setup-handoff" data-happy-desktop-ui="setup-handoff">
+            {props.error ? (
+                <Banner
+                    tone="neutral"
+                    action={props.busy ? undefined : { label: "Try again", onClick: props.onRetry }}
+                >
+                    {props.error}
+                </Banner>
+            ) : null}
+            <div className="happy-setup-handoff__content">{props.children}</div>
+        </div>
+    );
+}
 
 /**
  * How far a running action has got, for the few that can say.
@@ -28,11 +53,24 @@ export type SetupPageProgress =
           readonly fraction: number;
       };
 
+/**
+ * The live line just under the page's words: what is happening right now, and
+ * how far it has got. Every page that is waiting on something says so in this
+ * one place instead of wherever its body has room.
+ */
+export interface SetupPageStatus {
+    readonly label: string;
+    /** A bar, for work that has a length. Omitted for a plain line. */
+    readonly progress?: SetupPageProgress;
+    /** A spinner beside a plain line, while the page waits on something outside it. */
+    readonly busy?: boolean;
+}
+
 /** The one thing this page is asking for, if it is asking for anything. */
 export interface SetupPageAction {
     readonly label: string;
     readonly disabled?: boolean;
-    /** Omit for the standard full-width action; set for a compact centred action. */
+    /** Omit for the standard 240px action. */
     readonly width?: Dimension;
     /**
      * This action is running. The spinner goes on the button and the page keeps
@@ -51,7 +89,16 @@ export interface SetupPageAction {
     onSelect(): void;
 }
 
+/** The quiet way out under the primary action, such as skipping an optional step. */
+export interface SetupPageSecondaryAction {
+    readonly label: string;
+    readonly disabled?: boolean;
+    onSelect(): void;
+}
+
 export interface SetupPageProps {
+    /** A retained, compact stage indicator above the scrolling page content. */
+    readonly steps?: ReactNode;
     readonly className?: string;
     readonly "data-testid"?: string;
     readonly style?: CSSProperties;
@@ -68,33 +115,41 @@ export interface SetupPageProps {
      */
     readonly scene?: LottieSceneName;
     readonly title: string;
-    readonly copy?: string;
+    /** One short line under the title; may carry an inline link. Reserved when absent. */
+    readonly copy?: ReactNode;
+    readonly status?: SetupPageStatus;
     /**
      * A command the reader is meant to run themselves, shown selectable in the
      * monospace face. Present only when there is genuinely something to type: a
      * page that offers a command it does not need is a page that looks broken.
      */
     readonly command?: string;
-    /** This page's own body, when it has one: a fork, a terminal, a notice. */
+    /** What the page is for, under its words: columns, a QR code, a form. */
     readonly children?: ReactNode;
+    /** Pinned to the foot of the page, at the same place on every page. */
     readonly action?: SetupPageAction;
+    /** Under the primary action, in a slot every page reserves whether or not it is used. */
+    readonly secondary?: SetupPageSecondaryAction;
+    /** Pinned to the bottom-right corner, outside the page's own bands. */
+    readonly help?: ReactNode;
 }
 
 /**
  * C-252 SetupPage — one step of setup, as one centred page.
  *
- * Every state of first-run setup is the same shape: a picture that says what is
- * happening, a sentence naming it, a line explaining it, and at most one thing
- * to do. So they are all this component, and the only thing that changes
- * between them is which of those four are filled in.
+ * Every state of first-run setup is the same three places:
  *
- * It replaced a wrapper that carried a step rail, a kicker, a measure column, a
- * scrollport and a footer slot. The rail tracked two steps across eight states
- * and so tracked nothing; the kicker restated the title in capitals; and the
- * remaining chrome was empty on every screen that used it. What was left after
- * removing them was a worse `WelcomeScreen`, which is why this is deliberately
- * the same centred column that screen opens the product with — arriving at
- * setup should change the words on the surface, not the surface.
+ *   header   scene and title; the title sits on the window's centre line
+ *   core     subtitle and status line right under it, then what the page is
+ *            for, hanging from that line
+ *   footer   the primary action and a reserved slot under it for a way out,
+ *            pinned to the bottom
+ *
+ * So the words, the content, and the button stay where they are as the
+ * sequence moves; only what is written in them changes.
+ *
+ * Onboarding may supply a compact stage indicator. It stays outside the
+ * transitioning content and reports actual stages, not individual loading states.
  *
  * The scene is illustration and never information. `LottieScene` renders
  * nothing until its worker runtime arrives, and nothing at all in an engine that
@@ -117,9 +172,13 @@ export function SetupPage(props: SetupPageProps) {
         "scene",
         "title",
         "copy",
+        "status",
         "command",
         "children",
         "action",
+        "secondary",
+        "help",
+        "steps",
     ]);
     return (
         <div
@@ -129,10 +188,12 @@ export function SetupPage(props: SetupPageProps) {
             data-backdrop={local.backdrop?.kind}
             data-transition={local.transitionKey === undefined ? undefined : ""}
             data-testid={local["data-testid"]}
+            data-steps={local.steps ? "true" : undefined}
             style={local.style}
         >
             {local.backdrop ? <OnboardingSky appearance={local.backdrop.appearance} /> : null}
             <WindowDragRegion />
+            {local.steps ? <div className="happy-setup-page__steps">{local.steps}</div> : null}
             <ScrollArea
                 axes="both"
                 className="happy-setup-page__scroll"
@@ -143,71 +204,134 @@ export function SetupPage(props: SetupPageProps) {
                     data-happy-desktop-ui="setup-page-body"
                     key={local.transitionKey}
                 >
-                    {local.scene ? (
+                    {/* Scene and title, packed to the bottom of a band that ends
+                        on the centre line, so the title sits at the same height on
+                        every page. */}
+                    <div
+                        className="happy-setup-page__header"
+                        data-happy-desktop-ui="setup-page-header"
+                    >
                         <span
                             className="happy-setup-page__stage"
                             data-happy-desktop-ui="setup-page-stage"
                         >
-                            <LottieScene
-                                name={local.scene}
-                                // The picture repeats what the title already says, so
-                                // the only thing worth offering is one more play.
-                                replayLabel={local.title}
-                                size={120}
-                            />
+                            {local.scene ? (
+                                <LottieScene
+                                    name={local.scene}
+                                    // The picture repeats what the title already says, so
+                                    // the only thing worth offering is one more play.
+                                    replayLabel={local.title}
+                                    size={80}
+                                />
+                            ) : null}
                         </span>
-                    ) : null}
-                    <h1
-                        className="happy-setup-page__title"
-                        data-happy-desktop-ui="setup-page-title"
-                    >
-                        {local.title}
-                    </h1>
-                    {local.copy === undefined ? null : (
-                        <p
-                            className="happy-setup-page__copy"
-                            data-happy-desktop-ui="setup-page-copy"
+                        <h1
+                            className="happy-setup-page__title"
+                            data-happy-desktop-ui="setup-page-title"
                         >
-                            {local.copy}
-                        </p>
-                    )}
-                    {local.command === undefined ? null : (
-                        <code
-                            className="happy-setup-page__command"
-                            data-happy-desktop-ui="setup-page-command"
-                        >
-                            {local.command}
-                        </code>
-                    )}
-                    {local.children === undefined ? null : (
-                        <div
-                            className="happy-setup-page__slot"
-                            data-happy-desktop-ui="setup-page-slot"
-                        >
-                            {local.children}
+                            {local.title}
+                        </h1>
+                    </div>
+                    <div className="happy-setup-page__core" data-happy-desktop-ui="setup-page-core">
+                        {/* The subtitle keeps its line when a page has none, so the
+                            status and content below start at one height. */}
+                        <div className="happy-setup-page__lead">
+                            <p
+                                className="happy-setup-page__copy"
+                                data-happy-desktop-ui="setup-page-copy"
+                            >
+                                {local.copy}
+                            </p>
+                            {local.status ? (
+                                <SetupStatus
+                                    status={local.status}
+                                    tone={local.backdrop ? "inverse" : "default"}
+                                />
+                            ) : null}
                         </div>
-                    )}
-                    {local.action
-                        ? ((action) =>
-                              action.busy && action.progress ? (
-                                  <SetupProgress label={action.label} progress={action.progress} />
-                              ) : (
-                                  <Button
-                                      disabled={action.disabled}
-                                      loading={action.busy}
-                                      onClick={action.onSelect}
-                                      size="large"
-                                      {...(action.width === undefined
-                                          ? { fullWidth: true }
-                                          : { width: action.width })}
-                                  >
-                                      {action.label}
-                                  </Button>
-                              ))(local.action)
-                        : null}
+                        {local.command === undefined ? null : (
+                            <SetupCommand command={local.command} label="command" />
+                        )}
+                        {local.children === undefined ? null : (
+                            <div
+                                className="happy-setup-page__slot"
+                                data-happy-desktop-ui="setup-page-slot"
+                            >
+                                {local.children}
+                            </div>
+                        )}
+                    </div>
+                    {/* Both slots are always reserved, so the primary action sits
+                        at one height on every page whether or not a page offers a
+                        way out under it. */}
+                    <div
+                        className="happy-setup-page__footer"
+                        data-happy-desktop-ui="setup-page-footer"
+                    >
+                        <div className="happy-setup-page__footer-primary">
+                            {local.action
+                                ? ((action) =>
+                                      action.busy && action.progress ? (
+                                          <SetupProgress
+                                              label={action.label}
+                                              progress={action.progress}
+                                          />
+                                      ) : (
+                                          <Button
+                                              disabled={action.disabled}
+                                              loading={action.busy}
+                                              onClick={action.onSelect}
+                                              size="large"
+                                              width={action.width ?? 240}
+                                          >
+                                              {action.label}
+                                          </Button>
+                                      ))(local.action)
+                                : null}
+                        </div>
+                        <div className="happy-setup-page__footer-secondary">
+                            {local.secondary ? (
+                                <Button
+                                    disabled={local.secondary.disabled}
+                                    onClick={local.secondary.onSelect}
+                                    size="large"
+                                    variant="ghost"
+                                    width={240}
+                                >
+                                    {local.secondary.label}
+                                </Button>
+                            ) : null}
+                        </div>
+                    </div>
                 </div>
             </ScrollArea>
+            {local.help ? (
+                <div className="happy-setup-page__help" data-happy-desktop-ui="setup-page-help">
+                    {local.help}
+                </div>
+            ) : null}
         </div>
+    );
+}
+
+/** The header's live line: a bar when the work has a length, a quiet line otherwise. */
+function SetupStatus(props: {
+    readonly status: SetupPageStatus;
+    readonly tone: "default" | "inverse";
+}) {
+    const { status } = props;
+    if (status.progress)
+        return <SetupProgress label={status.label} progress={status.progress} tone={props.tone} />;
+    return (
+        <p
+            className="happy-setup-page__status"
+            data-happy-desktop-ui="setup-page-status"
+            data-tone={props.tone}
+            role="status"
+        >
+            {status.busy ? <Spinner size={14} tone={props.tone} /> : null}
+            <span>{status.label}</span>
+        </p>
     );
 }
 

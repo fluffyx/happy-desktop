@@ -1,5 +1,6 @@
 import "./styles.css";
 import { expect, it, vi } from "vitest";
+import { userEvent } from "vitest/browser";
 import { Sidebar, type SidebarSection } from "./Sidebar";
 import { createRenderer, type RenderedElement } from "./testing";
 
@@ -177,7 +178,7 @@ it("opens a row action menu on right click and reports the row with the selected
     expect(view.container.querySelector('[data-happy-desktop-ui="sidebar-item-menu"]')).toBeNull();
 });
 
-it("renders the Happy logo without a product title", async () => {
+it("renders the Happy Engineering wordmark without a product title", async () => {
     const view = createRenderer().render(
         () => (
             <Sidebar
@@ -195,17 +196,22 @@ it("renders the Happy logo without a product title", async () => {
     const logo = view.$('[data-happy-desktop-ui="sidebar-brand-logo"]');
     const logoImage = logo.element as HTMLImageElement;
     await logoImage.decode();
-    expect(logo.bounds()).toEqual({ x: 16, y: 22, width: 12, height: 12 });
-    expect(logo.computedStyles(["display", "height", "object-fit", "opacity", "width"])).toEqual({
+    // The stacked wordmark, at its own 5274 : 1932 proportions, centred in the
+    // 56px header band on the rows' ink inset.
+    const bounds = logo.bounds();
+    expect(bounds.x).toBe(16);
+    expect(bounds.y).toBe(14);
+    expect(bounds.height).toBe(28);
+    expect(bounds.width).toBeCloseTo((28 * 5274) / 1932, 1);
+    expect(logo.computedStyles(["display", "height", "object-fit", "opacity"])).toEqual({
         display: "block",
-        height: "12px",
+        height: "28px",
         "object-fit": "contain",
-        opacity: "0.55",
-        width: "12px",
+        opacity: "1",
     });
-    expect(logoImage.naturalWidth).toBe(1024);
-    expect(logoImage.getAttribute("alt")).toBe("");
-    expect(logoImage.getAttribute("aria-hidden")).toBe("true");
+    expect(logoImage.naturalWidth).toBe(211);
+    expect(logoImage.getAttribute("alt")).toBe("Happy Engineering");
+    expect(logoImage.getAttribute("aria-label")).toBe("Happy Engineering");
     expect((await logo.visibleMetrics()).pixelCount).toBeGreaterThan(0);
 
     expect(view.container.querySelector('[data-happy-desktop-ui="sidebar-title"]')).toBeNull();
@@ -1304,3 +1310,90 @@ it("paints the lock glyph for a private channel row and hash for a shared one", 
         "private channel stays a channel row",
     ).toBe("channel");
 });
+
+/*
+ * A section heading's secondary control — the Projects list's hide toggle —
+ * stands just before the heading's own action in the same 18px cell, a row's
+ * control gap apart. It waits at rest, shows while the pointer is anywhere over
+ * the section (not only its heading) or keyboard focus is inside it, and stays
+ * reachable on a section whose rows are hidden.
+ */
+it("reveals a section's secondary heading control over the whole section", async () => {
+    const acts: [string, string][] = [];
+    const view = createRenderer();
+    view.render(
+        () => (
+            <Sidebar
+                activeItemId=""
+                data-testid="secondary"
+                onItemSelect={() => {}}
+                onSectionAction={(id, source) => acts.push([id, source])}
+                style={{ width: 300 }}
+                sections={[
+                    {
+                        id: "projects",
+                        label: "Projects",
+                        action: { icon: "plus", label: "Add project", reveal: "always" },
+                        secondaryAction: { icon: "eye-off", label: "Hide projects" },
+                        items: [
+                            { id: "happy", kind: "project", label: "Happy", initials: "H" },
+                            {
+                                id: "base",
+                                kind: "workspace",
+                                depth: 1,
+                                label: "changes-comparison-base",
+                                changeStats: { added: 40, deleted: 2 },
+                            },
+                        ],
+                    },
+                    {
+                        id: "hidden",
+                        label: "Hidden",
+                        action: { icon: "plus", label: "Add hidden", reveal: "always" },
+                        secondaryAction: { icon: "eye", label: "Show hidden" },
+                        items: [],
+                    },
+                ]}
+            />
+        ),
+        { width: 324, height: 240 },
+    );
+    await view.ready();
+
+    const control = (section: string, slot: "secondary-action" | "action") =>
+        view.$(
+            `[data-testid="secondary"] [data-section-id="${section}"] [data-happy-desktop-ui="sidebar-section-${slot}"]`,
+        );
+    const secondary = control("projects", "secondary-action");
+    const action = control("projects", "action");
+    expect(secondary.element.getAttribute("aria-label")).toBe("Hide projects");
+    expect(secondary.computedStyle("opacity")).toBe("0");
+    expect(secondary.bounds().width).toBe(18);
+    expect(secondary.bounds().height).toBe(action.bounds().height);
+    expect(secondary.bounds().y).toBe(action.bounds().y);
+    expect(action.bounds().x - (secondary.bounds().x + secondary.bounds().width)).toBe(4);
+
+    // Hovering a row of the section reveals it, not only hovering the heading.
+    const row = view.$('[data-testid="secondary"] [data-item-id="base"]');
+    await userEvent.hover(row.element);
+    for (const animation of secondary.element.getAnimations()) animation.finish();
+    expect(secondary.computedStyle("opacity")).toBe("1");
+    const ink = await secondary.visibleMetrics();
+    expect(ink.pixelCount, "secondary glyph ink").toBeGreaterThan(0);
+    await view.screenshot("Sidebar.sectionSecondary");
+
+    // A section whose rows are hidden still offers the way back.
+    const show = control("hidden", "secondary-action");
+    await userEvent.hover(show.element);
+    for (const animation of show.element.getAnimations()) animation.finish();
+    expect(show.computedStyle("opacity")).toBe("1");
+
+    await userEvent.click(secondary.element);
+    await userEvent.click(action.element);
+    await userEvent.click(show.element);
+    expect(acts).toEqual([
+        ["projects", "secondary"],
+        ["projects", "heading"],
+        ["hidden", "secondary"],
+    ]);
+}, 120_000);

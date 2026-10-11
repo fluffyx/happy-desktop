@@ -11,14 +11,22 @@ import {
 } from "@tanstack/react-router";
 import { happyAgentHistoryCreate, type HappyAgentRouterHistory } from "./happyAgentHistory";
 import { happyAgentRoutePathParse } from "./happyAgentRoute";
+import { useSyncExternalStore } from "react";
+import { HappyAgentOnboardingBoundary } from "../components/HappyAgentOnboardingBoundary";
 import type {
     AppearanceStore,
     CommandPaletteStore,
     ExperimentsStore,
+    ProjectsVisibilityStore,
+    GptLiveStore,
     HappyAgentGroupId,
+    UsageAnalyticsStore,
+    KeepAwakeStore,
+    StatusBarStore,
     HappyAgentFileTabKind,
     HappyAgentNavigationOrderStore,
     HappyAgentSidebarCollapseStore,
+    HappyAgentSidebarVisibilityStore,
     HappyAgentSessionId,
     HappyAgentSessionLocation,
     HappyAgentSettingsStore,
@@ -26,10 +34,13 @@ import type {
     HappyAgentWindowStore,
     HappyAgentWorkspaceStore,
 } from "happy-desktop-state";
-import type {
-    BrowserContentRenderer,
-    HtmlPreviewRenderer,
-    MediaWindowOpener,
+import {
+    botFacePaint,
+    SplashScreen,
+    type BrowserContentRenderer,
+    type HtmlPreviewRenderer,
+    type LivePerformanceStore,
+    type MediaWindowOpener,
 } from "happy-desktop-ui";
 import {
     AppHappyAgentView,
@@ -45,6 +56,7 @@ import {
     type AppHappyAgentDebugStore,
     type AppHappyAgentProfilerStore,
 } from "../views/AppHappyAgentSettingsView";
+import type { AppHappyAgentUpdateStore } from "../agentUpdate";
 
 /**
  * Everything the local route tree needs that the URL does not address: the
@@ -55,18 +67,32 @@ import {
  * can be constructed before any Happy Agent connects.
  */
 export interface HappyAgentRouterContext {
+    /** A remote daemon uses its own setup inside this connection's router. */
+    readonly connectionOnboarding?: boolean;
     /** Native Chromium guest renderer, present only in packaged Electron. */
     readonly browserContent?: BrowserContentRenderer;
     /** Renders one HTML workspace file as a page, in a host that has an engine. */
     readonly htmlPreview?: HtmlPreviewRenderer;
+    /** The host's isolated guest for an HTML artifact served as a site. */
+    readonly artifactPage?: HtmlPreviewRenderer;
     /**
      * Shows one workspace picture or recording in a window outside this one.
      * Present only in a shell that has separate windows to open, which is
      * packaged Electron.
      */
     readonly mediaWindow?: MediaWindowOpener;
+    /**
+     * Opens one web address in the machine's own browser rather than in an
+     * embedded tab. Present only in a shell that can ask its host to, which is
+     * packaged Electron; a browser tab opens links its own way.
+     */
+    readonly externalLinkOpen?: (url: string) => void;
     readonly debug?: AppHappyAgentDebugStore;
+    /** Live renderer diagnostics, present only in an explicitly debug-launched desktop window. */
+    readonly performance?: LivePerformanceStore;
     readonly daemon?: AppHappyAgentDaemonStore;
+    /** The local Happy Agent update card, beside `daemon` and only with it. */
+    readonly agentUpdate?: AppHappyAgentUpdateStore;
     readonly profiler?: AppHappyAgentProfilerStore;
     readonly happyAgents: AppHappyAgentDirectoryStore;
     /** This build's development identity; absent in the packaged product. */
@@ -85,11 +111,30 @@ export interface HappyAgentRouterContext {
      * Absent in a host that keeps no such record, which leaves every row open.
      */
     readonly sidebarCollapse?: HappyAgentSidebarCollapseStore;
+    /** Whether this window's left side is folded away; shared by every connection. */
+    readonly sidebarVisibility?: HappyAgentSidebarVisibilityStore;
     /**
      * Whether this window offers the features that are not finished yet. Absent
      * in a host that remembers no such choice, which withholds them.
      */
     readonly experiments?: ExperimentsStore;
+    /**
+     * Whether the sidebar leaves the Projects sections out, for every
+     * connection. Absent in a host that remembers no such choice, which shows them.
+     */
+    readonly projectsVisibility?: ProjectsVisibilityStore;
+    /** Whether this window sends product analytics events. Absent where it sends none. */
+    readonly usageAnalytics?: UsageAnalyticsStore;
+    /** Window-owned GPT-Live opt-in; unrelated to coding-provider settings. */
+    readonly gptLive?: GptLiveStore;
+    /**
+     * Whether this computer is held out of sleep, and the choice behind it.
+     * Absent in a host that cannot hold the machine awake, which leaves the
+     * footer without the control rather than with one wired to nothing.
+     */
+    readonly keepAwake?: KeepAwakeStore;
+    /** Which optional controls the sidebar's status bar shows. */
+    readonly statusBar?: StatusBarStore;
     /** Window-local preference for animated activity titles. */
     readonly titleShimmer?: TitleShimmerStore;
     /**
@@ -115,8 +160,46 @@ export interface HappyAgentRouterContext {
 }
 
 const rootRoute = createRootRouteWithContext<HappyAgentRouterContext>()({
-    component: () => <Outlet />,
+    component: HappyAgentRoot,
 });
+
+function HappyAgentRoot() {
+    const context = useRouteContext({ strict: false }) as HappyAgentRouterContext;
+    if (!context.happyAgents) return null;
+    return <HappyAgentRootContent context={context} />;
+}
+
+function HappyAgentRootContent({ context }: { readonly context: HappyAgentRouterContext }) {
+    const directory = useSyncExternalStore(
+        context.happyAgents.subscribe,
+        context.happyAgents.get,
+        context.happyAgents.get,
+    );
+    const entry = directory.happyAgents[0];
+    // Sessions survive reconnects. Only the first connection gets a splash;
+    // an already materialized workspace must keep its mounted UI and drafts.
+    const setup = entry?.setup;
+    if (!context.connectionOnboarding) return <Outlet />;
+    const content = entry?.session ? (
+        <Outlet />
+    ) : (
+        <SplashScreen note={entry?.message ?? `Connecting to ${entry?.label ?? "Happy Agent"}…`} />
+    );
+    if (!setup) return content;
+    return (
+        <HappyAgentOnboardingBoundary
+            store={setup.onboarding}
+            welcome={setup.welcome}
+            appearance={context.appearance}
+            profile={setup.profile}
+            online={entry?.status === "connected"}
+            onRetry={setup.retry}
+            {...(context.externalLinkOpen ? { onExternalOpen: context.externalLinkOpen } : {})}
+        >
+            {content}
+        </HappyAgentOnboardingBoundary>
+    );
+}
 
 /**
  * The Happy Agent a bare address lands on: the first one in the window, which is the
@@ -259,19 +342,34 @@ const chatFileRoute = createRoute({
 });
 
 /**
- * Where a session is started on one machine. Arriving materializes the draft —
- * the task written on a previous visit is offered back, because the store keeps
- * it until a session actually starts — and the surface then holds the whole
- * content region until the reader goes somewhere else or the new session takes
- * them there.
+ * Where a new bot is named on one machine. Arriving materializes the draft — a
+ * name written on a previous visit is offered back, because the store keeps it
+ * until the bot is actually made — and the surface then holds the whole content
+ * region until the reader goes somewhere else or the new bot takes them there.
  */
-const sessionCreateRoute = createRoute({
-    component: HappyAgentCreateRoute,
+const botCreateRoute = createRoute({
+    component: HappyAgentBotCreateRoute,
     getParentRoute: () => rootRoute,
     loader: ({ context, params }) => {
-        happyAgentWorkspace(context, params.happyAgentId)?.createOpen();
+        // The store owns the seeds and the order of what happens; the painter
+        // is lent to it because a canvas lives here, not there.
+        happyAgentWorkspace(context, params.happyAgentId)?.botCreateOpen(botFacePaint);
     },
-    path: "/create/$happyAgentId",
+    path: "/bots/new/$happyAgentId",
+});
+
+/**
+ * Where a new task is made on one machine. Arriving materializes the draft, as
+ * the bot route does, and the surface holds the content region until the
+ * reader goes elsewhere or the new task takes them there.
+ */
+const taskCreateRoute = createRoute({
+    component: HappyAgentTaskCreateRoute,
+    getParentRoute: () => rootRoute,
+    loader: ({ context, params }) => {
+        happyAgentWorkspace(context, params.happyAgentId)?.taskCreateOpen();
+    },
+    path: "/tasks/new/$happyAgentId",
 });
 
 /**
@@ -286,11 +384,21 @@ const inboxRoute = createRoute({
     path: "/inbox/$happyAgentId",
 });
 
-/** One machine's enrolled Happy Social friends and requests. */
-const socialRoute = createRoute({
-    component: HappyAgentSocialRoute,
+/**
+ * One machine's published artifacts. The Happy Agent is in the address because
+ * the catalog is that machine's, the way its inbox is.
+ */
+const artifactsRoute = createRoute({
+    component: HappyAgentArtifactsRoute,
     getParentRoute: () => rootRoute,
-    path: "/social/$happyAgentId",
+    path: "/artifacts/$happyAgentId",
+});
+
+/** One artifact open in the viewer, on the machine that keeps it. */
+const artifactRoute = createRoute({
+    component: HappyAgentArtifactsRoute,
+    getParentRoute: () => rootRoute,
+    path: "/artifacts/$happyAgentId/$artifactId",
 });
 
 /**
@@ -325,8 +433,13 @@ const settingsSectionRoute = createRoute({
     component: HappyAgentSettingsRoute,
     getParentRoute: () => rootRoute,
     path: "/settings/$section",
-    beforeLoad: ({ params }) => {
-        if (!happyAgentSettingsCategoryExists(params.section))
+    beforeLoad: ({ params, context }) => {
+        if (
+            !happyAgentSettingsCategoryExists(
+                params.section,
+                context.experiments?.get().experimentalFeaturesEnabled,
+            )
+        )
             throw redirect({
                 params: { section: HAPPY_AGENT_SETTINGS_DEFAULT_CATEGORY },
                 replace: true,
@@ -346,8 +459,10 @@ const routeTree = rootRoute.addChildren([
         chatFileRoute,
     ]),
     inboxRoute,
-    socialRoute,
-    sessionCreateRoute,
+    artifactsRoute,
+    artifactRoute,
+    botCreateRoute,
+    taskCreateRoute,
     ...(import.meta.env.DEV ? [blueprintRoute] : []),
     settingsIndexRoute,
     settingsSectionRoute,
@@ -362,17 +477,27 @@ function HappyAgentInboxRoute() {
     return <HappyAgentWorkspaceLayout inbox />;
 }
 
-function HappyAgentSocialRoute() {
-    return <HappyAgentWorkspaceLayout social />;
+/**
+ * The artifact addresses render the same window a conversation does: the shell
+ * and its sidebar stay, and the catalog or the open artifact takes the content
+ * area.
+ */
+function HappyAgentArtifactsRoute() {
+    return <HappyAgentWorkspaceLayout artifacts />;
 }
 
 /**
- * The Create address renders the same window a conversation does: the shell and
- * its sidebar stay, and only the content area changes, so starting a session is
- * not leaving the workspace.
+ * The naming address renders the same window a conversation does: the shell and
+ * its sidebar stay, and only the content area changes, so making a bot is not
+ * leaving the workspace.
  */
-function HappyAgentCreateRoute() {
-    return <HappyAgentWorkspaceLayout create />;
+function HappyAgentBotCreateRoute() {
+    return <HappyAgentWorkspaceLayout botCreate />;
+}
+
+/** The task's address renders the same window, as the bot's does. */
+function HappyAgentTaskCreateRoute() {
+    return <HappyAgentWorkspaceLayout taskCreate />;
 }
 
 /**
@@ -385,10 +510,11 @@ function HappyAgentBlueprintRoute() {
 
 function HappyAgentWorkspaceLayout(
     props: {
+        artifacts?: boolean;
         blueprint?: boolean;
-        create?: boolean;
+        botCreate?: boolean;
         inbox?: boolean;
-        social?: boolean;
+        taskCreate?: boolean;
     } = {},
 ) {
     // Read loosely because this component renders under several routes, which
@@ -409,30 +535,46 @@ function HappyAgentWorkspaceLayout(
             appearance={context.appearance}
             browserContent={context.browserContent}
             buildIdentity={context.buildIdentity}
+            performance={context.performance}
             htmlPreview={context.htmlPreview}
+            {...(context.artifactPage ? { artifactPage: context.artifactPage } : {})}
             mediaWindow={context.mediaWindow}
+            {...(context.externalLinkOpen ? { onExternalLinkOpen: context.externalLinkOpen } : {})}
             chatId={params.chatId}
             groupId={params.groupId}
             {...(context.daemon ? { daemon: context.daemon } : {})}
+            {...(context.agentUpdate ? { agentUpdate: context.agentUpdate } : {})}
             {...(context.experiments ? { experiments: context.experiments } : {})}
+            {...(context.projectsVisibility
+                ? { projectsVisibility: context.projectsVisibility }
+                : {})}
+            {...(context.gptLive ? { gptLive: context.gptLive } : {})}
+            {...(context.keepAwake ? { keepAwake: context.keepAwake } : {})}
+            {...(context.statusBar ? { statusBar: context.statusBar } : {})}
             {...(context.titleShimmer ? { titleShimmer: context.titleShimmer } : {})}
             {...(context.commandPalette ? { commandPalette: context.commandPalette } : {})}
             {...(context.navigationOrder ? { navigationOrder: context.navigationOrder } : {})}
             {...(context.sidebarCollapse ? { sidebarCollapse: context.sidebarCollapse } : {})}
-            createOpen={props.create}
+            {...(context.sidebarVisibility ? { sidebarVisibility: context.sidebarVisibility } : {})}
+            settings={context.settings}
+            botCreateOpen={props.botCreate}
+            taskCreateOpen={props.taskCreate}
             inboxOpen={props.inbox}
-            socialOpen={props.social}
+            artifactsOpen={props.artifacts}
+            {...(props.artifacts && params.artifactId !== undefined
+                ? { artifactId: params.artifactId }
+                : {})}
             blueprintOpen={props.blueprint}
             // Offered only where the route exists, which is what puts the
             // workbench row in a development sidebar and nowhere else.
             {...(import.meta.env.DEV
                 ? { onBlueprintOpen: () => void navigate({ to: "/blueprint" }) }
                 : {})}
-            onCreateOpen={() =>
-                void navigate({
-                    params: { happyAgentId: params.happyAgentId ?? happyAgentDefaultId(context) },
-                    to: "/create/$happyAgentId",
-                })
+            onBotCreateOpen={(happyAgentId) =>
+                void navigate({ params: { happyAgentId }, to: "/bots/new/$happyAgentId" })
+            }
+            onTaskCreateOpen={(happyAgentId) =>
+                void navigate({ params: { happyAgentId }, to: "/tasks/new/$happyAgentId" })
             }
             onInboxOpen={() =>
                 void navigate({
@@ -440,12 +582,19 @@ function HappyAgentWorkspaceLayout(
                     to: "/inbox/$happyAgentId",
                 })
             }
-            onSocialOpen={() =>
+            onArtifactsOpen={() =>
                 void navigate({
                     params: { happyAgentId: params.happyAgentId ?? happyAgentDefaultId(context) },
-                    to: "/social/$happyAgentId",
+                    to: "/artifacts/$happyAgentId",
                 })
             }
+            onArtifactOpen={(happyAgentId, artifactId) =>
+                void navigate({
+                    params: { artifactId, happyAgentId },
+                    to: "/artifacts/$happyAgentId/$artifactId",
+                })
+            }
+            onArtifactClose={(happyAgentId) => happyAgentRouterArtifactClose(router, happyAgentId)}
             onUpdateApply={context.onUpdateApply}
             platform={context.platform}
             happyAgentId={params.happyAgentId ?? happyAgentDefaultId(context)}
@@ -512,7 +661,10 @@ function HappyAgentWorkspaceLayout(
             onSettingsSectionOpen={(section) =>
                 void navigate({
                     params: {
-                        section: happyAgentSettingsCategoryExists(section)
+                        section: happyAgentSettingsCategoryExists(
+                            section,
+                            context.experiments?.get().experimentalFeaturesEnabled,
+                        )
                             ? section
                             : HAPPY_AGENT_SETTINGS_DEFAULT_CATEGORY,
                     },
@@ -539,6 +691,13 @@ function HappyAgentSettingsRoute() {
             {...(context.debug ? { debug: context.debug } : {})}
             {...(context.profiler ? { profiler: context.profiler } : {})}
             {...(context.experiments ? { experiments: context.experiments } : {})}
+            {...(context.projectsVisibility
+                ? { projectsVisibility: context.projectsVisibility }
+                : {})}
+            {...(context.usageAnalytics ? { usageAnalytics: context.usageAnalytics } : {})}
+            {...(context.gptLive ? { gptLive: context.gptLive } : {})}
+            {...(context.keepAwake ? { keepAwake: context.keepAwake } : {})}
+            {...(context.statusBar ? { statusBar: context.statusBar } : {})}
             onCategorySelect={(section) =>
                 void navigate({ params: { section }, to: "/settings/$section" })
             }
@@ -548,6 +707,7 @@ function HappyAgentSettingsRoute() {
             section={params.section ?? HAPPY_AGENT_SETTINGS_DEFAULT_CATEGORY}
             settings={context.settings}
             {...(context.titleShimmer ? { titleShimmer: context.titleShimmer } : {})}
+            {...(context.sidebarVisibility ? { sidebarVisibility: context.sidebarVisibility } : {})}
             windowState={context.windowState}
         />
     );
@@ -591,6 +751,32 @@ export function happyAgentRouterConversationOpen(
     });
 }
 
+/** Uses the router's explicit route identity, never a pathname convention. */
+export function happyAgentRouterWorkspaceVisible(router: HappyAgentRouter): boolean {
+    return router.state.matches.some((match) => match.routeId === workspaceRoute.id);
+}
+
+/**
+ * Leaves an artifact for wherever it was opened from — the catalog, or the chat
+ * whose panel listed it. A window opened straight onto an artifact has nowhere
+ * behind it, so it lands on the catalog in place rather than growing a step
+ * that Back would return to the artifact through.
+ */
+export function happyAgentRouterArtifactClose(
+    router: HappyAgentRouter,
+    happyAgentId: string,
+): void {
+    if (router.history.canGoBack()) {
+        router.history.back();
+        return;
+    }
+    void router.navigate({
+        params: { happyAgentId },
+        replace: true,
+        to: "/artifacts/$happyAgentId",
+    });
+}
+
 /**
  * Addresses a group that holds no conversation yet, such as a worktree the
  * reader has just added. The conversation started in it re-addresses the same
@@ -619,6 +805,43 @@ export function happyAgentRouterFileForget(
     path: string,
 ): void {
     const changed = router.history.fileForget(happyAgentId, groupId, path);
+    if (changed && router.history.subscribers.size === 0)
+        void router.load({ action: { type: "REPLACE" } });
+}
+
+/**
+ * Takes bot subtasks the host stopped listing out of this window's navigation.
+ * Each removed conversation's remembered addresses go, so Back never reopens a
+ * task that was archived. A reader who stood in one is then put on `open`, the
+ * nearest conversation above it that is still listed, in place of where they
+ * were rather than as a new step.
+ */
+export function happyAgentRouterSubtasksForget(
+    router: HappyAgentRouter,
+    happyAgentId: string,
+    removed: readonly HappyAgentSessionLocation[],
+    open: HappyAgentSessionLocation | undefined,
+): void {
+    // Read before the stack is repaired: the repair itself moves a reader off
+    // a removed conversation, and only one who stood there is moved on again.
+    const shown = happyAgentRoutePathParse(router.history.location.pathname);
+    const stoodInRemoved =
+        (shown?.kind === "chat" || shown?.kind === "file") &&
+        shown.happyAgentId === happyAgentId &&
+        removed.some((location) => location.sessionId === shown.chatId);
+    let changed = false;
+    for (const location of removed)
+        changed =
+            router.history.sessionForget(happyAgentId, location.groupId, location.sessionId) ||
+            changed;
+    if (open !== undefined && stoodInRemoved) {
+        void router.navigate({
+            params: { chatId: open.sessionId, groupId: open.groupId, happyAgentId },
+            replace: true,
+            to: "/chats/$happyAgentId/$groupId/$chatId",
+        });
+        return;
+    }
     if (changed && router.history.subscribers.size === 0)
         void router.load({ action: { type: "REPLACE" } });
 }

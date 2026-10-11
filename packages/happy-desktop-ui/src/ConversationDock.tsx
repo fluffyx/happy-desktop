@@ -7,6 +7,7 @@ import { Composer, type Mentionable } from "./Composer";
 import type { ComposerAttachmentPreview } from "./ComposerAttachmentPreviews";
 import { Lightbox } from "./Lightbox";
 import { ModalOverlay } from "./ModalOverlay";
+import { reviewCommentPlace } from "./ReviewComment";
 import { WindowOverlay } from "./WindowOverlay";
 
 export type ConversationDockProps = {
@@ -51,6 +52,24 @@ export type ConversationDockProps = {
 /** Projects draft payloads into presentation-only square previews. */
 function attachmentPreviewsOf(composer: ComposerSnapshot): ComposerAttachmentPreview[] {
     return composer.attachments.map((attachment) => {
+        // Notes have no bytes and nothing to look at: what the reader needs to
+        // see is that they are still going with this message, and how many.
+        if (attachment.kind === "reviewComments")
+            return {
+                id: attachment.id,
+                kind: "comments" as const,
+                name:
+                    attachment.comments.length === 1
+                        ? "1 comment"
+                        : `${String(attachment.comments.length)} comments`,
+                notes: attachment.comments.map((comment, index) => ({
+                    id: `${comment.path}:${String(comment.lineNumber)}:${String(index)}`,
+                    path: comment.path,
+                    place: reviewCommentPlace(comment.lineNumber, comment.side),
+                    text: comment.text,
+                    ...(comment.stale ? { stale: true } : {}),
+                })),
+            };
         const mediaType = attachment.mediaType;
         const kind = mediaType.startsWith("image/")
             ? "image"
@@ -306,6 +325,12 @@ export type ComposerFooterBarProps = {
     "data-testid"?: string;
     /** Sits at the start of the row: the session's own controls. */
     leading?: ReactNode;
+    /**
+     * One quiet sentence at the end of the row, for what sending here does when
+     * that is not the obvious thing — a send that also makes the bot it is
+     * addressed to. Kept to a few words: it is read in the moment before Enter.
+     */
+    note?: string;
     style?: CSSProperties;
     /** Sits at the end of the row: what the message is being written into. */
     trailing?: ReactNode;
@@ -326,7 +351,17 @@ export function ComposerFooterBar(props: ComposerFooterBarProps) {
             style={props.style}
         >
             <div className="happy-composer-footer-bar__group">{props.leading}</div>
-            <div className="happy-composer-footer-bar__group">{props.trailing}</div>
+            <div className="happy-composer-footer-bar__group">
+                {props.note ? (
+                    <span
+                        className="happy-composer-footer-bar__note"
+                        data-happy-desktop-ui="composer-footer-bar-note"
+                    >
+                        {props.note}
+                    </span>
+                ) : null}
+                {props.trailing}
+            </div>
         </div>
     );
 }

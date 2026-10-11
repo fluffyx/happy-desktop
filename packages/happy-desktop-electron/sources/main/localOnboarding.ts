@@ -6,10 +6,13 @@ import type {
     DesktopDaemonSnapshot,
     DesktopRuntimeSnapshot,
     LocalAssistantId,
+    LocalAppsSnapshot,
     LocalAssistantState,
     LocalOnboardingFreshness,
     LocalOnboardingSnapshot,
+    LocalOnboardingStepBack,
 } from "../shared/desktopContract";
+import { localAppsDetect } from "./localApps";
 import { localRuntimeProbe, type LocalRuntimeProbe } from "./localHappyAgent";
 
 const recordVersion = 3;
@@ -18,19 +21,9 @@ const recordVersion = 3;
 const LOCAL_ASSISTANT_IDS: readonly LocalAssistantId[] = ["claude", "codex", "grok"];
 
 export type LocalHappyAgentOnboardingState =
-    | {
-          /** Whether provider setup is the only gate in front of the profile. */
-          readonly profileDone: boolean;
-          readonly state: "complete" | "profile_required" | "provider_setup";
-      }
+    | { readonly state: "complete" | "provider_setup" }
     | { readonly message: string; readonly state: "happy_agent_unreachable" };
 
-export interface LocalHappyAgentProfile {
-    readonly email: string | null;
-    readonly name: string | null;
-    readonly updatedAt: number;
-    readonly version: string;
-}
 /**
  * How often the machine is re-examined while setup is waiting on something the
  * person does outside Happy — installing Node or Happy Agent, or repairing a Happy Agent that
@@ -79,6 +72,8 @@ function providersMissingParse(message: string): readonly string[] | undefined {
 
 /** The decisions first-run setup writes down, and nothing it can observe instead. */
 export interface LocalOnboardingRecord {
+    /** First-project setup was explicitly handed to an unsent Chief of Staff draft. */
+    readonly chiefOfStaffSetup?: true;
     /** The last folder opened as a project, kept for display rather than for stages. */
     readonly projectPath?: string;
     readonly version: typeof recordVersion;
@@ -118,14 +113,17 @@ export async function localOnboardingRecordRead(
  * actually have written.
  */
 function recordParse(parsed: Record<string, unknown>): LocalOnboardingRecord | undefined {
-    const allowed = new Set(["version", "projectPath"]);
+    const allowed = new Set(["version", "projectPath", "chiefOfStaffSetup"]);
     for (const key of Object.keys(parsed)) if (!allowed.has(key)) return undefined;
 
     const pathValue = parsed.projectPath;
     if (pathValue !== undefined && (typeof pathValue !== "string" || !pathValue)) return undefined;
     const projectPath = pathValue as string | undefined;
+    if (parsed.chiefOfStaffSetup !== undefined && parsed.chiefOfStaffSetup !== true)
+        return undefined;
 
     return {
+        ...(parsed.chiefOfStaffSetup === true ? { chiefOfStaffSetup: true as const } : {}),
         ...(projectPath === undefined ? {} : { projectPath }),
         version: recordVersion,
     };
@@ -183,10 +181,6 @@ export interface LocalOnboardingRuntime {
     subscribe(listener: (snapshot: DesktopRuntimeSnapshot) => void): () => void;
     retry(): Promise<void>;
     localOnboardingResolve(connectionId: number): Promise<LocalHappyAgentOnboardingState>;
-    localOnboardingProfileCreate(
-        connectionId: number,
-        input: { readonly email: string; readonly name: string },
-    ): Promise<LocalHappyAgentProfile>;
     localOnboardingFreshness(connectionId: number): Promise<"fresh" | "used">;
     localOnboardingProjectAdd(
         connectionId: number,
@@ -205,6 +199,8 @@ export interface LocalOnboardingOptions {
     readonly recordPath: string;
     readonly runtime: LocalOnboardingRuntime;
     readonly probe?: () => Promise<LocalRuntimeProbe>;
+    /** Looks for the machine's other coding apps, given the PATH the probe found. */
+    readonly localAppsDetect?: (path: string | undefined) => Promise<LocalAppsSnapshot>;
     /** Opens the native folder picker; resolves to undefined when cancelled. */
     readonly directoryPick: () => Promise<string | undefined>;
     /**
@@ -249,6 +245,9 @@ export class LocalOnboarding implements Disposable {
     private poll?: ReturnType<typeof setInterval>;
     private probing?: Promise<void>;
     private probed?: LocalRuntimeProbe;
+    /** Looked for once per run, after the first probe that succeeds. */
+    private localApps?: LocalAppsSnapshot;
+    private localAppsDetecting = false;
     private probeRetry?: ReturnType<typeof setTimeout>;
     private probeRetryMs?: number;
     /**
@@ -320,12 +319,24 @@ export class LocalOnboarding implements Disposable {
      */
     private assistantsAcknowledged = false;
     /**
-     * The person chose to leave the provider-authentication report, either
-     * after its daemon checks completed or through Skip. This is deliberately
-     * an in-memory presentation decision: it neither changes provider config
-     * nor claims credentials became valid.
+     * The person chose to leave the provider-authentication report after its
+     * checks found something usable. This is deliberately an in-memory
+     * presentation decision: it neither changes provider config nor claims
+     * credentials became valid.
      */
     private providerSetupAcknowledged = false;
+    /**
+     * A step the person deliberately went back to.
+     *
+     * Every stage is derived from what is true of the machine, so going back
+     * cannot be a remembered position: it is one flag saying which finished
+     * step is being looked at again, and finishing that step clears it and
+     * hands the sequence back to the truth. Only one is ever set, which is what
+     * keeps the flow linear.
+     */
+    private reopened?: LocalOnboardingStepBack;
+    /** Where the sequence stands while a finished step is being looked at again. */
+    private liveStage?: LocalOnboardingSnapshot["stage"];
     private runtimeKey?: string;
     /** Durable work runs one at a time, so two clicks cannot interleave writes. */
     private durableQueue: Promise<void> = Promise.resolve();
@@ -381,10 +392,48 @@ export class LocalOnboarding implements Disposable {
      * news either way.
      */
     assistantsContinue(): void {
+        // The same button finishes a revisited step: whichever one is being
+        // looked at again, continuing from it returns to the live sequence.
+        // It must not also acknowledge the live subscriptions step beneath
+        // that revisit — going Setup → Continue from Subscriptions still owes
+        // Subscriptions, especially when no provider is usable yet.
+        if (this.reopened !== undefined) {
+            this.reopened = undefined;
+            this.publish();
+            return;
+        }
         if (this.assistantsAcknowledged && this.providerSetupAcknowledged) return;
         this.assistantsAcknowledged = true;
         this.providerSetupAcknowledged = true;
         this.publish();
+    }
+
+    /**
+     * Goes back to a step that is already done.
+     *
+     * Nothing is undone. Subscriptions un-acknowledges a report so the machine
+     * is examined again; setup puts its finished step back on screen until it
+     * is left. A step that is not behind the current one is refused,
+     * because the bar only offers the ones that are.
+     */
+    stepBack(step: LocalOnboardingStepBack): void {
+        if (this.closed) return;
+        if (step === "subscriptions") {
+            this.reopened = undefined;
+            this.assistantsAcknowledged = false;
+            this.providerSetupAcknowledged = false;
+            this.publish();
+            return;
+        }
+        this.reopened = step;
+        this.publish();
+    }
+
+    /** Finishes the desktop decisions without discovering or registering a project. */
+    async chiefOfStaffComplete(): Promise<void> {
+        await this.durable("Happy could not finish setup", ["project"], async (working) => {
+            await this.recordWrite({ ...this.record, chiefOfStaffSetup: true }, working.current);
+        });
     }
 
     /**
@@ -473,19 +522,6 @@ export class LocalOnboarding implements Disposable {
             // again, and it now holds the project that was just registered.
             reread();
         });
-    }
-
-    async profileCreate(input: { readonly email: string; readonly name: string }): Promise<void> {
-        const connection = this.freshnessConnection;
-        await this.durable(
-            "Happy could not create that profile",
-            ["profileRequired"],
-            async (working) => {
-                if (connection === undefined) throw new Error("The local Happy Agent changed.");
-                await this.options.runtime.localOnboardingProfileCreate(connection, input);
-                if (working.current()) this.freshnessInvalidate();
-            },
-        );
     }
 
     [Symbol.dispose](): void {
@@ -597,6 +633,7 @@ export class LocalOnboarding implements Disposable {
                 this.probed = probed;
                 this.probeMessage = undefined;
                 this.probeRetryMs = undefined;
+                this.localAppsLook(probed);
             } catch (error) {
                 if (epoch !== this.probeEpoch) return;
                 // A probe that failed says nothing about the machine, and what
@@ -710,13 +747,39 @@ export class LocalOnboarding implements Disposable {
      * means the machine has it but nobody has signed in. That difference belongs
      * to the stage, which is the only thing that knows Happy Agent's answer.
      */
+    /**
+     * Looks once for the machine's other coding apps. They are only counted,
+     * never shown, so one answer per run is enough and a failure stays unknown.
+     */
+    private localAppsLook(probed: LocalRuntimeProbe): void {
+        if (this.localApps || this.localAppsDetecting) return;
+        this.localAppsDetecting = true;
+        const detect = this.options.localAppsDetect ?? ((path) => localAppsDetect({ path }));
+        void detect(probed.environment.PATH)
+            .catch(
+                (): LocalAppsSnapshot => ({
+                    agyCli: null,
+                    antigravityApp: null,
+                    claudeDesktop: null,
+                    codexDesktop: null,
+                }),
+            )
+            .then((found) => {
+                this.localApps = found;
+                this.localAppsDetecting = false;
+                this.publish();
+            });
+    }
+
     private assistantsProject(): readonly LocalAssistantState[] {
         const commands = this.probed?.assistants ?? {};
+        const refreshed = this.probed?.assistantsRefreshed ?? [];
         return LOCAL_ASSISTANT_IDS.map((id) => {
             const command = commands[id];
             return {
                 ...(command ? { command } : {}),
                 id,
+                ...(command && refreshed.includes(id) ? { pathRefreshed: true as const } : {}),
                 status: command ? ("found" as const) : ("missing" as const),
             };
         });
@@ -962,7 +1025,9 @@ export class LocalOnboarding implements Disposable {
             ...(download ? { download } : {}),
             freshness: this.freshness,
             ...(message ? { message } : {}),
-            ...(assistants ? { assistants } : {}),
+            ...(assistants ? { assistants, installShell: localInstallShell() } : {}),
+            ...(assistants && this.localApps ? { localApps: this.localApps } : {}),
+            ...(this.liveStage ? { reachedStage: this.liveStage } : {}),
             ...(retrying ? { retrying } : {}),
             ...(node ? { node } : {}),
             ...(this.record.projectPath ? { projectPath: this.record.projectPath } : {}),
@@ -1013,17 +1078,13 @@ export class LocalOnboarding implements Disposable {
         if (!onboarding) return this.freshness === "error" ? "connectFailed" : "examining";
         const next = ((): LocalOnboardingSnapshot["stage"] => {
             switch (onboarding.state) {
-                case "complete":
-                    return this.freshness === "fresh" ? "project" : "complete";
                 case "provider_setup":
                     if (!this.providerSetupAcknowledged) return "providersMissing";
-                    return onboarding.profileDone
-                        ? this.freshness === "fresh"
-                            ? "project"
-                            : "complete"
-                        : "profileRequired";
-                case "profile_required":
-                    return "profileRequired";
+                // falls through
+                case "complete":
+                    return this.freshness === "fresh" && !this.record.chiefOfStaffSetup
+                        ? "project"
+                        : "complete";
                 case "happy_agent_unreachable":
                     return "connectFailed";
             }
@@ -1031,21 +1092,27 @@ export class LocalOnboarding implements Disposable {
         // The agent is answering and the machine was read on the way here, so
         // what it turned out to have goes in front of the steps that are still
         // owed — which is where somebody wants it, since a machine with no
-        // assistant on it is worth knowing about before filling in a name and
-        // picking a folder for it.
+        // assistant on it is worth knowing about before picking a folder for it.
         //
         // It is tied to the steps that remain rather than to an install Happy
         // watched happen: whether this run was the one that fetched the agent is
         // a fact about Happy, and every way of arriving at unfinished setup
         // deserves the same report. A machine with nothing left to do never sees
         // it, because there is nothing for it to go in front of.
-        if (
-            (next === "profileRequired" || next === "project") &&
-            !this.assistantsAcknowledged &&
-            this.probed
-        )
-            return "assistantsFound";
-        return next;
+        const live =
+            next === "project" && !this.assistantsAcknowledged && this.probed
+                ? "assistantsFound"
+                : next;
+        // A step somebody went back to, shown only while the sequence has
+        // genuinely moved past it. The step that would be current is reported
+        // alongside, so the bar keeps drawing the work already done rather
+        // than unwinding it.
+        if (this.reopened === "setup") {
+            this.liveStage = live;
+            return "agentReady";
+        }
+        this.liveStage = undefined;
+        return live;
     }
 
     /**
@@ -1094,7 +1161,13 @@ export class LocalOnboarding implements Disposable {
      */
     private pollSynchronize(stage: LocalOnboardingSnapshot["stage"]): void {
         const waiting =
-            stage === "nodeMissing" || stage === "connectFailed" || stage === "providersMissing";
+            stage === "nodeMissing" ||
+            stage === "connectFailed" ||
+            stage === "providersMissing" ||
+            // The subscriptions report waits on something done outside Happy
+            // exactly as the others do: an assistant being installed or signed
+            // in while the person is looking at the screen that says it is not.
+            stage === "assistantsFound";
         if (waiting && !this.poll) {
             this.poll = setInterval(() => {
                 void this.probeRun();
@@ -1235,4 +1308,9 @@ function displayError(error: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Windows' official installers are PowerShell one-liners; everywhere else they are POSIX shell. */
+function localInstallShell(): "powershell" | "posix" {
+    return process.platform === "win32" ? "powershell" : "posix";
 }

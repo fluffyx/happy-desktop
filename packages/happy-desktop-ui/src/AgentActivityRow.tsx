@@ -2,6 +2,7 @@ import { useState, type CSSProperties } from "react";
 import type {
     ConversationActivity,
     ConversationActivityPresentation,
+    ConversationAgentFace,
     ConversationActivityReview,
     ConversationActivityStatus,
     ConversationFileDiff,
@@ -9,12 +10,15 @@ import type {
     ConversationToolCall,
 } from "happy-desktop-state";
 import { compactCount, changeCountLabel } from "./countText";
+import { Avatar } from "./Avatar";
+import { AvatarBrutalist } from "./AvatarBrutalist";
 import { CopyButton } from "./CopyButton";
 import { DiffSnippet, type DiffLine } from "./DiffSnippet";
 import { filePreviewKind } from "./FilePreview";
 import { Icon, type IconName } from "./Icon";
 import { useMessageListDisclosureAnchor } from "./messageListDisclosureAnchor";
 import { renderMessageMarkdown } from "./MessageMarkdown";
+import { messageReferencesPlainText, type MessageReferences } from "./messageReferences";
 import { ScrollingText } from "./ScrollingText";
 import { Spinner } from "./Spinner";
 import { TypedText } from "./TypedText";
@@ -61,6 +65,8 @@ export type AgentActivityRowProps = {
     singleLine?: boolean;
     /** Durable event time, revealed with the row's trailing hover metadata. */
     time?: string;
+    /** What the Happy references in a reasoning or agent-message body read as. */
+    references?: MessageReferences;
     className?: string;
     "data-testid"?: string;
     style?: CSSProperties;
@@ -157,6 +163,12 @@ function toolVerb(
     status: ConversationActivityStatus,
     presentation?: ConversationActivityPresentation,
 ): string {
+    if (presentation?.type === "agentSpawn") {
+        if (status === "awaitingApproval") return "Awaiting approval to spawn";
+        if (status === "failed") return "Failed to spawn";
+        if (status === "stopped") return "Stopped spawning";
+        return status === "running" ? "Spawning" : "Spawned";
+    }
     if (status === "awaitingApproval") return "Awaiting approval";
     if (status === "stopped") return "Stopped";
     const active = status === "running";
@@ -176,7 +188,7 @@ function toolVerb(
     // as success; the verb describes the wait rather than a generic tool use.
     if (lower === "wait_agent") return active ? "Waiting" : "Waited";
     if (presentation?.type === "execCommand" || /(bash|exec|shell|command|run)/.test(lower))
-        return "Bash";
+        return lower === "powershell" ? "PowerShell" : lower === "bash" ? "Bash" : "Shell";
     if (/(grep|find|glob|^ls$|list|search)/.test(lower)) return active ? "Exploring" : "Explored";
     if (/(read|view|cat|open)/.test(lower)) return active ? "Reading" : "Read";
     if (/(write|edit|patch|update|apply)/.test(lower)) return active ? "Editing" : "Edited";
@@ -223,6 +235,7 @@ function toolGlyph(
     failed: boolean,
 ): ToolGlyph {
     if (failed) return { set: "octicons", name: "alert" };
+    if (presentation?.type === "agentSpawn") return { set: "house", name: "agents" };
     if (presentation?.type === "compaction") return { set: "house", name: "filter" };
     if (presentation?.type === "search") return { set: "house", name: "globe" };
     if (presentation?.type === "exploration") return { set: "house", name: "search" };
@@ -565,6 +578,9 @@ function AgentToolActivity(props: {
     if (mcp) {
         verb = toolVerb(tool.toolName, tool.status, presentation);
         primaryText = `${mcp.server} · ${mcp.tool}`;
+    } else if (presentation?.type === "agentSpawn") {
+        verb = toolVerb(tool.toolName, tool.failed ? "failed" : tool.status, presentation);
+        primaryText = presentation.model ? `${presentation.model.name} sub-agent` : "sub-agent";
     } else if (presentation?.type === "compaction") {
         verb = toolVerb(tool.toolName, tool.status, presentation);
         primaryText = compactionSummary(presentation);
@@ -986,6 +1002,7 @@ function AgentToolActivity(props: {
 
 /** Model reasoning: one compact line that expands into the full thinking text. */
 function AgentReasoningActivity(props: {
+    references?: MessageReferences;
     text: string;
     streaming: boolean;
     defaultExpanded?: boolean;
@@ -998,7 +1015,10 @@ function AgentReasoningActivity(props: {
         props.expanded,
         props.onExpandedChange,
     );
-    const summary = props.text.split("\n").find((line) => line.trim().length > 0) ?? "";
+    const summary = messageReferencesPlainText(
+        props.text.split("\n").find((line) => line.trim().length > 0) ?? "",
+        props.references,
+    );
     return (
         <div
             className="happy-agent-activity"
@@ -1042,7 +1062,15 @@ function AgentReasoningActivity(props: {
                     className="happy-agent-activity__body happy-agent-activity__reasoning happy-message__body--markdown"
                     data-happy-desktop-ui="agent-activity-reasoning-body"
                 >
-                    {renderMessageMarkdown(props.text)}
+                    {renderMessageMarkdown(
+                        props.text,
+                        undefined,
+                        undefined,
+                        undefined,
+                        undefined,
+                        undefined,
+                        props.references,
+                    )}
                 </div>
             ) : null}
         </div>
@@ -1057,6 +1085,8 @@ function AgentReasoningActivity(props: {
 function AgentMessageActivity(props: {
     agentId: string;
     agentName?: string;
+    agentFace?: ConversationAgentFace;
+    references?: MessageReferences;
     text: string;
     defaultExpanded?: boolean;
     expanded?: boolean;
@@ -1088,6 +1118,7 @@ function AgentMessageActivity(props: {
                     disclosureAnchor?.(event.currentTarget);
                     setExpanded(!expanded);
                 }}
+                title={props.agentName === undefined ? props.agentId : undefined}
                 type="button"
             >
                 <span
@@ -1095,7 +1126,11 @@ function AgentMessageActivity(props: {
                     className="happy-agent-activity__glyph"
                     data-happy-desktop-ui="agent-activity-glyph"
                 >
-                    <Icon name="agents" size={12} />
+                    {props.agentFace === undefined ? (
+                        <Icon name="agents" size={12} />
+                    ) : (
+                        <AgentMessageFace face={props.agentFace} />
+                    )}
                 </span>
                 <span
                     className="happy-agent-activity__verb"
@@ -1107,7 +1142,7 @@ function AgentMessageActivity(props: {
                     className="happy-agent-activity__text"
                     data-happy-desktop-ui="agent-activity-text"
                 >
-                    from {props.agentName ?? props.agentId}
+                    from {props.agentName ?? agentIdShort(props.agentId)}
                 </ScrollingText>
                 {hasBody ? (
                     <span aria-hidden="true" className="happy-agent-activity__chevron">
@@ -1121,11 +1156,57 @@ function AgentMessageActivity(props: {
                     className="happy-agent-activity__body happy-agent-activity__message happy-message__body--markdown"
                     data-happy-desktop-ui="agent-activity-message-body"
                 >
-                    {renderMessageMarkdown(props.text)}
+                    {renderMessageMarkdown(
+                        props.text,
+                        undefined,
+                        undefined,
+                        undefined,
+                        undefined,
+                        undefined,
+                        props.references,
+                    )}
                 </div>
             ) : null}
         </div>
     );
+}
+
+/** The edge of a sender's face: the glyph lane's own, so a face never moves the verb. */
+const AGENT_MESSAGE_FACE_SIZE = 14;
+
+/**
+ * The sender's face, as its own row elsewhere pictures it, shrunk to the glyph
+ * lane: a picture, initials, the tasks glyph, or the generated mark.
+ */
+function AgentMessageFace(props: { face: ConversationAgentFace }) {
+    const face = props.face;
+    if (face.kind === "generated")
+        return <AvatarBrutalist id={face.seed} size={AGENT_MESSAGE_FACE_SIZE} />;
+    return (
+        <Avatar
+            {...(face.kind === "image" ? { imageUrl: face.url } : {})}
+            {...(face.kind === "task" ? { icon: "tasks" as const } : {})}
+            initials={face.kind === "initials" ? face.initials : ""}
+            size="xs"
+            style={{
+                borderRadius: 4,
+                fontSize: 7,
+                height: AGENT_MESSAGE_FACE_SIZE,
+                width: AGENT_MESSAGE_FACE_SIZE,
+            }}
+            type="agent"
+        />
+    );
+}
+
+/**
+ * An agent nobody here can name — deleted, or not visible to this reader — by
+ * the start of its id: enough to tell two apart, short enough for one row. The
+ * whole id stays in the message, where the receiving model replies to it, and
+ * on the row's tooltip.
+ */
+function agentIdShort(agentId: string): string {
+    return agentId.length > 10 ? `${agentId.slice(0, 8)}…` : agentId;
 }
 
 /** A shell-mode run: the command line, its exit state, and its captured output. */
@@ -1318,9 +1399,11 @@ export function AgentActivityRow(props: AgentActivityRowProps) {
                 <AgentMessageActivity
                     agentId={activity.agentId}
                     {...(activity.agentName === undefined ? {} : { agentName: activity.agentName })}
+                    {...(activity.agentFace === undefined ? {} : { agentFace: activity.agentFace })}
                     defaultExpanded={props.defaultExpanded}
                     expanded={props.expanded}
                     onExpandedChange={props.onExpandedChange}
+                    {...(props.references ? { references: props.references } : {})}
                     text={activity.text}
                     time={props.time}
                 />
@@ -1329,6 +1412,7 @@ export function AgentActivityRow(props: AgentActivityRowProps) {
                     defaultExpanded={props.defaultExpanded}
                     expanded={props.expanded}
                     onExpandedChange={props.onExpandedChange}
+                    {...(props.references ? { references: props.references } : {})}
                     streaming={activity.streaming}
                     text={activity.text}
                     time={props.time}

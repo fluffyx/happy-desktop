@@ -69,6 +69,7 @@ function workspace(): HappyAgentWorkspaceStore {
     const snapshot = {
         list: {
             bots: [],
+            tasks: [],
             projects: {
                 type: "ready" as const,
                 value: [
@@ -110,7 +111,10 @@ function workspace(): HappyAgentWorkspaceStore {
         fileLayout: "flat" as const,
         fileTreeExpanded: new Set<string>(),
         fileTreeCollapsed: new Set<string>(),
+        fileSearch: { query: "", searching: false },
         workspaceFilesLoading: false,
+        fileComments: { comments: [] },
+        reviews: new Map(),
     };
     return {
         get: () => snapshot,
@@ -208,7 +212,7 @@ it("heads the local sidebar with the shared brand mark, not a local-only title",
     // the two modes stay one component rendered twice rather than a local variant.
     const logo = container.querySelector('[data-happy-desktop-ui="sidebar-brand-logo"]');
     expect(logo).not.toBeNull();
-    expect(logo?.getAttribute("aria-hidden")).toBe("true");
+    expect(logo?.getAttribute("aria-label")).toBe("Happy Engineering");
     expect(container.querySelector('[data-happy-desktop-ui="sidebar-title"]')).toBeNull();
 
     // The plain title row and its chevron affordance are gone.

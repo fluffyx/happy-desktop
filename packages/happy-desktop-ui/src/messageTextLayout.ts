@@ -70,6 +70,7 @@ const WEBKIT_INLINE_SLICE =
     typeof navigator !== "undefined" &&
     /AppleWebKit\//u.test(navigator.userAgent) &&
     !/(?:Chrome|Chromium|CriOS|Edg|OPR)\//u.test(navigator.userAgent);
+const GECKO_INLINE_SLICE = typeof navigator !== "undefined" && /Gecko\//u.test(navigator.userAgent);
 /** `.happy-system-notice__text` — 13px copy on a 20px line. */
 const NOTICE_SIZE = 13;
 const NOTICE_LINE = 20;
@@ -78,6 +79,10 @@ let fontGeneration = 0;
 const fontListeners = new Set<() => void>();
 type Dictionary<T> = Record<string, T | undefined>;
 const dictionaryCreate = <T>(): Dictionary<T> => Object.create(null) as Dictionary<T>;
+// Prepared glyph/segment objects can occupy over 100 times their source text.
+// Keep exact final heights, but bound the expensive width-independent preparation.
+const PREPARED_SOURCE_CAPACITY = 128 * 1_024;
+type PreparedCacheEntry = { readonly key: string; readonly font?: string; readonly size: number };
 export interface MessageTextLayoutCache {
     /** Font generation this cache was measured against. */
     generation: number;
@@ -97,12 +102,15 @@ export interface MessageTextLayoutCache {
     richPrepared: Dictionary<PreparedRichInline>;
     /** Natural widths, grouped by font then source text. */
     naturalWidths: Dictionary<Dictionary<number>>;
+    preparedOrder: PreparedCacheEntry[];
+    preparedSourceSize: number;
 }
 /**
- * One conversation's text-layout cache. It deliberately has no practical entry
- * cap: a transcript's immutable history is precisely the content most likely to
- * be measured again, and evicting its oldest rows turns a long-history scan into
- * cache churn. The cache lifetime is owned by the conversation surface.
+ * One conversation's text-layout cache. Settled transcript text is retained so
+ * revisiting a long history does not reparse it. Streaming text deliberately
+ * uses a measurement-local cache: each growing prefix receives the same exact
+ * layout without retaining another Markdown tree and prepared run until the
+ * view dies. The conversation surface owns the settled cache lifetime.
  */
 export function messageTextLayoutCacheCreate(): MessageTextLayoutCache {
     return {
@@ -115,6 +123,8 @@ export function messageTextLayoutCacheCreate(): MessageTextLayoutCache {
         runHeights: dictionaryCreate(),
         richPrepared: dictionaryCreate(),
         naturalWidths: dictionaryCreate(),
+        preparedOrder: [],
+        preparedSourceSize: 0,
     };
 }
 /** Standalone callers keep the old no-setup API; chat surfaces supply their own cache. */
@@ -160,6 +170,8 @@ export function messageTextLayoutCacheRefresh(cache: MessageTextLayoutCache): bo
     cache.runHeights = dictionaryCreate();
     cache.richPrepared = dictionaryCreate();
     cache.naturalWidths = dictionaryCreate();
+    cache.preparedOrder = [];
+    cache.preparedSourceSize = 0;
     cache.generation = fontGeneration;
     return true;
 }
@@ -173,28 +185,51 @@ export function monoOutputTextHeight(
     text: string,
     measure: number,
     cache: MessageTextLayoutCache = sharedCache,
+    streaming = false,
 ): number {
+    const measurementCache = streaming ? messageTextLayoutCacheCreate() : cache;
     const lines = text.split("\n");
     if (lines.length > 1 && lines.at(-1) === "") lines.pop();
     let height = 0;
-    for (const line of lines) height += runHeight(line, `12px ${MONO_FAMILY}`, 18, measure, cache);
+    for (const line of lines)
+        height += runHeight(line, `12px ${MONO_FAMILY}`, 18, measure, measurementCache);
     return Math.max(18, height);
 }
 function cacheReady(cache: MessageTextLayoutCache): MessageTextLayoutCache {
     messageTextLayoutCacheRefresh(cache);
     return cache;
 }
-function preparedText(text: string, font: string, cache: MessageTextLayoutCache): PreparedText {
+/** Retain a bounded recent set; oversized runs are measured exactly and then released. */
+function preparationRetain(cache: MessageTextLayoutCache, key: string, font?: string): boolean {
+    const size = key.length + (font?.length ?? 0);
+    if (size > PREPARED_SOURCE_CAPACITY) return false;
+    while (cache.preparedSourceSize + size > PREPARED_SOURCE_CAPACITY) {
+        const oldest = cache.preparedOrder.shift()!;
+        if (oldest.font === undefined) delete cache.richPrepared[oldest.key];
+        else delete cache.prepared[oldest.font]?.[oldest.key];
+        cache.preparedSourceSize -= oldest.size;
+    }
+    cache.preparedOrder.push({ key, font, size });
+    cache.preparedSourceSize += size;
+    return true;
+}
+function preparedText(
+    text: string,
+    font: string,
+    cache: MessageTextLayoutCache,
+    whiteSpace: "normal" | "pre-wrap" = "normal",
+): PreparedText {
     const ready = cacheReady(cache);
-    let byText = ready.prepared[font];
+    const fontKey = whiteSpace === "normal" ? font : `${font}:pre-wrap`;
+    let byText = ready.prepared[fontKey];
     if (!byText) {
         byText = dictionaryCreate();
-        ready.prepared[font] = byText;
+        ready.prepared[fontKey] = byText;
     }
     const hit = byText[text];
     if (hit !== undefined) return hit;
-    const value = prepare(text, font, { whiteSpace: "normal" });
-    byText[text] = value;
+    const value = prepare(text, font, { whiteSpace });
+    if (preparationRetain(ready, text, fontKey)) byText[text] = value;
     return value;
 }
 /** Painted height of one wrapped run, never less than a single line box. */
@@ -204,14 +239,15 @@ function runHeight(
     lineHeight: number,
     measure: number,
     cache: MessageTextLayoutCache,
+    whiteSpace: "normal" | "pre-wrap" = "normal",
 ): number {
-    if (measure <= 0 || text.trim().length === 0) return lineHeight;
+    if (measure <= 0 || (whiteSpace === "normal" && text.trim().length === 0)) return lineHeight;
     const ready = cacheReady(cache);
-    const value = preparedText(text, font, ready);
-    let byText = ready.runHeights[font];
+    const fontKey = whiteSpace === "normal" ? font : `${font}:pre-wrap`;
+    let byText = ready.runHeights[fontKey];
     if (!byText) {
         byText = dictionaryCreate();
-        ready.runHeights[font] = byText;
+        ready.runHeights[fontKey] = byText;
     }
     let layouts = byText[text];
     if (!layouts) {
@@ -221,6 +257,7 @@ function runHeight(
     const key = `${String(measure)}:${String(lineHeight)}`;
     const hit = layouts[key];
     if (hit !== undefined) return hit;
+    const value = preparedText(text, font, ready, whiteSpace);
     const height = Math.max(lineHeight, layout(value, measure, lineHeight).height);
     layouts[key] = height;
     return height;
@@ -243,7 +280,7 @@ function preparedRichItems(
     const hit = ready.richPrepared[key];
     if (hit !== undefined) return hit;
     const value = prepareRichInline([...items]);
-    ready.richPrepared[key] = value;
+    if (preparationRetain(ready, key)) ready.richPrepared[key] = value;
     return value;
 }
 function richItemsHeight(
@@ -254,10 +291,16 @@ function richItemsHeight(
 ): number {
     if (measure <= 0 || items.length === 0) return lineHeight;
     const measured = preparedRichItems(items, cache);
-    return (
-        Math.max(1, measureRichInlineStats(measured, measure + INLINE_MEASURE_EPSILON).lineCount) *
-        lineHeight
-    );
+    const relaxedMeasure = measure + INLINE_MEASURE_EPSILON;
+    const relaxed = measureRichInlineStats(measured, relaxedMeasure);
+    /* Pretext can hang a token slightly beyond its supplied measure. Keep the
+       one-layout-unit tolerance only when the resulting line also stays inside
+       that contract; otherwise resolve the real, unrelaxed line break. */
+    const stats =
+        relaxed.maxLineWidth <= relaxedMeasure
+            ? relaxed
+            : measureRichInlineStats(measured, measure);
+    return Math.max(1, stats.lineCount) * lineHeight;
 }
 function richItemsNaturalWidth(
     items: readonly RichInlineItem[],
@@ -331,7 +374,7 @@ function markdownInlineFragmentItems(
     cache: MessageTextLayoutCache,
     decoratedFlow = false,
 ): RichInlineItem[] {
-    /* `overflow-wrap: anywhere` emergency-breaks the glyph run, not an intact
+    /* `overflow-wrap: break-word` emergency-breaks the glyph run, not an intact
        word whose text fits and whose inline start/end decoration alone hangs
        beyond the measure. Keep that word atomic and let its box chrome occupy
        the same slight overflow the browser paints. */
@@ -452,16 +495,33 @@ function markdownInlineItemsAppend(
     if (node.type === "inlineCode") {
         const text = node.value.replace(/\r?\n|\r/gu, " ");
         const font = `14px ${MONO_FAMILY}`;
+        /* An opening bracket in the preceding prose cannot end a browser line
+           independently of the code it introduces: `(` + `code` wraps as one
+           run. Keep its whitespace in flow, but charge the bracket to the
+           first code fragment so a font boundary cannot create that break. */
+        const previous = current().at(-1);
+        const opening = previous?.text.match(/[\p{Ps}\p{Pi}]+$/u)?.[0];
+        const openingWidth =
+            opening && previous ? naturalTextWidth(opening, previous.font, cache) : 0;
+        if (opening && previous) previous.text = previous.text.slice(0, -opening.length);
         const textWidth = naturalTextWidth(text, font, cache);
+        /* Gecko reserves sliced code padding while breaking continuation lines
+           too. A single breakable run carries that decoration on each fragment;
+           charging only the first/last words can omit a whole wrapped line. */
+        if (GECKO_INLINE_SLICE && textWidth > measure && /\s/u.test(text)) {
+            current().push({ extraWidth: 10 + openingWidth, font, text });
+            return;
+        }
         const decoratedFlow =
-            textWidth + (WEBKIT_INLINE_SLICE ? 0 : 10) > measure + INLINE_MEASURE_EPSILON;
+            openingWidth + textWidth + (WEBKIT_INLINE_SLICE ? 0 : 10) >
+            measure + INLINE_MEASURE_EPSILON;
         const segments = prepareWithSegments(text, font, { whiteSpace: "normal" }).segments;
         for (const [index, segment] of segments.entries()) {
             const items = markdownInlineFragmentItems(
                 segment,
                 font,
                 measure,
-                index === 0 ? 5 : 0,
+                index === 0 ? 5 + openingWidth : 0,
                 index === segments.length - 1 ? 5 : 0,
                 cache,
                 decoratedFlow,
@@ -628,6 +688,13 @@ function markdownInlineHeight(
     task = false,
     suffixText = "",
 ): number {
+    if (
+        !markdownInlineHasLineBox(children) &&
+        trailingExtraWidth === 0 &&
+        !task &&
+        suffixText.length === 0
+    )
+        return 0;
     const runs = markdownInlineRuns(
         children,
         style,
@@ -645,6 +712,32 @@ function markdownInlineHeight(
     return height;
 }
 
+/** Tight-list paragraphs unwrap into the `<li>`. A following nested list is
+ * then an element sibling of whatever inline elements that phrasing painted,
+ * which is what `.happy-message__body--markdown li > * + *` matches. */
+function markdownPhrasingPaintsElement(children: readonly MarkdownPhrasing[]): boolean {
+    return children.some((node) => node.type !== "text" && node.type !== "html");
+}
+
+/** Empty cells have padding but no line box. Mirror the rendered inline tree:
+ * skipped HTML and collapsed ASCII whitespace do not create one, whereas code
+ * decoration, images-as-labels, references and explicit breaks do. */
+function markdownInlineHasLineBox(children: readonly MarkdownPhrasing[]): boolean {
+    return children.some((node) => {
+        if (node.type === "html") return false;
+        if (node.type === "text") return /[^\t\n\r ]/u.test(node.value);
+        if (
+            node.type === "inlineCode" ||
+            node.type === "break" ||
+            node.type === "image" ||
+            node.type === "imageReference" ||
+            node.type === "footnoteReference"
+        )
+            return true;
+        return markdownInlineHasLineBox(node.children);
+    });
+}
+
 /** Height of one ordinary UI-font run at an explicit type ramp and measure. */
 export function uiTextHeight(
     text: string,
@@ -654,6 +747,23 @@ export function uiTextHeight(
     cache: MessageTextLayoutCache = sharedCache,
 ): number {
     return runHeight(text, `${String(size)}px ${UI_FAMILY}`, lineHeight, measure, cache);
+}
+
+/** The error card's 14/20 text, including preserved diagnostic line breaks. */
+export function errorTextHeight(
+    text: string,
+    measure: number,
+    cache: MessageTextLayoutCache = sharedCache,
+    heading = false,
+): number {
+    return runHeight(
+        text,
+        `${heading ? "500 " : ""}14px ${UI_FAMILY}`,
+        20,
+        measure,
+        cache,
+        heading ? "normal" : "pre-wrap",
+    );
 }
 /** The heading ramp: h2 is the largest, h3 alone carries a taller line. */
 const HEADINGS = [
@@ -788,16 +898,21 @@ function markdownBlocksHeight(
                 mermaidEnabled,
             ),
         )
-        .filter((block) => block.height > 0);
-    const first = blocks[0];
-    if (!first) return 0;
-    let total = first.height + first.marginTop;
-    for (let index = 1; index < blocks.length; index += 1) {
-        const previous = blocks[index - 1]!;
-        const block = blocks[index]!;
-        total += Math.max(previous.marginBottom, gap, block.marginTop) + block.height;
+        .filter((block) => block !== undefined);
+    let total = 0;
+    let pendingMargin = 0;
+    for (const [index, block] of blocks.entries()) {
+        pendingMargin = Math.max(pendingMargin, index > 0 ? gap : 0, block.marginTop);
+        if (block.height === 0) {
+            // Empty block margins collapse through the element, rather than
+            // adding another paragraph gap before the next painted block.
+            pendingMargin = Math.max(pendingMargin, block.marginBottom);
+            continue;
+        }
+        total += pendingMargin + block.height;
+        pendingMargin = block.marginBottom;
     }
-    return total + blocks[blocks.length - 1]!.marginBottom;
+    return total + pendingMargin;
 }
 function markdownListHeight(
     list: MarkdownList,
@@ -823,19 +938,30 @@ function markdownListHeight(
                     mermaidEnabled,
                 ),
             )
-            .filter((block) => block.height > 0);
+            .filter((block) => block !== undefined);
         const first = blocks[0];
         if (itemIndex > 0) total += LIST_ITEM_GAP;
-        if (!first) continue;
+        if (!first) {
+            // The list marker creates a body line even before the item's
+            // first text node arrives (for example a streamed "1. ").
+            total += PARAGRAPH_LINE;
+            continue;
+        }
         let itemHeight = first.height;
         for (let index = 1; index < blocks.length; index += 1) {
-            /* Tight-list paragraphs render as bare phrasing inside `<li>`, not
-               as an element. Consequently `li > * + *` does not open a gap
-               before the following nested list. Spread items render `<p>` and
-               take the explicit child-block gap. */
+            /* Tight-list paragraphs unwrap into the `<li>`, so `li > * + *`
+               does not apply when that phrasing is only text nodes. Inline
+               elements (`a`, `code`, `strong`, …) still become element
+               siblings of a following nested list, and the 6px child-block
+               gap paints. Spread items keep `<p>` and always take the gap. */
             const previous = item.children[index - 1];
             const gap =
-                previous?.type === "paragraph" && !list.spread && !item.spread ? 0 : LIST_ITEM_GAP;
+                previous?.type === "paragraph" &&
+                !list.spread &&
+                !item.spread &&
+                !markdownPhrasingPaintsElement(previous.children)
+                    ? 0
+                    : LIST_ITEM_GAP;
             itemHeight += gap + blocks[index]!.height;
         }
         total += itemHeight;
@@ -875,7 +1001,7 @@ function markdownBlockHeight(
     task: boolean,
     mermaidEnabled: boolean,
     suffixText = "",
-): Block {
+): Block | undefined {
     if (node.type === "paragraph") {
         const extraWidth =
             trailing !== undefined && node.position?.end.offset === trailing.endOffset
@@ -922,8 +1048,22 @@ function markdownBlockHeight(
             marginBottom: codeMargins ? CODE_GAP : 0,
         };
     }
-    if (node.type === "table")
-        return flow(node.children.length * (PARAGRAPH_LINE + TABLE_CELL_PADDING * 2));
+    if (node.type === "table") {
+        const columns = node.children[0]?.children.length ?? 0;
+        return flow(
+            node.children.reduce(
+                (total, row) =>
+                    total +
+                    TABLE_CELL_PADDING * 2 +
+                    (row.children
+                        .slice(0, columns)
+                        .some((cell) => markdownInlineHasLineBox(cell.children))
+                        ? PARAGRAPH_LINE
+                        : 0),
+                0,
+            ),
+        );
+    }
     if (node.type === "thematicBreak") return flow(RULE_HEIGHT);
     if (node.type === "blockquote")
         return flow(
@@ -940,10 +1080,10 @@ function markdownBlockHeight(
         );
     if (node.type === "list")
         return flow(markdownListHeight(node, measure, cache, footnotes, trailing, mermaidEnabled));
-    /* Definitions and raw HTML do not create rendered message boxes without a
-       raw-HTML transform. Any future AST node starts at zero until its renderer
-       receives an explicit geometry contract. */
-    return flow(0);
+    /* Definitions and skipped HTML create no DOM box. That is distinct from
+       an empty heading/paragraph: its zero-height element still participates
+       in the CSS sibling-margin sequence while the next token is arriving. */
+    return undefined;
 }
 function markdownFootnoteBackrefs(count: number): string {
     let text = "";
@@ -977,7 +1117,7 @@ function markdownFootnoteDefinitionHeight(
                 node === last && suffixAttached ? suffix : "",
             ),
         )
-        .filter((block) => block.height > 0);
+        .filter((block) => block !== undefined);
     const first = blocks[0];
     let total = first?.height ?? 0;
     for (let index = 1; index < blocks.length; index += 1)
@@ -1016,9 +1156,9 @@ function markdownFootnotesHeight(
  * Painted height of a Markdown message body wrapped at `measure` px. Adjacent
  * block margins collapse to the larger of the two, exactly as they do in flow,
  * and only a block carrying its own margin (fenced code) contributes one at the
- * body's outer edges. An empty body still occupies one line box, matching the
- * anchor paragraph a streaming reply keeps so an empty generation cannot
- * collapse its row.
+ * body's outer edges. An empty source string occupies one line box, matching
+ * the anchor paragraph a generation keeps before text arrives. Nonempty source
+ * that renders empty syntax (such as `##`) keeps its actual zero-height box.
  */
 export function markdownBodyHeight(
     text: string,
@@ -1026,8 +1166,13 @@ export function markdownBodyHeight(
     cache: MessageTextLayoutCache = sharedCache,
     trailingExtraWidth = 0,
     mermaidEnabled = true,
+    streaming = false,
 ): number {
-    const ready = cacheReady(cache);
+    /* A virtual row's size is authoritative even while it streams. Bound the
+       lifetime of prefix layout, not its accuracy: use the same Markdown/font
+       model in a scratch cache that cannot accumulate in settled history. The
+       row-height cache still reuses the result for an unchanged entry/width. */
+    const ready = cacheReady(streaming ? messageTextLayoutCacheCreate() : cache);
     let byMeasure = ready.markdownHeights[text];
     if (!byMeasure) {
         byMeasure = dictionaryCreate();
@@ -1058,10 +1203,11 @@ export function markdownBodyHeight(
         contentHeight +
         (contentHeight > 0 && footnotesHeight > 0 ? BLOCK_GAP : 0) +
         footnotesHeight;
-    const painted = height > 0 ? height : PARAGRAPH_LINE;
+    const painted = text.length === 0 ? PARAGRAPH_LINE : height;
     byMeasure[measureKey] = painted;
     return painted;
 }
+
 /** Painted height of a service line's 13px copy wrapped at `measure` px. */
 export function noticeTextHeight(
     text: string,

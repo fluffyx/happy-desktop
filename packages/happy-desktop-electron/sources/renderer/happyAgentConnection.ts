@@ -1,21 +1,27 @@
-import { terminalDriverCreate } from "happy-desktop-app";
+import { terminalDriverCreate, type AppHappyAgentSetup } from "happy-desktop-app";
 import {
     connectHappyAgent,
     describeServerCompatibility,
     HappyAgentClient,
     happyAgentWorkspaceClientCreate,
     happyAgentClockStoreCreate,
+    gptLiveRuntimeCreate,
+    type GptLiveRuntime,
+    type GptLiveRuntimeCreateOptions,
     happyAgentDebugLogStoreCreate,
     happyAgentWorkspaceStoreCreate,
+    happyAgentOnboardingStoreCreate,
+    welcomeStoreCreate,
+    type WelcomeStore,
+    type HappyAgentOnboardingStore,
     HappyAgentApiError,
     type MutationRejectedDelta,
     type HappyAgentWorkspaceClient,
+    type HappyAgentActivity,
     type HappyAgentClockStore,
     type HappyAgentCloudHost,
-    type HappyAgentCloudDevicesStore,
     type HappyAgentCloudStore,
-    type HappyAgentSocialJoinStore,
-    type HappyAgentSocialStore,
+    type HappyAgentTeamsStore,
     type HappyAgentConnection,
     type HappyAgentConnectionSnapshot,
     type HappyAgentConnectionStore,
@@ -31,6 +37,7 @@ import {
     type HappyAgentProvidersStore,
     type HappyAgentSecurityPolicyStore,
     type HappyAgentSecretsStore,
+    type HappyAgentArtifacts,
     type HappyAgentSessionLocation,
     type HappyAgentWorkspaceMemoryDocument,
     type HappyAgentWorkspaceMemoryPersistence,
@@ -40,6 +47,11 @@ import {
 } from "happy-desktop-state";
 import { completionChimePlay } from "./completionChime";
 import { desktopViewPreferencesPersistence } from "./desktopViewPreferences";
+import { desktopWelcomePersistence } from "./desktopWelcome";
+import {
+    desktopHappyMobileOnboardingSkip,
+    desktopHappyMobileOnboardingSkipped,
+} from "./desktopHappyMobileOnboarding";
 import { happyAgentCatalogSourceCreate } from "./happyAgentCatalogSource";
 import { happyAgentHostServicesCreate } from "./happyAgentHostServices";
 import { happyAgentProfileSourceCreate } from "./happyAgentProfileSource";
@@ -47,11 +59,6 @@ import { happyAgentTranscriptConnectCreate } from "./happyAgentTranscriptSource"
 import { happyAgentUsageSourceCreate } from "./happyAgentUsageSource";
 
 export interface HappyAgentProtocolMismatch {
-    readonly side: "app" | "agent";
-    /** The daemon's own product version, as its health report states it. */
-    readonly serverVersion: string;
-    /** The oldest daemon product version this build works with. */
-    readonly minimumVersion: string;
     readonly message: string;
 }
 
@@ -62,9 +69,6 @@ function protocolMismatchOf(
         return undefined;
     return {
         message: describeServerCompatibility(compatibility),
-        minimumVersion: compatibility.minimumSupportedVersion,
-        serverVersion: compatibility.serverVersion,
-        side: compatibility.status === "client_outdated" ? "app" : "agent",
     };
 }
 
@@ -93,11 +97,13 @@ function workspaceMemoryPersistence(happyAgentId: string): HappyAgentWorkspaceMe
 }
 
 export interface HappyAgentSession {
+    /** Supplies the existing authenticated connection only to the opt-in voice integration. */
+    gptLiveRuntimeCreate(options: Omit<GptLiveRuntimeCreateOptions, "client">): GptLiveRuntime;
+    readonly welcome: WelcomeStore;
+    readonly onboarding: HappyAgentOnboardingStore;
     readonly connection: HappyAgentConnectionStore;
     readonly cloud: () => HappyAgentCloudStore;
-    readonly cloudDevices: () => HappyAgentCloudDevicesStore;
-    readonly social: () => HappyAgentSocialStore;
-    readonly socialJoin: () => HappyAgentSocialJoinStore;
+    readonly teams: () => HappyAgentTeamsStore;
     readonly debugLog: HappyAgentDebugLogStore;
     readonly host: HappyAgentHost;
     readonly models: HappyAgentModelStore;
@@ -109,6 +115,8 @@ export interface HappyAgentSession {
     readonly instructions: HappyAgentInstructionsStore;
     readonly securityPolicy: HappyAgentSecurityPolicyStore;
     readonly secrets: () => HappyAgentSecretsStore;
+    /** This Happy Agent's published artifacts, materialized as their surfaces open. */
+    readonly artifacts: HappyAgentArtifacts;
     readonly clock: HappyAgentClockStore;
 }
 
@@ -121,6 +129,13 @@ export interface HappyAgentSessionDeps {
      * to a row that no longer exists.
      */
     readonly groupForget: (groupId: string) => void;
+    /** Takes bot subtasks the host stopped listing out of this window's navigation. */
+    readonly subtasksForget: (
+        removed: readonly HappyAgentSessionLocation[],
+        open: HappyAgentSessionLocation | undefined,
+    ) => void;
+    /** A reader-initiated act this connection's workspace finished. */
+    readonly activity?: (activity: HappyAgentActivity) => void;
     /** Announces that this connection's session is ready or has been replaced. */
     readonly changed: () => void;
     readonly unavailable?: (error: unknown) => void;
@@ -128,6 +143,8 @@ export interface HappyAgentSessionDeps {
 }
 
 export interface HappyAgentConnectionHandle {
+    readonly setup: AppHappyAgentSetup | undefined;
+    readonly sync: import("happy-desktop-state").HappyAgentSync;
     get(): HappyAgentSession | undefined;
     /**
      * Why this connection has nothing to hand over, when that is a failure. A
@@ -166,30 +183,45 @@ function snapshotsEqual(
     return (
         left.connection === right.connection &&
         left.daemon === right.daemon &&
+        left.version === right.version &&
         left.message === right.message &&
         left.attempt === right.attempt
     );
+}
+
+/** The product version the daemon last reported in its own health. */
+function daemonVersionOf(connection: HappyAgentConnection): string | undefined {
+    const compatibility = connection.compatibility();
+    return compatibility.status === "checking" ? undefined : compatibility.serverVersion;
 }
 
 /**
  * Projects the connection's managed update-feed lifecycle into the host
  * availability store. It opens no transport of its own: `/health` remains the
  * one startup gate inside `connectHappyAgent`, and the shared client owns
- * reconnect state.
+ * reconnect state. The version is the one the connection last read from the
+ * daemon itself, which it reads again whenever a replacement starts answering.
  */
-function streamConnectionStoreCreate(connection: HappyAgentConnection): HappyAgentConnectionStore {
+function streamConnectionStoreCreate(connection: HappyAgentConnection): {
+    readonly store: HappyAgentConnectionStore;
+    /** The connection read the daemon's health again. */
+    readonly versionChanged: () => void;
+} {
     const listeners = new Set<() => void>();
-    let snapshot: HappyAgentConnectionSnapshot = {
-        attempt: 0,
-        connection: "connecting",
-        daemon: "unknown",
+    const versioned = (
+        next: Omit<HappyAgentConnectionSnapshot, "version">,
+    ): HappyAgentConnectionSnapshot => {
+        const version = daemonVersionOf(connection);
+        return version === undefined ? next : { ...next, version };
     };
+    let snapshot = versioned({ attempt: 0, connection: "connecting", daemon: "unknown" });
     let sourceState: ReturnType<
         ReturnType<HappyAgentConnection["connectGroups"]>["state"]
     >["connection"] = "connecting";
     let disposed = false;
 
-    const publish = (next: HappyAgentConnectionSnapshot): void => {
+    const publish = (state: Omit<HappyAgentConnectionSnapshot, "version">): void => {
+        const next = versioned(state);
         if (snapshotsEqual(snapshot, next)) return;
         snapshot = next;
         for (const listener of listeners) listener();
@@ -234,7 +266,7 @@ function streamConnectionStoreCreate(connection: HappyAgentConnection): HappyAge
         },
     });
 
-    return {
+    const store: HappyAgentConnectionStore = {
         get: () => snapshot,
         subscribe(listener) {
             if (disposed) return () => undefined;
@@ -249,6 +281,12 @@ function streamConnectionStoreCreate(connection: HappyAgentConnection): HappyAge
             listeners.clear();
         },
     };
+    return {
+        store,
+        versionChanged: () => {
+            if (!disposed) publish(snapshot);
+        },
+    };
 }
 
 /**
@@ -256,6 +294,20 @@ function streamConnectionStoreCreate(connection: HappyAgentConnection): HappyAge
  * state with the small set of services that remain owned by the desktop host.
  */
 export function happyAgentConnectionOpen(input: {
+    /** The local desktop pairs Happy Mobile through the guided setup. */
+    readonly guidedMobileSetup?: boolean;
+    /**
+     * Whether product stores wait for the member's profile. A remote Happy
+     * Agent may be a team that authorizes nothing else until one exists; the
+     * machine's own Happy Agent is solo and never asks for one.
+     */
+    readonly memberProfileRequired: boolean;
+    readonly readLegacyCli?: () => Promise<
+        import("happy-desktop-state").HappyTerminalCliInspection
+    >;
+    readonly resetLegacyCli?: (
+        request: import("happy-desktop-state").HappyTerminalCliResetRequest,
+    ) => Promise<import("happy-desktop-state").HappyTerminalCliResetOutcome>;
     readonly cloudHost: HappyAgentCloudHost;
     readonly host: HappyAgentHost;
     readonly deps: HappyAgentSessionDeps;
@@ -267,6 +319,8 @@ export function happyAgentConnectionOpen(input: {
      * the catalog, and the desktop-local host routes alike.
      */
     readonly happyAgentHttpUrl: string;
+    readonly client?: HappyAgentClient;
+    readonly hostServicesUrl?: string;
     /**
      * The window's appearance right now, read again for every terminal this
      * connection opens. A terminal is started in it and keeps it afterwards.
@@ -275,6 +329,7 @@ export function happyAgentConnectionOpen(input: {
 }): HappyAgentConnectionHandle {
     let disposed = false;
     let session: HappyAgentSession | undefined;
+    let sessionConnection: ReturnType<typeof streamConnectionStoreCreate> | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let compatibilityFailure: string | undefined;
     let catalogFailure: string | undefined;
@@ -287,16 +342,18 @@ export function happyAgentConnectionOpen(input: {
         message: "Opening local Happy Agent connection",
         source: "connection",
     });
-    const directClient = new HappyAgentClient({
-        endpoint: input.happyAgentHttpUrl,
-        token: "happy-local-capability",
-    });
-    const profile = happyAgentProfileSourceCreate(directClient);
+    const directClient =
+        input.client ??
+        new HappyAgentClient({
+            endpoint: input.happyAgentHttpUrl,
+            token: "happy-local-capability",
+        });
     const mutationListeners = new Set<(rejection: MutationRejectedDelta) => void>();
     const agentConnection: HappyAgentConnection = connectHappyAgent({
         client: directClient,
         endpoint: input.happyAgentHttpUrl,
         token: "happy-local-capability",
+        memberProfileRequired: input.memberProfileRequired,
         onDebugEntry: debugEntry,
         onMutationRejected: (rejection) => {
             for (const listener of mutationListeners) listener(rejection);
@@ -305,16 +362,35 @@ export function happyAgentConnectionOpen(input: {
             if (disposed) return;
             const mismatch = protocolMismatchOf(compatibility);
             compatibilityFailure = mismatch?.message;
+            // A replacement daemon reports its own version here, and Settings
+            // follows the daemon this window is connected to.
+            sessionConnection?.versionChanged();
             input.deps.compatibility?.(mismatch);
             input.deps.changed();
         },
         onTopLevelSessionFinished: () => completionChimePlay(),
     });
+    const profile = happyAgentProfileSourceCreate(directClient, agentConnection.sync, () => {
+        if (!session) agentConnection.retry();
+    });
     const catalogSource = happyAgentCatalogSourceCreate(agentConnection, input.happyAgentHttpUrl);
-    const hostServices = happyAgentHostServicesCreate(input.happyAgentHttpUrl);
+    const hostServices = happyAgentHostServicesCreate(
+        input.hostServicesUrl ?? input.happyAgentHttpUrl,
+        input.happyAgentHttpUrl,
+    );
+    const welcome = welcomeStoreCreate(desktopWelcomePersistence(input.happyAgentId));
+    const onboarding = happyAgentOnboardingStoreCreate(directClient, agentConnection.sync, {
+        setupActive: input.happyAgentId !== "local" && welcome.get().welcomeAcknowledged,
+        mobileSkipped: desktopHappyMobileOnboardingSkipped(input.happyAgentId),
+        onMobileSkip: () => desktopHappyMobileOnboardingSkip(input.happyAgentId),
+        guidedMobileSetup: input.guidedMobileSetup,
+    });
     const client: HappyAgentWorkspaceClient = happyAgentWorkspaceClientCreate({
         client: directClient,
+        guidedMobileSetup: input.guidedMobileSetup,
         cloudHost: input.cloudHost,
+        readLegacyCli: input.readLegacyCli,
+        resetLegacyCli: input.resetLegacyCli,
         connection: agentConnection,
         hostServices,
         modelPreferencePersistence: input.modelPreferencePersistence,
@@ -330,20 +406,70 @@ export function happyAgentConnectionOpen(input: {
         },
         terminalDriverCreate,
         terminalColorScheme: input.terminalColorScheme,
+        // Chromium's own viewer shows a PDF inline when this window has one;
+        // anything else is offered as a download.
+        artifactDocumentInline: (mimeType) =>
+            mimeType === "application/pdf" && navigator.pdfViewerEnabled,
     });
-    // Identity and an in-flight join are connection state, not Settings state.
-    // Keep all three stores alive so the browser callback cannot finish in the
-    // gap before Account mounts its join surface. The join snapshot then owns
-    // whether that surface must reopen when Account appears.
+    // Keep account authentication subscribed for this connection's lifetime so
+    // browser callbacks are handled even when Settings is closed or reloading.
     const cloudStore = client.cloud();
-    const socialJoinStore = client.socialJoin();
     const profileStore = client.profile();
-    const accountKeepWarm = [
-        socialJoinStore.subscribe(() => undefined),
-        ...(profileStore ? [profileStore.subscribe(() => undefined)] : []),
-    ];
+    const accountKeepWarm: (() => void)[] = [];
+    const setup: AppHappyAgentSetup | undefined = profileStore
+        ? { welcome, onboarding, profile: profileStore, retry: () => agentConnection.retry() }
+        : undefined;
 
+    let workspace: HappyAgentWorkspaceStore | undefined;
+    let workspaceKeepWarm: (() => void) | undefined;
+    let modelsLoading = false;
     const modelsLoad = (): void => {
+        retry = undefined;
+        const startup = onboarding.get();
+        if (
+            disposed ||
+            session ||
+            modelsLoading ||
+            !startup.available ||
+            !startup.state ||
+            (input.memberProfileRequired &&
+                !startup.state.completed &&
+                !startup.state.steps.profile.done) ||
+            startup.error
+        )
+            return;
+        // This is the first authorized opportunity to load the workspace — for
+        // a team member, once their profile exists. Warm its empty state and
+        // bot catalog alongside models, while onboarding is still on the steps
+        // before first-project setup.
+        if (!workspace) {
+            workspace = happyAgentWorkspaceStoreCreate(client, {
+                host: input.host,
+                viewPreferences: desktopViewPreferencesPersistence(input.happyAgentId),
+                output: (event) => {
+                    switch (event.type) {
+                        case "conversationOpenRequested":
+                            input.deps.conversationOpen(event.location);
+                            return;
+                        case "groupOpenRequested":
+                            input.deps.groupOpen(event.groupId);
+                            return;
+                        case "addressedGroupRemoved":
+                            input.deps.groupForget(event.groupId);
+                            return;
+                        case "subtasksRemoved":
+                            input.deps.subtasksForget(event.removed, event.open);
+                            return;
+                        case "activityRecorded":
+                            input.deps.activity?.(event.activity);
+                            return;
+                    }
+                },
+            });
+            workspaceKeepWarm = workspace.subscribe(() => undefined);
+        }
+        const preparedWorkspace = workspace;
+        modelsLoading = true;
         debugEntry({
             level: "info",
             message: "Loading model catalog",
@@ -351,7 +477,9 @@ export function happyAgentConnectionOpen(input: {
         });
         void client.models.load().then(
             (modelSnapshot) => {
+                modelsLoading = false;
                 if (disposed) return;
+                accountKeepWarm.push(cloudStore.subscribe(() => undefined));
                 debugEntry({
                     detail: JSON.stringify(
                         {
@@ -368,12 +496,18 @@ export function happyAgentConnectionOpen(input: {
                     message: "Model catalog loaded",
                     source: "catalog",
                 });
+                sessionConnection = streamConnectionStoreCreate(agentConnection);
                 session = {
+                    gptLiveRuntimeCreate: (options) =>
+                        gptLiveRuntimeCreate({
+                            ...options,
+                            client: () => (disposed ? undefined : directClient),
+                        }),
+                    welcome,
+                    onboarding,
                     cloud: () => cloudStore,
-                    cloudDevices: () => client.cloudDevices(),
-                    social: () => client.social(),
-                    socialJoin: () => socialJoinStore,
-                    connection: streamConnectionStoreCreate(agentConnection),
+                    teams: () => client.teams(),
+                    connection: sessionConnection.store,
                     debugLog,
                     host: input.host,
                     happyIntegration: () => client.happyIntegration(),
@@ -381,26 +515,11 @@ export function happyAgentConnectionOpen(input: {
                     profile: () => profileStore,
                     providerUsage: client.providerUsage(),
                     providers: client.providers(),
-                    workspace: happyAgentWorkspaceStoreCreate(client, {
-                        host: input.host,
-                        viewPreferences: desktopViewPreferencesPersistence(),
-                        output: (event) => {
-                            switch (event.type) {
-                                case "conversationOpenRequested":
-                                    input.deps.conversationOpen(event.location);
-                                    return;
-                                case "groupOpenRequested":
-                                    input.deps.groupOpen(event.groupId);
-                                    return;
-                                case "addressedGroupRemoved":
-                                    input.deps.groupForget(event.groupId);
-                                    return;
-                            }
-                        },
-                    }),
+                    workspace: preparedWorkspace,
                     instructions: client.instructions(),
                     securityPolicy: client.securityPolicy(),
                     secrets: () => client.secrets(),
+                    artifacts: client.artifacts(),
                     clock: happyAgentClockStoreCreate(),
                 };
                 debugEntry({
@@ -411,8 +530,12 @@ export function happyAgentConnectionOpen(input: {
                 catalogFailure = undefined;
                 catalogStarting = false;
                 input.deps.changed();
+                // The directory now owns the live workspace subscription.
+                workspaceKeepWarm?.();
+                workspaceKeepWarm = undefined;
             },
             (error: unknown) => {
+                modelsLoading = false;
                 if (disposed) return;
                 // A daemon that is still starting is the ordinary first seconds
                 // of a cold machine, not a fault: it is reported as the wait it
@@ -439,11 +562,21 @@ export function happyAgentConnectionOpen(input: {
             },
         );
     };
-    modelsLoad();
+    accountKeepWarm.push(
+        onboarding.subscribe(() => {
+            if (!retry) modelsLoad();
+            if (!session) input.deps.changed();
+        }),
+        ...(profileStore ? [profileStore.subscribe(() => undefined)] : []),
+    );
 
     return {
+        setup,
         get: () => session,
-        failure: () => compatibilityFailure ?? (session ? undefined : catalogFailure),
+        sync: agentConnection.sync,
+        failure: () =>
+            compatibilityFailure ??
+            (session ? undefined : (catalogFailure ?? onboarding.get().error)),
         starting: () => !session && catalogStarting,
         dispose() {
             if (disposed) return;
@@ -454,13 +587,16 @@ export function happyAgentConnectionOpen(input: {
             });
             disposed = true;
             if (retry) clearTimeout(retry);
+            workspaceKeepWarm?.();
+            workspace?.[Symbol.dispose]();
             if (session) {
-                session.workspace[Symbol.dispose]();
                 session.connection[Symbol.dispose]();
                 session.clock[Symbol.dispose]();
                 session = undefined;
+                sessionConnection = undefined;
             }
             for (const unsubscribe of accountKeepWarm) unsubscribe();
+            onboarding[Symbol.dispose]();
             client[Symbol.dispose]();
             mutationListeners.clear();
             agentConnection.close();

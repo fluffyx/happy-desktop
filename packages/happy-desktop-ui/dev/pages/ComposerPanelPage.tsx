@@ -3,7 +3,7 @@ import type {
     HappyAgentGoal,
     HappyAgentSessionUsage,
     SubagentSummary,
-    HappyAgentTask,
+    HappyAgentTodo,
 } from "happy-desktop-state";
 import { ComposerPanel } from "../../src/ComposerPanel";
 import { HappyAgentActivityPanel } from "../../src/HappyAgentActivityPanel";
@@ -23,7 +23,7 @@ const goal: HappyAgentGoal = {
     updatedAt: NOW - 60_000,
 };
 
-const tasks: readonly HappyAgentTask[] = [
+const tasks: readonly HappyAgentTodo[] = [
     {
         id: "t1",
         subject: "Move the readouts above the composer",
@@ -183,7 +183,7 @@ export function ComposerPanelPage() {
             </Specimen>
 
             <Specimen
-                detail="the activity reading at the narrow content measure available inside the 720×480 minimum desktop window"
+                detail="the activity reading at the narrow content measure available inside the 720×640 minimum desktop window"
                 label="Minimum desktop measure"
                 number="05"
                 stage="surface"

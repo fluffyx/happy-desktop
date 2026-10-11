@@ -1,6 +1,6 @@
 {
     "name": "happy-desktop-electron",
-    "version": "0.0.76",
+    "version": "0.0.95",
     "private": true,
     "description": "Happy Place macOS desktop app",
     "author": "Slopus",
@@ -44,13 +44,14 @@
         "clean": "rm -rf dist release"
     },
     "dependencies": {
-        "@slopus/happy-agent-client": "0.0.47",
+        "@sinclair/typebox": "^0.34.49",
+        "@slopus/happy-agent-client": "0.0.78",
         "electron-updater": "^6.8.9",
         "ws": "^8.21.1",
         "yjs": "^13.6.31"
     },
     "devDependencies": {
-        "@slopus/ghostty-web": "0.1.0",
+        "@slopus/ghostty-web": "0.1.3",
         "@tailwindcss/vite": "^4.3.2",
         "@tanstack/react-router": "^1.170.18",
         "@testing-library/react": "^16.3.2",
@@ -62,6 +63,7 @@
         "concurrently": "^10.0.3",
         "electron": "^43.1.0",
         "electron-builder": "^26.15.3",
+        "happy-desktop-analytics": "workspace:*",
         "happy-desktop-app": "workspace:*",
         "happy-desktop-state": "workspace:*",
         "happy-desktop-ui": "workspace:*",
@@ -90,6 +92,7 @@
         },
         "files": [
             "dist/**/*",
+            "assets/app-icon/generated/app-icon.png",
             "package.json"
         ],
         "protocols": [
@@ -101,6 +104,9 @@
             }
         ],
         "mac": {
+            "extendInfo": {
+                "NSMicrophoneUsageDescription": "Happy uses your microphone for GPT-Live voice conversations when you choose Start."
+            },
             "category": "public.app-category.developer-tools",
             "entitlements": "build/entitlements.mac.plist",
             "entitlementsInherit": "build/entitlements.mac.plist",
@@ -141,6 +147,7 @@
             ]
         },
         "win": {
+            "icon": "assets/app-icon/generated/app-icon.png",
             "target": [
                 {
                     "target": "nsis",

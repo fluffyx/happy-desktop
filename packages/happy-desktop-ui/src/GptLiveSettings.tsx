@@ -1,0 +1,76 @@
+import { useCallback, useId } from "react";
+import type { GptLiveAccount } from "happy-desktop-state";
+import { FormRow } from "./FormRow";
+import { Select } from "./Select";
+import { Switch } from "./Switch";
+import { HappyAgentSettingsSection } from "./pages/settings/HappyAgentSettingsShell";
+
+export interface GptLiveSettingsProps {
+    enabled: boolean;
+    onEnabledChange(enabled: boolean): void;
+    accounts?: readonly GptLiveAccount[];
+    accountId?: string;
+    checking?: boolean;
+    onAccountSelect?(id: string): void;
+    onAccountsRead?(): void;
+}
+
+/** Window-level voice preference and the account used by the footer phone. */
+export function GptLiveSettings(props: GptLiveSettingsProps) {
+    const switchId = useId();
+    const { enabled, onAccountsRead } = props;
+    const accountsMount = useCallback(
+        (node: HTMLDivElement | null) => {
+            if (node && enabled) onAccountsRead?.();
+        },
+        [enabled, onAccountsRead],
+    );
+    return (
+        <div ref={accountsMount} className="happy-gpt-live-settings">
+            <HappyAgentSettingsSection title="Voice" rows="cards">
+                <FormRow
+                    control={
+                        <Switch
+                            aria-label="Enable GPT-Live voice"
+                            checked={props.enabled}
+                            id={switchId}
+                            onChange={props.onEnabledChange}
+                            size="small"
+                        />
+                    }
+                    description="Adds a phone beside Settings."
+                    htmlFor={switchId}
+                    label="Voice calls"
+                />
+                {props.enabled ? (
+                    <FormRow
+                        label="Account"
+                        description={
+                            props.accounts?.find((account) => account.id === props.accountId)
+                                ?.kind === "api"
+                                ? "Billed to your OpenAI API account."
+                                : undefined
+                        }
+                        control={
+                            <Select
+                                aria-label="Voice account"
+                                value={props.accountId}
+                                onValueChange={props.onAccountSelect}
+                                options={(props.accounts ?? []).map((account) => ({
+                                    value: account.id,
+                                    label: account.label,
+                                }))}
+                                placeholder={
+                                    props.checking ? "Checking accounts…" : "Choose an account"
+                                }
+                                disabled={props.checking}
+                                size="small"
+                                width={260}
+                            />
+                        }
+                    />
+                ) : null}
+            </HappyAgentSettingsSection>
+        </div>
+    );
+}

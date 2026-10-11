@@ -93,7 +93,7 @@ Current reference dimensions are:
 | Element                   | Reference dimension             |
 | ------------------------- | ------------------------------- |
 | Design reference window   | 1280 × 800 px                   |
-| Electron minimum window   | 720 × 480 px                    |
+| Electron minimum window   | 720 × 640 px                    |
 | App title/navigation row  | 56 px high                      |
 | Feature rail              | 64 px wide                      |
 | Standard sidebar          | `clamp(250px, 30vw, 360px)`     |
@@ -140,10 +140,10 @@ dims with `--happy-scrim` at `--happy-z-overlay`, and keeps a 24 px minimum
 safe-area gutter. The default `center` placement is for dialogs and forms. The
 `top` placement is only for transient type-ahead surfaces, never forms; it uses
 an adaptive top gutter of
-`min(128px, max(48px, calc(100cqh - 552px)))` so the card sits 128 px from the
-top in the 1280 × 800 design reference and 48 px from the top at the actual
-720 × 480 Electron minimum. The `fill` placement drops the gutter and gives the
-whole window to one immersive surface that paints its own background over the
+`min(128px, max(24px, calc(100cqh - 485px)))` so the card sits 128 px from the
+top both in the 1280 × 800 design reference and at the actual 720 × 640
+Electron minimum. The `fill` placement drops the gutter and gives the whole
+window to one immersive surface that paints its own background over the
 dim. It is not a third way to show a card: use it only where looking at
 something is a mode the window enters rather than a panel floating above the
 app, which today means `Lightbox` alone. Such a surface owns its own way out —
@@ -265,6 +265,61 @@ native thumbs cannot provide the required fixed geometry and lifecycle states.
 Pierre's horizontal code scrollport is the sole implementation exception: its
 markup lives inside third-party shadow DOM, so its native thumb is styled to the
 same visual contract without mutating vendor structure.
+
+## Text that does not fit
+
+Never truncate menu or popover headings, headers, buttons, or settings labels.
+Keep them short enough to fit, or let them wrap. Truncation is only for
+unbounded user content (titles, paths, branch names), with the full text
+reachable elsewhere.
+
+## Sentence case
+
+Write headings, labels, and buttons in sentence case. Do not use all caps,
+typed or via `text-transform: uppercase`. Existing uppercase styles are legacy;
+convert them when you touch them.
+
+## Setup page layout
+
+Every first-run setup screen is the same four bands, in this order, and
+`SetupPage` is the only component that lays them out:
+
+1. **Header** — the scene, title, and subtitle. Its height does not depend on
+   its contents: the scene box is a fixed 96 px square whether or not a page
+   has art and whatever size that art is drawn at, so the title sits at one
+   coordinate across the whole sequence.
+2. **Spacer** — flexible.
+3. **Core** — what the page is for, and its primary action. Nothing else.
+4. **Spacer** — flexible.
+5. **Auxiliary** — everything that is not the point of the page: how a
+   background operation is going, a way to skip an optional step, a footnote.
+
+Pass core content as `children` and everything in band five as `auxiliary`. A
+skip control, a progress bar, or a status note in `children` is a defect: it
+puts a secondary control at the same height as the primary one. Help is pinned
+to the window's bottom-right corner through `help`, outside the bands
+entirely.
+
+Moving between two setup screens must change the words, not where they are.
+
+## User-facing errors
+
+Prefer fewer buttons.
+
+Errors and troubleshooting go to the Chief of Staff. An error does not say
+"show the log", and it does not get its own diagnostic buttons such as "View
+log", "Copy details", or "Open logs folder". It offers one way out, "Ask Chief
+of Staff", which hands the error and its context to the Chief of Staff. A direct
+retry may sit beside it when retrying is the obvious recovery.
+
+Use the existing handoff rather than building another one. It writes a labelled
+draft into the Chief of Staff's conversation and opens it; nothing is sent on
+the user's behalf. `HappyAgentWorkspaceStore.errorAssistanceRequest` hands off a
+conversation error (`ConversationErrorCard`), and
+`HappyAgentWorkspaceStore.chiefOfStaffDraftAppend` takes any other
+`HappyAgentChiefOfStaffRequest`
+(`happy-desktop-state/src/happyAgent/happyAgentChiefOfStaffRequest.ts`); a new
+kind of error adds a variant there.
 
 ## Nested rounded corners
 

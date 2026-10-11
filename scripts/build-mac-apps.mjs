@@ -5,12 +5,17 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { desktopFlavorNames, desktopFlavorRead } from "./desktopFlavors.mjs";
+import { packagedMainModulesVerify } from "./verify-packaged-main-modules.mjs";
 
 const workspace = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const desktopDirectory = join(workspace, "packages", "happy-desktop-electron");
 const require = createRequire(join(desktopDirectory, "package.json"));
 const { Arch, Platform, build } = require("electron-builder");
 const packageJson = JSON.parse(await readFile(join(desktopDirectory, "package.json"), "utf8"));
+const releaseVersion = process.env.RELEASE_VERSION ?? packageJson.version;
+if (!/^\d+\.\d+\.\d+(?:-preview\.(?:0|[1-9]\d*))?$/u.test(releaseVersion))
+    throw new Error("RELEASE_VERSION must be a stable or numbered preview version.");
+packageJson.version = releaseVersion;
 const localWebOrigin = "https://local.app.happy.engineering";
 const flavor = argument("--flavor", ["all", ...desktopFlavorNames], "all");
 const architecture = argument("--arch", ["all", "arm64", "x64"], "all");
@@ -144,7 +149,8 @@ function builderConfiguration(base, output, app, flavorName, selectedFlavor) {
         ...(flavorName === "local-web"
             ? {
                   files: [
-                      "dist/main.js",
+                      "dist/*.js",
+                      "dist/assets/**/*.js",
                       "dist/preload.cjs",
                       "assets/app-icon/generated/app-icon.png",
                       "package.json",
@@ -200,6 +206,10 @@ async function releaseVerify(selectedFlavor, output) {
             throw new Error(
                 `${updaterConfigurationPath} uses updater cache ${String(updaterConfiguration.updaterCacheDirName)}, expected ${selectedFlavor.updaterCacheDirName}.`,
             );
+        packagedMainModulesVerify(join(application, "Contents", "Resources", "app.asar"), [
+            "dist/main.js",
+            "dist/happyAgentRendererUtility.js",
+        ]);
         await run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", application]);
         await run("xcrun", ["stapler", "validate", application]);
         await run("spctl", ["--assess", "--type", "execute", "--verbose=4", application]);
@@ -209,6 +219,7 @@ async function releaseVerify(selectedFlavor, output) {
 
 async function stagedPackagePrepare(path, selectedFlavor) {
     const metadata = JSON.parse(await readFile(path, "utf8"));
+    metadata.version = releaseVersion;
     delete metadata.build;
     delete metadata.devDependencies;
     const updaterSuffix = "-updater";

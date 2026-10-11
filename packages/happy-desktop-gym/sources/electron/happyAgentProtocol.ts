@@ -51,6 +51,15 @@ export interface HappyAgentStreamHandle {
     close(): void;
 }
 
+/** Creates the typed Agent client over one isolated daemon's Unix socket. */
+export function happyAgentClientCreate(socketPath: string, token: string): HappyAgentClient {
+    return new HappyAgentClient({
+        endpoint: "http://happy-agent.local/",
+        fetch: unixSocketFetch(socketPath),
+        token,
+    });
+}
+
 /**
  * The Gym runs the actual local daemon over its Unix socket. This adapter
  * supplies that one runtime concern while the vendored Happy Agent client owns
@@ -58,13 +67,10 @@ export interface HappyAgentStreamHandle {
  */
 export class GymHappyAgentClient {
     readonly #client: HappyAgentClient;
+    readonly #runCursors = new Map<string, string>();
 
     constructor(socketPath: string, token: string) {
-        this.#client = new HappyAgentClient({
-            endpoint: "http://happy-agent.local/",
-            fetch: unixSocketFetch(socketPath),
-            token,
-        });
+        this.#client = happyAgentClientCreate(socketPath, token);
     }
 
     async health(): Promise<happyAgentProtocol.HealthResponse> {
@@ -141,11 +147,24 @@ export class GymHappyAgentClient {
             text,
         });
         const runId = await this.#runIdWait(agentId, response.message.id, response.cursor);
+        this.#runCursors.set(runId, response.cursor);
         return { messageId: response.message.id, runId };
     }
 
     async compactAgent(agentId: string): Promise<void> {
         await this.#client.compactAgent(cuid(agentId), { mutationId: randomUUID() });
+    }
+
+    async draftRead(agentId: string): Promise<happyAgentProtocol.AgentDraft | null> {
+        return (await this.#client.getAgentDraft(cuid(agentId))).draft.value;
+    }
+
+    async draftSave(agentId: string, draft: happyAgentProtocol.AgentDraft | null): Promise<void> {
+        await this.#client.saveAgentDraft(cuid(agentId), {
+            draft,
+            updatedAt: Date.now(),
+            mutationId: randomUUID(),
+        });
     }
 
     async getAgent(agentId: string): Promise<{ readonly agent: HappyAgent }> {
@@ -264,18 +283,35 @@ export class GymHappyAgentClient {
     }
 
     async waitForAgentIdle(agentId: string, runId: string, timeoutMs = 60_000): Promise<void> {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            const history = await this.#client.getMessages(cuid(agentId), { limit: 32 });
-            const run = history.runs.find((candidate) => candidate.id === runId);
-            if (
-                run?.status === "completed" ||
-                run?.status === "aborted" ||
-                run?.status === "failed"
-            ) {
+        const after = this.#runCursors.get(runId);
+        if (!after) throw new Error(`No submission cursor for Gym run ${runId}.`);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            // Replaying from the send acknowledgement closes the fast-completion
+            // race without repeatedly downloading 32 potentially huge old runs.
+            for await (const frame of this.#client.streamEvents({
+                after,
+                signal: controller.signal,
+            })) {
+                if (
+                    frame.kind !== "event" ||
+                    frame.event.type !== "run.finished" ||
+                    frame.event.payload.run.id !== runId
+                )
+                    continue;
+                if (frame.event.payload.run.status !== "completed")
+                    throw new Error(
+                        `Gym run ${runId} in ${agentId} ${frame.event.payload.run.status}.`,
+                    );
                 return;
             }
-            await delay(100);
+        } catch (error) {
+            if (!controller.signal.aborted) throw error;
+        } finally {
+            clearTimeout(timer);
+            controller.abort();
+            this.#runCursors.delete(runId);
         }
         throw new Error(`Timed out waiting for Happy Agent run ${runId} in ${agentId} to settle.`);
     }

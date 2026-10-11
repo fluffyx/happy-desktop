@@ -3,7 +3,7 @@ import type {
     HappyAgentBackgroundProcess,
     HappyAgentGoal,
     SubagentSummary,
-    HappyAgentTask,
+    HappyAgentTodo,
 } from "happy-desktop-state";
 import { Button } from "../../src/Button";
 import { HappyAgentActivityPanel } from "../../src/HappyAgentActivityPanel";
@@ -23,7 +23,7 @@ const goal: HappyAgentGoal = {
     updatedAt: NOW - 60_000,
 };
 
-const tasks: readonly HappyAgentTask[] = [
+const tasks: readonly HappyAgentTodo[] = [
     {
         id: "t1",
         subject: "Design the usage API",
@@ -198,7 +198,7 @@ export function HappyAgentActivityPanelPage() {
             </Specimen>
 
             <Specimen
-                detail="360px content measure inside the 720×480 minimum desktop window; long model, activity, and terminal text must wrap without horizontal overflow"
+                detail="360px content measure inside the 720×640 minimum desktop window; long model, activity, and terminal text must wrap without horizontal overflow"
                 label="Minimum desktop measure"
                 number="04"
                 stage="surface"

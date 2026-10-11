@@ -3,6 +3,7 @@ import type { ConversationAuthor } from "../conversation/conversationAuthor.js";
 import {
     noticeInformational,
     type ConversationActivityPresentation,
+    type ConversationAgentIdentity,
     type ConversationAttachment,
     type ConversationEntry,
     type ConversationJson,
@@ -69,6 +70,7 @@ interface ConversationContext {
     readonly expandedGroupIds: ReadonlySet<string>;
     readonly subagents: readonly SubagentSummary[];
     readonly sentImages?: HappyAgentConversationInput["sentImages"];
+    readonly agentIdentities?: HappyAgentConversationInput["agentIdentities"];
 }
 
 /**
@@ -98,6 +100,13 @@ export interface HappyAgentConversationInput {
     /** Children delegated from this session, matched to the call that spawned each. */
     readonly subagents: readonly SubagentSummary[];
     /**
+     * The agents that sent messages into this transcript, by agent id, as the
+     * rest of the window names and pictures them. An agent missing here is
+     * shown by its id. Compared by identity, so the owner keeps one map while
+     * nothing in it changed.
+     */
+    readonly agentIdentities?: ReadonlyMap<string, ConversationAgentIdentity>;
+    /**
      * Images this window sent, by message identity. A message is shown from the
      * prediction made when it was submitted, and that prediction is text alone,
      * so what was attached to it is known only to the sender until the whole
@@ -121,18 +130,27 @@ function profileAuthor(
     profile: HappyAgentProfile | undefined,
     identity: string | null,
 ): ConversationAuthor {
-    if (identity === null) return happyAgentOwnerAuthor;
-    if (!profile) return { ...happyAgentOwnerAuthor, id: identity };
-    return {
-        id: identity,
+    if (!profile)
+        return identity === null
+            ? happyAgentOwnerAuthor
+            : { ...happyAgentOwnerAuthor, id: identity };
+    const id = identity ?? happyAgentOwnerAuthor.id;
+    const cached = profileAuthors.get(profile);
+    if (cached?.id === id) return cached;
+    const author: ConversationAuthor = {
+        id,
+        userId: profile.id,
         displayName: profile.name,
         username: profile.name,
         kind: "human",
-        ...(profile.photo === undefined
-            ? {}
-            : { imageUrl: `data:${profile.photo.mediaType};base64,${profile.photo.data}` }),
+        ...(profile.avatar === null ? {} : { avatar: profile.avatar }),
     };
+    profileAuthors.set(profile, author);
+    return author;
 }
+
+/** One minimal profile object gives every occurrence the same author identity. */
+const profileAuthors = new WeakMap<HappyAgentProfile, ConversationAuthor>();
 
 /**
  * Projects Happy Agent's flat application transcript into Happy's shared
@@ -154,6 +172,7 @@ export function happyAgentConversationProject(
         expandedGroupIds: input.expandedGroupIds,
         subagents: input.subagents,
         ...(input.sentImages === undefined ? {} : { sentImages: input.sentImages }),
+        ...(input.agentIdentities === undefined ? {} : { agentIdentities: input.agentIdentities }),
     };
     const contextStands =
         cache?.context !== undefined && conversationContextEqual(cache.context, context);
@@ -294,11 +313,27 @@ function sameElements(
  * than tracked. Anything here changing rebuilds the transcript once, which is
  * exactly the moment a rebuild is warranted.
  */
+/**
+ * The name and face a sending agent is shown with: what the window knows the
+ * agent as, else the description this session gave a child it delegated to,
+ * else nothing, which leaves the row to show the agent's id.
+ */
+function senderOf(
+    input: HappyAgentConversationInput,
+    agentId: string,
+): { readonly agentName?: string; readonly agentFace?: ConversationAgentIdentity["face"] } {
+    const known = input.agentIdentities?.get(agentId);
+    if (known !== undefined) return { agentName: known.name, agentFace: known.face };
+    const description = input.subagents.find((child) => child.id === agentId)?.description;
+    return description === undefined ? {} : { agentName: description };
+}
+
 function conversationContextEqual(left: ConversationContext, right: ConversationContext): boolean {
     return (
         left.sessionId === right.sessionId &&
         left.showReasoning === right.showReasoning &&
         left.sentImages === right.sentImages &&
+        left.agentIdentities === right.agentIdentities &&
         listEqual(left.ephemeral, right.ephemeral, referenceEqual) &&
         setEqual(left.expandedGroupIds, right.expandedGroupIds) &&
         listEqual(left.pendingUserInputs, right.pendingUserInputs, userInputRequestEqual) &&
@@ -526,9 +561,6 @@ function happyAgentConnectGroupProject(
                 // turn's work does.
                 const collaborator = element.senderAgent;
                 if (collaborator !== undefined && collaborator.relation === "other") {
-                    const name = input.subagents.find(
-                        (child) => child.id === collaborator.agentId,
-                    )?.description;
                     entries.push({
                         kind: "agentActivity",
                         id: element.id,
@@ -537,7 +569,7 @@ function happyAgentConnectGroupProject(
                         activity: {
                             kind: "agentMessage",
                             agentId: collaborator.agentId,
-                            ...(name === undefined ? {} : { agentName: name }),
+                            ...senderOf(input, collaborator.agentId),
                             text: element.text,
                         },
                     });
@@ -546,6 +578,7 @@ function happyAgentConnectGroupProject(
                 entries.push({
                     kind: "message",
                     source: "server",
+                    pendingSend: element.authority === "local",
                     delivery: element.delivery,
                     message: messageProject({
                         id: element.messageId,
@@ -576,9 +609,8 @@ function happyAgentConnectGroupProject(
                  * the work and takes the compact activity row the rest of the
                  * turn's steps take.
                  */
-                const name = input.subagents.find(
-                    (child) => child.id === element.agentId,
-                )?.description;
+                const sender = senderOf(input, element.agentId);
+                const name = sender.agentName;
                 if (element.relation === "parent") {
                     entries.push({
                         kind: "message",
@@ -608,7 +640,7 @@ function happyAgentConnectGroupProject(
                     activity: {
                         kind: "agentMessage",
                         agentId: element.agentId,
-                        ...(name === undefined ? {} : { agentName: name }),
+                        ...sender,
                         text: element.text,
                     },
                 });
@@ -825,6 +857,9 @@ function happyAgentConnectGroupProject(
                         ? { retry: { attempt: element.attempt } }
                         : {}),
                     title: element.outcome === "retried" ? "Retrying" : "Failure",
+                    ...(element.messageId === undefined
+                        ? {}
+                        : { source: { messageId: element.messageId, runId: element.runId } }),
                     text: happyAgentConversationFailureText(element.reason),
                     sequence,
                 });
@@ -952,6 +987,10 @@ function happyAgentConnectGroupProject(
             // reader's own message does: folding it away would leave the answer
             // standing over nothing.
             (entry.kind === "agentActivity" && entry.activity.kind === "agentMessage") ||
+            // File edits are a result the reader can open, even when execution traces are folded.
+            (entry.kind === "agentActivity" &&
+                entry.activity.kind === "tool" &&
+                entry.activity.tool.presentation?.type === "fileDiff") ||
             (entry.kind === "notice" && !noticeInformational(entry)),
     );
     const hiddenCount = entries.length - visibleCollapsed.length;
@@ -1086,6 +1125,20 @@ function presentationProject(
     presentation: ToolPresentation,
 ): ConversationActivityPresentation | undefined {
     switch (presentation.kind) {
+        case "agent_spawn":
+            return {
+                type: "agentSpawn",
+                ...(presentation.model === undefined
+                    ? {}
+                    : {
+                          model: {
+                              modelId: presentation.model.modelId,
+                              providerId: presentation.model.providerId,
+                              name: presentation.model.name,
+                          },
+                      }),
+                ...(presentation.agentId === undefined ? {} : { agentId: presentation.agentId }),
+            };
         case "compaction":
             return {
                 type: "compaction",

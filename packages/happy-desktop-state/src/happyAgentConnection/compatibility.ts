@@ -1,8 +1,9 @@
+declare const __HAPPY_ALLOW_SOURCE_AGENT__: boolean | undefined;
+
 import { HAPPY_AGENT_PROTOCOL_VERSION, type DaemonVersion } from "@slopus/happy-agent-client";
 import type { ServerCompatibility } from "./types.js";
 
 export const MINIMUM_HAPPY_AGENT_PROTOCOL_VERSION = HAPPY_AGENT_PROTOCOL_VERSION;
-export const MAXIMUM_HAPPY_AGENT_PROTOCOL_VERSION = HAPPY_AGENT_PROTOCOL_VERSION;
 
 /**
  * The oldest Happy Agent this build works with, as the daemon's own product
@@ -10,20 +11,31 @@ export const MAXIMUM_HAPPY_AGENT_PROTOCOL_VERSION = HAPPY_AGENT_PROTOCOL_VERSION
  *
  * This is the one knob to raise when Happy starts requiring a newer daemon.
  * The wire protocol number stays the hard gate underneath: a daemon speaking
- * another protocol cannot be talked to at all, whatever its version says. So
- * when a `@slopus/happy-agent-client` bump moves the protocol, raise this to
- * the first daemon version that speaks it; the screens quote this version, not
- * the protocol number.
+ * an older protocol cannot be talked to at all, whatever its version says.
+ * The screens quote this version, not the protocol number.
  */
-export const MINIMUM_HAPPY_AGENT_VERSION = "0.4.24";
+export const MINIMUM_HAPPY_AGENT_VERSION = "0.4.44";
 
 /**
- * Orders two daemon product versions by their dotted numeric fields. A
- * prerelease suffix on a field ("29-beta") counts as the number it starts
- * with; the daemon and this client share one version scheme, so nothing finer
- * is needed to say "at least".
+ * Orders two daemon product versions the way releases are cut: by the dotted
+ * numeric release, then a prerelease (`0.4.84-preview.2`) before the release it
+ * previews and in its own numeric order. A feature that first ships in a
+ * preview is therefore present in that preview, later ones, and the release.
  */
 function versionCompare(left: string, right: string): number {
+    const [leftRelease = "", leftPreview] = left.split("-", 2);
+    const [rightRelease = "", rightPreview] = right.split("-", 2);
+    const release = dottedCompare(leftRelease, rightRelease);
+    if (release !== 0) return release;
+    if (leftPreview === undefined || rightPreview === undefined)
+        return leftPreview === rightPreview ? 0 : leftPreview === undefined ? 1 : -1;
+    return dottedCompare(
+        leftPreview.replace(/^[^.\d]*\.?/u, ""),
+        rightPreview.replace(/^[^.\d]*\.?/u, ""),
+    );
+}
+
+function dottedCompare(left: string, right: string): number {
     const leftParts = left.split(".");
     const rightParts = right.split(".");
     const length = Math.max(leftParts.length, rightParts.length);
@@ -35,10 +47,17 @@ function versionCompare(left: string, right: string): number {
     return 0;
 }
 
+/** Whether the last daemon product version observed supports a versioned feature. */
+export function happyAgentVersionAtLeast(
+    version: string | undefined,
+    minimumVersion: string,
+): boolean {
+    return version !== undefined && versionCompare(version, minimumVersion) >= 0;
+}
+
 export const CHECKING_SERVER_COMPATIBILITY: ServerCompatibility = {
     status: "checking",
     minimumSupportedProtocolVersion: MINIMUM_HAPPY_AGENT_PROTOCOL_VERSION,
-    maximumSupportedProtocolVersion: MAXIMUM_HAPPY_AGENT_PROTOCOL_VERSION,
     minimumSupportedVersion: MINIMUM_HAPPY_AGENT_VERSION,
 };
 
@@ -49,16 +68,19 @@ export function serverCompatibility(
         Number.isSafeInteger(version.protocol) && version.protocol >= 0 ? version.protocol : 0;
     const supported = {
         minimumSupportedProtocolVersion: MINIMUM_HAPPY_AGENT_PROTOCOL_VERSION,
-        maximumSupportedProtocolVersion: MAXIMUM_HAPPY_AGENT_PROTOCOL_VERSION,
         minimumSupportedVersion: MINIMUM_HAPPY_AGENT_VERSION,
         serverProtocolVersion: protocol,
         serverVersion: version.daemon,
     };
-    if (protocol > MAXIMUM_HAPPY_AGENT_PROTOCOL_VERSION)
-        return { ...supported, status: "client_outdated" };
+    // Opt-in source builds retain their honest 0.0.0 identity. The wire protocol
+    // remains mandatory, and ordinary builds still require the released version.
+    const sourceBuild =
+        typeof __HAPPY_ALLOW_SOURCE_AGENT__ !== "undefined" &&
+        __HAPPY_ALLOW_SOURCE_AGENT__ === true &&
+        version.daemon === "0.0.0";
     if (
         protocol < MINIMUM_HAPPY_AGENT_PROTOCOL_VERSION ||
-        versionCompare(version.daemon, MINIMUM_HAPPY_AGENT_VERSION) < 0
+        (!sourceBuild && !happyAgentVersionAtLeast(version.daemon, MINIMUM_HAPPY_AGENT_VERSION))
     )
         return { ...supported, status: "server_outdated" };
     return { ...supported, status: "compatible" };
@@ -66,10 +88,9 @@ export function serverCompatibility(
 
 export function describeServerCompatibility(compatibility: ServerCompatibility): string {
     if (compatibility.status === "server_outdated") {
+        if (compatibility.serverProtocolVersion < compatibility.minimumSupportedProtocolVersion)
+            return `Happy Agent on this machine is version ${compatibility.serverVersion}, but this build of Happy requires a more recent version.`;
         return `Happy Agent on this machine is version ${compatibility.serverVersion}, but this build of Happy needs at least version ${compatibility.minimumSupportedVersion}.`;
-    }
-    if (compatibility.status === "client_outdated") {
-        return `Happy Agent on this machine is version ${compatibility.serverVersion}, which is newer than this build of Happy understands.`;
     }
     return compatibility.status === "compatible"
         ? "The Happy Agent server is compatible."

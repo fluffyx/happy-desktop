@@ -22,50 +22,42 @@
 .happy-setup-page__stage,
 .happy-setup-page__title,
 .happy-setup-page__copy,
-.happy-setup-page__command,
+.happy-setup-page__header,
+.happy-setup-page__core,
+.happy-setup-page__footer,
 .happy-setup-page__progress,
 .happy-setup-page__progress-track,
 .happy-setup-page__progress-fill,
 .happy-setup-page__progress-line,
 .happy-setup-page__slot,
-.happy-local-onboarding__machine-status,
-.happy-local-onboarding__machine-progress,
 .happy-local-onboarding__machine-assistants {
     box-sizing: border-box;
 }
 
-.happy-local-onboarding__mobile .happy-setup-page__body {
-    gap: 16px;
-}
-
-.happy-local-onboarding__mobile-actions,
-.happy-local-onboarding__mobile-pairing-body,
-.happy-local-onboarding__mobile-waiting {
+.happy-setup-handoff,
+.happy-setup-handoff__content {
     display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-}
-
-.happy-local-onboarding__mobile-actions,
-.happy-local-onboarding__mobile-pairing-body {
+    flex: 1 1 auto;
     flex-direction: column;
+    min-width: 0;
+    min-height: 0;
     width: 100%;
 }
 
-.happy-local-onboarding__mobile-actions {
-    gap: 4px;
+.happy-setup-handoff {
+    height: 100%;
+    background: var(--surface);
 }
 
+/* The code, centred, with its copy link under it. */
 .happy-local-onboarding__mobile-pairing-body {
-    gap: 12px;
-}
-
-.happy-local-onboarding__mobile-waiting {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    align-items: center;
     gap: 8px;
-    color: color-mix(in srgb, var(--button-primary-tint) 78%, transparent);
-    font-size: 13px;
-    line-height: 20px;
+    width: 100%;
+    --happy-qr-code-size: var(--happy-setup-pairing-qr-size);
 }
 
 .happy-local-onboarding__profile-form {
@@ -74,7 +66,6 @@
     gap: 16px;
     width: 100%;
     max-width: 400px;
-    margin-bottom: 24px;
     align-self: center;
 }
 
@@ -90,6 +81,15 @@
     color: var(--text);
     font-family: var(--happy-font-ui);
     font-synthesis: none;
+    /* The centre line is measured on the window, not on whatever is above it. */
+    container-type: size;
+    /*
+     * A pairing code is the tallest thing that hangs under the line: the lead
+     * (subtitle and status, 76px with the core's padding and gap), the code,
+     * 8px, its 28px copy link, and both footer slots (120px). Full size while
+     * that fits; a shorter window shrinks the code rather than move the line.
+     */
+    --happy-setup-pairing-qr-size: clamp(88px, 50cqh - 232px, 136px);
 }
 
 .happy-setup-page > .happy-window-drag-region {
@@ -108,19 +108,106 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: safe center;
     overflow: auto;
 }
 
+/*
+ * Every setup page is the same three places:
+ *
+ *   header   scene and title — the title's bottom edge sits on the centre line
+ *   core     subtitle, status, then what the page is for, hanging from it
+ *   footer   primary action and a reserved slot for a way out, at the bottom
+ *
+ * The header grows upward from the line and the core grows downward from it,
+ * so neither moves the other, and the footer is pinned to the foot.
+ *
+ * The line is the window's centre at every window size. What hangs below it
+ * is budgeted for the smallest window (640px): a QR code scales with the
+ * window rather than pushing the line up.
+ */
 .happy-setup-page__body {
+    display: flex;
+    flex: 1 0 auto;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: 560px;
+    min-height: 100%;
+    padding: 0 40px;
+}
+
+.happy-setup-page__header {
     display: flex;
     flex: none;
     flex-direction: column;
     align-items: center;
-    gap: 24px;
+    justify-content: flex-end;
+    gap: 8px;
     width: 100%;
-    max-width: 560px;
-    padding: 40px;
+    min-height: 50cqh;
+    /* Clear of the step bar overlaid across the top of the window. */
+    padding-top: 96px;
+}
+
+.happy-setup-page__core,
+.happy-setup-page__footer,
+.happy-setup-page__lead {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+}
+
+.happy-setup-page__core {
+    flex: 1 0 auto;
+    gap: 16px;
+    padding-top: 8px;
+}
+
+/* The subtitle and the live line read as one sentence and its state. */
+.happy-setup-page__lead {
+    flex: none;
+    gap: 8px;
+}
+
+/* 24px at the foot keeps the second slot level with the help button. */
+.happy-setup-page__footer {
+    flex: none;
+    gap: 8px;
+    padding-bottom: 24px;
+}
+
+/* Both slots hold a full-size button, so a page that needs a way out never
+   moves its primary action to make room for one. */
+.happy-setup-page__footer-primary,
+.happy-setup-page__footer-secondary {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    height: 44px;
+}
+
+/* Reachable from every step, and never in the way of one: pinned to the
+   window's own corner, level with the footer's second slot. */
+.happy-setup-page__help {
+    position: absolute;
+    right: 24px;
+    bottom: 24px;
+    z-index: 2;
+}
+
+/* Overlaid rather than in the flow, so the anchor line is measured from the
+   top of the window whether or not a page shows the step bar. */
+.happy-setup-page__steps {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 2;
+    display: flex;
+    justify-content: center;
+    padding: 32px 32px 8px;
 }
 
 /* The sky remains one stable full-window layer while a stage changes. Only the
@@ -141,8 +228,8 @@
 }
 
 /* First-run pages use the same photographic treatment as the welcome deck:
-   white words and one white primary action in either appearance. Functional
-   wells such as commands and text inputs retain their themed surfaces. */
+   white words and one white primary action in either appearance. Text inputs
+   retain their themed surfaces; commands become glass, below. */
 .happy-setup-page[data-backdrop="sky"] .happy-setup-page__title,
 .happy-setup-page[data-backdrop="sky"] .happy-setup-page__copy,
 .happy-setup-page[data-backdrop="sky"] .happy-setup-page__progress-line,
@@ -151,8 +238,63 @@
 .happy-setup-page[data-backdrop="sky"] .happy-setup-assistants__mark,
 .happy-setup-page[data-backdrop="sky"] .happy-setup-assistants__name,
 .happy-setup-page[data-backdrop="sky"] .happy-setup-assistants__detail,
+.happy-setup-page[data-backdrop="sky"] .happy-setup-assistants__note,
+.happy-setup-page[data-backdrop="sky"] .happy-setup-assistants__link,
+.happy-setup-page[data-backdrop="sky"] .happy-copy-button[data-captioned],
+.happy-setup-page[data-backdrop="sky"] .happy-local-onboarding__facts,
 .happy-setup-page[data-backdrop="sky"] .happy-text-field__label {
     color: var(--button-primary-tint);
+}
+
+/* Outranks the column's own status inks, which would otherwise put a themed
+   (and in the light appearance, black) line on the photograph. */
+.happy-setup-page[data-backdrop="sky"]
+    .happy-setup-assistants__item[data-status]
+    .happy-setup-assistants__detail {
+    color: var(--button-primary-tint);
+}
+
+/* A command on the photograph is a pane of frosted glass with white ink rather
+   than a black terminal slab cut out of the sky. The prompt and the monospace
+   line still say "type this"; the surface no longer shouts it. */
+.happy-setup-page[data-backdrop="sky"] .happy-setup-command {
+    border-color: color-mix(in srgb, white 28%, transparent);
+    background: color-mix(in srgb, white 14%, transparent);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    color: white;
+}
+
+.happy-setup-page[data-backdrop="sky"] .happy-setup-command__prompt {
+    color: color-mix(in srgb, white 64%, transparent);
+}
+
+.happy-setup-page[data-backdrop="sky"] .happy-setup-command__copy {
+    color: color-mix(in srgb, white 78%, transparent);
+}
+
+.happy-setup-page[data-backdrop="sky"] .happy-setup-command__copy:hover,
+.happy-setup-page[data-backdrop="sky"] .happy-setup-command__copy:focus-visible {
+    color: white;
+    background: color-mix(in srgb, white 14%, transparent);
+}
+
+/* Quiet controls on the photograph take the same white ink, and the same
+   translucent hover the ghost buttons beside them use. */
+.happy-setup-page[data-backdrop="sky"] .happy-copy-button[data-captioned]:hover {
+    color: white;
+    background: color-mix(in srgb, white 12%, transparent);
+}
+
+/* What the machine turned out to hold, reported rather than acted on. */
+.happy-local-onboarding__facts {
+    display: flex;
+    flex: none;
+    gap: 16px;
+    color: var(--text-secondary);
+    font-family: var(--happy-font-mono);
+    font-size: 12px;
+    line-height: 16px;
 }
 
 .happy-setup-page[data-backdrop="sky"] .happy-setup-page__progress-track {
@@ -166,9 +308,8 @@
     background: var(--button-primary-tint);
 }
 
-/* The same progress mark can sit directly on another dark photographic
-   surface, such as the Happy Social setup modal, without inheriting the page
-   shell that normally supplies this treatment. */
+/* The same progress mark can sit directly on a dark photographic surface
+   without inheriting the page shell that normally supplies this treatment. */
 .happy-setup-page__progress[data-tone="inverse"] .happy-setup-page__progress-line,
 .happy-setup-page__progress[data-tone="inverse"] .happy-setup-page__progress-label,
 .happy-setup-page__progress[data-tone="inverse"] .happy-setup-page__progress-detail {
@@ -211,8 +352,39 @@
     flex: none;
     align-items: center;
     justify-content: center;
-    width: 120px;
-    height: 120px;
+    width: 80px;
+    height: 80px;
+    margin-bottom: 8px;
+}
+
+/* As a status the bar is not a stand-in for a button: wide enough for its
+   label and count on one line, with the line centred under the words. */
+.happy-setup-page__lead > .happy-setup-page__progress {
+    width: 360px;
+    margin-top: 4px;
+}
+
+.happy-setup-page__lead > .happy-setup-page__progress .happy-setup-page__progress-line {
+    justify-content: center;
+}
+
+.happy-setup-page__status {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 20px;
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 20px;
+    text-align: center;
+}
+
+.happy-setup-page__status[data-tone="inverse"] {
+    color: color-mix(in srgb, var(--button-primary-tint) 78%, transparent);
 }
 
 .happy-setup-page__title {
@@ -225,38 +397,16 @@
     text-align: center;
 }
 
+/* One line by contract: the copy is written short. The line is held even when
+   a page has no subtitle, so the title stays at its height. */
 .happy-setup-page__copy {
-    max-width: 400px;
+    min-height: 24px;
     margin: 0;
     color: var(--text-secondary);
     font-size: 16px;
     font-weight: 400;
     line-height: 24px;
     text-align: center;
-}
-
-/*
- * Something to type, so it is selectable and looks it: the monospace face on a
- * raised well. `user-select` is set explicitly because the surrounding chrome
- * of a desktop window is commonly unselectable, and a command nobody can copy
- * is worse than no command at all.
- */
-.happy-setup-page__command {
-    max-width: 100%;
-    padding: 10px 14px;
-    border: 1px solid var(--divider);
-    border-radius: var(--happy-radius-md);
-    background: var(--surface-high);
-    color: var(--text);
-    font-family: var(--happy-font-mono);
-    font-size: 13px;
-    line-height: 20px;
-    /* Wraps rather than scrolling: a scrollport may carry no padding of its own,
-       and a horizontal scrollbar on a centred page is a worse way to read a long
-       command than a second line. */
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    user-select: text;
 }
 
 /* The page's own body takes the full measure: a fork, a terminal, or a notice
@@ -270,85 +420,25 @@
     width: 100%;
 }
 
-/* Download, launch, discovery, and verification rewrite one retained frame.
-   The subscription copy fits three lines; reserving them from the first paint
-   keeps the status region and the owl on the same coordinates as words change. */
-.happy-local-onboarding__machine-setup .happy-setup-page__body {
-    gap: 16px;
-}
-
+/* Download, launch, discovery, and verification rewrite one retained frame. */
 .happy-local-onboarding__machine-setup .happy-setup-page__title {
     white-space: nowrap;
 }
 
-.happy-local-onboarding__machine-setup .happy-setup-page__copy {
-    display: flex;
-    flex: none;
-    align-items: center;
-    justify-content: center;
-    min-height: 72px;
-}
-
-/* Both lifecycle layers occupy this one reserved region during the handoff.
-   Keeping the region fixed means neither the progress line nor the harness row
-   can move the title, copy, or surrounding column when it becomes active. */
-.happy-local-onboarding__machine-setup .happy-setup-page__slot,
-.happy-local-onboarding__machine-status {
-    position: relative;
-    flex: none;
-    width: 100%;
-    height: 216px;
-}
-
-.happy-local-onboarding__machine-progress,
-.happy-local-onboarding__machine-assistants {
-    /* Crossfade layers must share the exact reserved status rectangle while both are painted. */
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    transition: opacity 180ms ease;
-}
-
-.happy-local-onboarding__machine-progress {
-    opacity: 1;
-}
-
-.happy-local-onboarding__machine-progress .happy-setup-page__progress {
-    width: 400px;
+/* Three columns that may each carry a command well need more measure than a
+   paragraph does, so this one page is wider than the setup default and a long
+   install command keeps as much of itself in view as the window allows. */
+.happy-local-onboarding__machine-setup .happy-setup-page__body {
+    max-width: 960px;
 }
 
 .happy-local-onboarding__machine-assistants {
-    gap: 48px;
-    opacity: 0;
-    pointer-events: none;
-}
-
-.happy-local-onboarding__machine-actions {
     display: flex;
     flex: none;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 4px;
-    height: 44px;
-}
-
-.happy-local-onboarding__machine-status[data-view="assistants"]
-    .happy-local-onboarding__machine-progress {
-    opacity: 0;
-    pointer-events: none;
-}
-
-.happy-local-onboarding__machine-status[data-view="assistants"]
-    .happy-local-onboarding__machine-assistants {
-    opacity: 1;
-    pointer-events: auto;
-    transition-delay: 120ms;
+    gap: 24px;
+    width: 100%;
 }
 
 /*
@@ -495,11 +585,6 @@
 
     .happy-setup-page__progress {
         animation: none;
-    }
-
-    .happy-local-onboarding__machine-progress,
-    .happy-local-onboarding__machine-assistants {
-        transition: none;
     }
 
     .happy-setup-page__progress-fill {

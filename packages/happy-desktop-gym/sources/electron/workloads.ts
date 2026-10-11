@@ -591,7 +591,7 @@ function linuxDisplayEnvironment(): Record<string, string> {
  * must exercise the same renderer and IPC boundary as a person, not seed
  * desktop settings behind the app.
  */
-async function completeOnboarding(page: Page): Promise<void> {
+export async function completeOnboarding(page: Page): Promise<void> {
     const deadline = Date.now() + 45_000;
     // The welcome deck mounts after the renderer's first paint. Waiting for its
     // owned action avoids treating a not-yet-mounted button as proof that no
@@ -634,23 +634,17 @@ async function completeOnboarding(page: Page): Promise<void> {
             // the last answer and the workspace gate can mount.
             return;
         }
+        // A configured isolated daemon can skip native onboarding entirely
+        // after the welcome deck. Its mounted shell is the completion barrier.
         if (
-            (await page.getByRole("button", { name: "Create profile" }).count()) > 0 &&
+            !onboardingVisible &&
             (await page
-                .getByRole("button", { name: "Create profile" })
-                .first()
+                .locator(".happy-sidebar-footer")
                 .isVisible()
                 .catch(() => false))
-        ) {
-            const name = page.locator('input[type="text"]').first();
-            const email = page.locator('input[type="email"]').first();
-            await name.waitFor({ state: "visible", timeout: 5_000 });
-            await email.waitFor({ state: "visible", timeout: 5_000 });
-            await name.fill("Happy Desktop Gym");
-            await email.fill("gym@example.invalid");
-            await clickIfVisible("Create profile");
-            continue;
-        }
+        )
+            return;
+        if (await clickIfVisible("Continue")) continue;
         if (await clickIfVisible("Not now")) continue;
         if (await clickIfVisible("Skip")) continue;
         if (
@@ -673,7 +667,11 @@ async function completeOnboarding(page: Page): Promise<void> {
 
 async function clickButtonIfVisible(page: Page, label: string | RegExp): Promise<boolean> {
     const button = page.getByRole("button", { name: label }).first();
-    if ((await button.count()) === 0 || !(await button.isVisible().catch(() => false)))
+    if (
+        (await button.count()) === 0 ||
+        !(await button.isVisible().catch(() => false)) ||
+        !(await button.isEnabled().catch(() => false))
+    )
         return false;
     await button.click();
     await page.waitForTimeout(150);
@@ -717,6 +715,54 @@ async function workloadRun(
     };
 
     await mark("scenario-start");
+    if (workload === "background-drafts") {
+        const targets = await mixedSessionTargetsRead(
+            options.manifest.publicRepository?.sessionIds ?? options.clusterSessionIds,
+            options.runtime,
+        );
+        if (targets.length < 2)
+            throw new Error("Background drafts need two durable conversations.");
+        const [visible, background] = targets;
+        await navigateRoute(page, visible!.route);
+        await waitForSessionUiReady(page, visible!.route, visible!.id);
+        await page.waitForTimeout(500);
+        const original = await options.runtime.client.draftRead(background!.id);
+        await options.profilerStart();
+        await mark("background-drafts-start");
+        const before = await performanceCapture(page, app, options.profilerActive());
+        const updateStarted = performance.now();
+        try {
+            for (let index = 0; index < 100; index += 1) {
+                await options.runtime.client.draftSave(background!.id, {
+                    text: `A phone edits a background conversation: ${"review ".repeat(index + 1)}`,
+                    providerId: "gym",
+                    modelId: "openai/gym",
+                    effort: "medium",
+                    permissionMode: "full_access",
+                    serviceTier: null,
+                });
+            }
+        } finally {
+            await options.runtime.client.draftSave(background!.id, original);
+        }
+        const updateDurationMs = performance.now() - updateStarted;
+        await page.waitForTimeout(500);
+        await mark("background-drafts-complete");
+        const selected = await page
+            .locator(`[data-happy-desktop-ui="tab"][data-tab-id="${visible!.id}"]`)
+            .first()
+            .getAttribute("aria-selected");
+        if (selected !== "true")
+            throw new Error("Background drafts changed the selected conversation.");
+        await page.screenshot({ path: join(options.paths.artifacts, "background-drafts.png") });
+        return finish({
+            updates: 100,
+            updateDurationMs,
+            before,
+            after: await performanceCapture(page, app, options.profilerActive()),
+            selectedSessionPreserved: true,
+        });
+    }
     if (workload === "boot") {
         await options.profilerStart();
         await mark("profiler-started");
@@ -754,8 +800,16 @@ async function workloadRun(
         await mark("profiler-started");
         return finish(await mixedReplayRun(page, app, options, material, targets, mark));
     }
-    if (workload === "long-chat-scroll" || workload === "session-switch-load") {
-        const targets = await mixedSessionTargetsRead(options.clusterSessionIds, options.runtime);
+    if (
+        workload === "long-chat-scroll" ||
+        workload === "session-switch-load" ||
+        workload === "public-repository"
+    ) {
+        const sessionIds =
+            workload === "public-repository"
+                ? (options.manifest.publicRepository?.sessionIds ?? [])
+                : options.clusterSessionIds;
+        const targets = await mixedSessionTargetsRead(sessionIds, options.runtime);
         if (targets.length < 3) {
             return finish({
                 reason: `${workload} needs three durable sessions; found ${targets.length}.`,
@@ -766,7 +820,7 @@ async function workloadRun(
         await options.profilerStart();
         await mark("profiler-started");
         return finish(
-            workload === "long-chat-scroll"
+            workload !== "session-switch-load"
                 ? await longChatScrollRun(page, app, options, material, targets, mark)
                 : await sessionSwitchLoadRun(page, app, options, material, targets, mark),
         );
@@ -2020,6 +2074,22 @@ async function longChatScrollRun(
     targets: readonly MixedSessionTarget[],
     mark: (name: string) => Promise<void>,
 ): Promise<Record<string, unknown>> {
+    const target = targets[0]!;
+    await navigateRoute(page, target.route);
+    await waitForSessionUiReady(page, target.route, target.id);
+    const initialViewport = await transcriptViewportRead(page);
+    if (!initialViewport.virtualized || initialViewport.renderedRows === 0) {
+        throw new Error(
+            `Long-chat scroll needs a hydrated virtual transcript: ${JSON.stringify(initialViewport)}.`,
+        );
+    }
+    if (initialViewport.scrollHeight <= initialViewport.clientHeight) {
+        throw new Error(
+            `Long-chat scroll needs scrollable content: ${JSON.stringify(initialViewport)}.`,
+        );
+    }
+    await mark("virtualized-transcript-ready");
+    // Hydrate first so the streams overlap scrolling instead of finishing during cold layout.
     const before = await performanceCapture(page, app, options.profilerActive());
     const submission = await concurrentSubmissions(
         options.runtime.client,
@@ -2036,21 +2106,6 @@ async function longChatScrollRun(
             submission.collectors.get(entry.sessionId),
         ),
     );
-    const target = targets[0]!;
-    await navigateRoute(page, target.route);
-    await waitForSessionUiReady(page, target.route, target.id);
-    const initialViewport = await transcriptViewportRead(page);
-    if (!initialViewport.virtualized || initialViewport.renderedRows === 0) {
-        throw new Error(
-            `Long-chat scroll needs a hydrated virtual transcript: ${JSON.stringify(initialViewport)}.`,
-        );
-    }
-    if (initialViewport.scrollHeight <= initialViewport.clientHeight) {
-        throw new Error(
-            `Long-chat scroll needs scrollable content: ${JSON.stringify(initialViewport)}.`,
-        );
-    }
-    await mark("virtualized-transcript-ready");
     const scrollInteractions = await transcriptScrollSequence(
         page,
         [1, 0, 0.78, 0.22, 0.92, 0.08, 0.64, 0],
@@ -2275,6 +2330,7 @@ async function transcriptScrollSequence(
     const interactions: ScrollInteractionMeasurement[] = [];
     let historyLoadAttempted = false;
     for (const [index, requestedFraction] of fractions.entries()) {
+        if (requestedFraction < 1) await transcriptReaderControlTake(page);
         const startedAt = new Date().toISOString();
         const measurement = await page.evaluate(async (fraction) => {
             const list = document.querySelector<HTMLElement>(
@@ -2334,6 +2390,11 @@ async function transcriptScrollSequence(
                 historyScrollHeightAfter: list.scrollHeight,
             };
         }, requestedFraction);
+        if (Math.abs(measurement.scrollTop - measurement.maxScrollTop * requestedFraction) > 8) {
+            throw new Error(
+                `The transcript did not reach the requested scroll position: ${JSON.stringify(measurement)}.`,
+            );
+        }
         if (
             requestedFraction === 0 &&
             !historyLoadAttempted &&
@@ -2386,23 +2447,25 @@ async function transcriptScrollSequence(
     return interactions;
 }
 
+async function transcriptReaderControlTake(page: Page): Promise<void> {
+    const list = page
+        .locator('[data-happy-desktop-ui="message-list"] [data-scrollbar-viewport]')
+        .first();
+    const box = await list.boundingBox();
+    if (!box) throw new Error("The conversation message list has no wheel target.");
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    /*
+     * Programmatic positioning is only fixture setup. Give the reader the
+     * viewport first through the same trusted upward intent that parks a
+     * real transcript; a synthetic scroll event cannot stand in for that
+     * ownership boundary while follow mode is active.
+     */
+    await page.mouse.wheel(0, -4);
+    await page.waitForTimeout(16);
+}
+
 async function scrollListToFraction(page: Page, fraction: number): Promise<void> {
-    if (fraction < 1) {
-        const list = page
-            .locator('[data-happy-desktop-ui="message-list"] [data-scrollbar-viewport]')
-            .first();
-        const box = await list.boundingBox();
-        if (!box) throw new Error("The conversation message list has no wheel target.");
-        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-        /*
-         * Programmatic positioning is only fixture setup. Give the reader the
-         * viewport first through the same trusted upward intent that parks a
-         * real transcript; a synthetic scroll event cannot stand in for that
-         * ownership boundary while follow mode is active.
-         */
-        await page.mouse.wheel(0, -4);
-        await page.waitForTimeout(16);
-    }
+    if (fraction < 1) await transcriptReaderControlTake(page);
     await page.evaluate(
         (requestedFraction) =>
             new Promise<void>((resolve, reject) => {
@@ -3847,6 +3910,7 @@ function streamingPaintMeasurementBuild(
             Math.abs(settledStatusHeightMin - 32) <= 0.5 &&
             settledStatusHeightMax !== undefined &&
             Math.abs(settledStatusHeightMax - 32) <= 0.5 &&
+            statusTransitionContinuous &&
             statusTypographyMatched &&
             tableObserved &&
             tableStructureTransitions === 1,
@@ -5034,9 +5098,6 @@ async function sessionRunBarrierWait(
 }
 
 async function waitForSessionUiReady(page: Page, route: string, sessionId?: string): Promise<void> {
-    await page.waitForFunction((expected) => location.hash === `#${expected}`, route, {
-        timeout: 10_000,
-    });
     try {
         if (sessionId !== undefined) {
             const tab = page
@@ -5276,12 +5337,40 @@ function agentLocation(agent: {
 }
 
 async function navigateRoute(page: Page, path: string): Promise<void> {
-    await page.evaluate((nextPath) => {
-        window.location.hash = nextPath;
-    }, path);
-    await page.waitForFunction((expected) => location.hash === `#${expected}`, path, {
-        timeout: 10_000,
-    });
+    // Each desktop connection has its own memory router. A changed URL hash
+    // no longer navigates it: use the same sidebar and tabs as the reader.
+    const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+    const [kind, connectionId, groupId, sessionId] = parts;
+    if (kind !== "chats" || !connectionId || !groupId || parts.length > 4)
+        throw new Error(`Gym has no public-control navigation for ${path}.`);
+    const row = page.locator(
+        `[data-happy-desktop-ui="sidebar-item"][data-item-id="${connectionId}/${groupId}"]`,
+    );
+    await row.waitFor({ state: "attached", timeout: 30_000 });
+    if ((await row.getAttribute("aria-current")) !== "page") await row.click();
+    await page.waitForFunction(
+        (id) =>
+            document
+                .querySelector(`[data-happy-desktop-ui="sidebar-item"][data-item-id="${id}"]`)
+                ?.getAttribute("aria-current") === "page",
+        `${connectionId}/${groupId}`,
+        { timeout: 30_000 },
+    );
+    if (sessionId) {
+        const tab = page
+            .locator(`[data-happy-desktop-ui="tab"][data-tab-id="${sessionId}"]`)
+            .first();
+        await tab.waitFor({ state: "attached", timeout: 30_000 });
+        if ((await tab.getAttribute("aria-selected")) !== "true") await tab.click();
+        await page.waitForFunction(
+            (id) =>
+                document
+                    .querySelector(`[data-happy-desktop-ui="tab"][data-tab-id="${id}"]`)
+                    ?.getAttribute("aria-selected") === "true",
+            sessionId,
+            { timeout: 30_000 },
+        );
+    }
 }
 
 async function waitForAny(page: Page, selectors: readonly string[]): Promise<void> {

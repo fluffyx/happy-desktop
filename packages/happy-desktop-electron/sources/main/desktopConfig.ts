@@ -6,6 +6,8 @@ import type {
     DesktopAppearanceMode,
     DesktopConfig,
     DesktopDefaultModel,
+    DesktopLinkOpenPlacement,
+    DesktopKeepAwakeMode,
     DesktopModelIdentity,
     DesktopModelPreference,
     DesktopPermissionMode,
@@ -115,13 +117,21 @@ export function desktopConfigValidate(candidate: unknown): DesktopConfig {
         "defaultEffort",
         "defaultModel",
         "defaultPermissionMode",
+        "keepAwake",
         "lastPickedModel",
+        "linkOpen",
         "modelPreferences",
+        "previewUpdatesEnabled",
         "scrollbarVisibility",
         "titleShimmerEnabled",
         "version",
     ]);
     if (Object.keys(candidate).some((key) => !allowed.has(key))) throw invalidConfigError();
+    if (
+        candidate.previewUpdatesEnabled !== undefined &&
+        typeof candidate.previewUpdatesEnabled !== "boolean"
+    )
+        throw invalidConfigError();
     if (
         candidate.titleShimmerEnabled !== undefined &&
         typeof candidate.titleShimmerEnabled !== "boolean"
@@ -144,10 +154,14 @@ export function desktopConfigValidate(candidate: unknown): DesktopConfig {
         candidate.defaultPermissionMode === undefined
             ? "auto"
             : permissionModeParse(candidate.defaultPermissionMode);
+    const keepAwake =
+        candidate.keepAwake === undefined ? undefined : keepAwakeModeParse(candidate.keepAwake);
     const lastPickedModel =
         candidate.lastPickedModel === undefined
             ? undefined
             : modelIdentityOnlyParse(candidate.lastPickedModel);
+    const linkOpen =
+        candidate.linkOpen === undefined ? undefined : linkOpenPlacementParse(candidate.linkOpen);
     const titleShimmerEnabled =
         typeof candidate.titleShimmerEnabled === "boolean"
             ? candidate.titleShimmerEnabled
@@ -161,7 +175,9 @@ export function desktopConfigValidate(candidate: unknown): DesktopConfig {
         (candidate.defaultModel !== undefined && !defaultModel) ||
         !defaultEffort ||
         !defaultPermissionMode ||
+        (candidate.keepAwake !== undefined && !keepAwake) ||
         (candidate.lastPickedModel !== undefined && !lastPickedModel) ||
+        (candidate.linkOpen !== undefined && !linkOpen) ||
         !scrollbarVisibility
     )
         throw invalidConfigError();
@@ -181,8 +197,13 @@ export function desktopConfigValidate(candidate: unknown): DesktopConfig {
         defaultEffort,
         ...(defaultModel ? { defaultModel } : {}),
         defaultPermissionMode,
+        ...(keepAwake ? { keepAwake } : {}),
         ...(lastPickedModel ? { lastPickedModel } : {}),
+        ...(linkOpen ? { linkOpen } : {}),
         modelPreferences,
+        ...(candidate.previewUpdatesEnabled === undefined
+            ? {}
+            : { previewUpdatesEnabled: candidate.previewUpdatesEnabled as boolean }),
         scrollbarVisibility,
         ...(titleShimmerEnabled === undefined ? {} : { titleShimmerEnabled }),
         version: CONFIG_VERSION,
@@ -191,6 +212,14 @@ export function desktopConfigValidate(candidate: unknown): DesktopConfig {
 
 function appearanceModeParse(value: unknown): DesktopAppearanceMode | undefined {
     return value === "dark" || value === "light" || value === "system" ? value : undefined;
+}
+
+function linkOpenPlacementParse(value: unknown): DesktopLinkOpenPlacement | undefined {
+    return value === "panel" || value === "browser" ? value : undefined;
+}
+
+function keepAwakeModeParse(value: unknown): DesktopKeepAwakeMode | undefined {
+    return value === "on" || value === "agent" || value === "off" ? value : undefined;
 }
 
 function scrollbarVisibilityParse(value: unknown): DesktopScrollbarVisibility | undefined {
@@ -220,14 +249,14 @@ function modelPreferenceParse(candidate: unknown): DesktopModelPreference | unde
     const allowed = new Set(["lastEffort", "lastSpeed", "modelId", "providerId"]);
     if (
         Object.keys(candidate).some((key) => !allowed.has(key)) ||
-        !preferenceValueValid(candidate.lastSpeed) ||
+        (candidate.lastSpeed !== null && !preferenceValueValid(candidate.lastSpeed)) ||
         (candidate.lastEffort !== undefined && !preferenceValueValid(candidate.lastEffort))
     )
         return undefined;
     return {
         ...identity,
         ...(typeof candidate.lastEffort === "string" ? { lastEffort: candidate.lastEffort } : {}),
-        lastSpeed: candidate.lastSpeed as string,
+        lastSpeed: candidate.lastSpeed as string | null,
     };
 }
 

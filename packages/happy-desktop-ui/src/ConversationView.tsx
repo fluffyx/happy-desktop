@@ -1,9 +1,14 @@
 import { type CSSProperties, type ReactNode, useState, useSyncExternalStore } from "react";
+import type { FileOpenHandler } from "./fileReference";
+import type { LinkOpenHandler, LinkOpenPlacement } from "./MessageMarkdown";
+import type { MessageReferences } from "./messageReferences";
 import {
     entryKey,
     type ComposerSnapshot,
     type ConversationAuthor,
     type ConversationEntry,
+    type ConversationErrorAssistance,
+    type ConversationErrorAssistanceEntry,
     type ConversationRequestSubmission,
     type ConversationToolCall,
 } from "happy-desktop-state";
@@ -97,6 +102,11 @@ export type ConversationViewProps = {
      */
     streamingCaret?: boolean;
     entries: readonly ConversationEntry[];
+    errorAssistance?: readonly ConversationErrorAssistanceEntry[];
+    errorAssistanceUnavailable?: string;
+    onErrorAssistanceRequest?: (entryId: string) => void;
+    /** Custom introduction for a loaded conversation with no transcript entries. */
+    emptyContent?: ReactNode;
     /** Agent identity shown when a tool/activity row opens a turn before prose exists. */
     agentAuthor?: ConversationAuthor;
     /** Identity id of the reader, so their own messages take the own treatment. */
@@ -193,7 +203,21 @@ export type ConversationViewProps = {
      * leaves those affordances out entirely, because a transcript with no
      * workspace behind it has nothing to open.
      */
-    onFileOpen?: (path: string) => void;
+    onFileOpen?: FileOpenHandler;
+    /**
+     * Opens a web link a message carries where the reader chose from the
+     * link's context menu: the machine's browser or the side panel. Absent
+     * offers no menu, and a click goes where the host sends every link.
+     */
+    onLinkOpen?: LinkOpenHandler;
+    /** Which of the two places a plain click on a link goes, marked in its menu. */
+    linkOpenDefault?: LinkOpenPlacement;
+    /**
+     * What the Happy references agents name read as right now, and where
+     * opening one goes. Supplied by the owner of the live stores behind them;
+     * a new value re-renders the references and re-sizes the rows naming them.
+     */
+    references?: MessageReferences;
     /** Runs a command chosen from the `/` palette. */
     onCommandInvoke?: (commandId: string) => void;
     /** Stops the current run; the composer's send control becomes this while running. */
@@ -214,6 +238,30 @@ export type ConversationViewProps = {
     style?: CSSProperties;
 };
 
+/** How many recently opened conversations keep their prepared row layout. */
+const ROW_HEIGHT_CACHE_LIMIT = 4;
+/*
+ * One row-layout cache per recently opened conversation. The owner remounts
+ * this view for every conversation it opens, so the registry belongs to the
+ * module rather than to one view's lifetime: returning to a conversation reuses
+ * its prepared text layout instead of laying its whole history out again.
+ * These are memo caches, not product state — retaining a calculation never
+ * drives a render — and Map insertion order is the bounded LRU.
+ */
+const rowHeightCaches = new Map<string, ConversationRowHeightCache>();
+function conversationRowHeightCacheGet(key: string): ConversationRowHeightCache {
+    const cache = rowHeightCaches.get(key) ?? conversationRowHeightCacheCreate();
+    // The conversation being read is touched last and so survives the evictions below.
+    rowHeightCaches.delete(key);
+    rowHeightCaches.set(key, cache);
+    while (rowHeightCaches.size > ROW_HEIGHT_CACHE_LIMIT) {
+        const oldest = rowHeightCaches.keys().next().value as string | undefined;
+        if (oldest === undefined || oldest === key) break;
+        rowHeightCaches.delete(oldest);
+    }
+    return cache;
+}
+
 /** Whether the turn this row carries the trace control for is currently open. */
 function conversationEntryTraceOpen(
     entry: ConversationEntry,
@@ -226,6 +274,30 @@ function conversationEntryTraceOpen(
               ? entry.agentTrace
               : undefined;
     return trace !== undefined && expandedTurnIds?.has(trace.turnId) === true;
+}
+
+/**
+ * Boundary classes a transcript row takes from its neighbours, or `undefined`
+ * when it takes none.
+ */
+function conversationRowClassName(
+    entries: readonly ConversationEntry[],
+    index: number,
+    liveStatus: boolean,
+): string | undefined {
+    const classNames: string[] = [];
+    if (
+        entries[index]?.kind === "turnStatus" &&
+        conversationTurnStatusAfterActivity(entries, index)
+    )
+        classNames.push("happy-turn-status--after-trace");
+    if (conversationEntryResumesAfterActivity(entries, index))
+        classNames.push("happy-conversation__resumed");
+    if (conversationEntryPrecedesActivity(entries, index))
+        classNames.push("happy-conversation__continues");
+    if (conversationMessageClosedByStatus(entries, index, liveStatus))
+        classNames.push("happy-conversation__closing");
+    return classNames.length === 0 ? undefined : classNames.join(" ");
 }
 
 /**
@@ -304,21 +376,24 @@ export function ConversationStatus(props: { elapsedMs?: number; running?: boolea
  */
 export function ConversationView(props: ConversationViewProps) {
     const composer = props.composer;
+    const errorAssistanceByEntry = new Map(
+        props.errorAssistance?.map((entry) => [entry.entryId, entry.assistance]),
+    );
+    const errorAssistanceFor = (
+        entry: ConversationEntry | undefined,
+    ): ConversationErrorAssistance | undefined => {
+        if (entry?.kind !== "notice") return undefined;
+        const assistance = errorAssistanceByEntry.get(entry.id);
+        if (!assistance) return undefined;
+        return props.errorAssistanceUnavailable === undefined || assistance.status === "pending"
+            ? assistance
+            : { status: "unavailable", reason: props.errorAssistanceUnavailable };
+    };
     const textLayoutGeneration = useSyncExternalStore(
         messageTextLayoutFontGenerationSubscribe,
         messageTextLayoutFontGenerationGet,
         messageTextLayoutFontGenerationGet,
     );
-    /*
-     * One row-layout cache per conversation, kept for as long as this view is
-     * mounted: leaving a conversation and coming back reuses prepared text
-     * layout instead of recomputing the whole transcript. This Map and its values are component-lifetime memo caches,
-     * not product state: retaining a calculation never drives another render.
-     * The row estimator needs the active cache while rendering, so lazy state
-     * initialization gives the registry one stable owner without reading or
-     * writing a ref during render.
-     */
-    const [rowHeightCaches] = useState(() => new Map<string, ConversationRowHeightCache>());
     const conversationCacheKey =
         props.conversationId === undefined ? "anonymous" : `conversation:${props.conversationId}`;
     const [rowExpansion, setRowExpansion] = useState(() => new Map<string, boolean>());
@@ -336,9 +411,7 @@ export function ConversationView(props: ConversationViewProps) {
             return next;
         });
     };
-    const cachedRowHeights = rowHeightCaches.get(conversationCacheKey);
-    const rowHeightCache = cachedRowHeights ?? conversationRowHeightCacheCreate();
-    if (cachedRowHeights === undefined) rowHeightCaches.set(conversationCacheKey, rowHeightCache);
+    const rowHeightCache = conversationRowHeightCacheGet(conversationCacheKey);
     const { transcript, queued } = conversationPendingSteering(props.entries);
     const awaitingInput = transcript.some(
         (entry) =>
@@ -367,11 +440,20 @@ export function ConversationView(props: ConversationViewProps) {
         !delegating &&
         props.agentAuthor !== undefined &&
         conversationWorkingStatusStartsGroup(transcript);
+    const workingStatusClosesMessage =
+        statusVisible && conversationMessageClosedByStatus(transcript, transcript.length - 1, true);
     const workingStatus = (
         <AgentWorkingStatus
             active={statusVisible}
             awaitingInput={awaitingInput}
-            className="happy-conversation-turn-status"
+            className={[
+                "happy-conversation-turn-status",
+                workingStatusClosesMessage
+                    ? "happy-conversation-turn-status--after-message"
+                    : undefined,
+            ]
+                .filter(Boolean)
+                .join(" ")}
             elapsedMs={delegating ? props.delegatedElapsedMs : props.elapsedMs}
             label={delegating ? undefined : props.workingLabel}
             /* The phase word is the one label whose changes are the whole
@@ -436,7 +518,9 @@ export function ConversationView(props: ConversationViewProps) {
     const workingStatusHeight = statusVisible
         ? workingStatusStartsGroup
             ? 68
-            : AGENT_WORKING_STATUS_ROW_HEIGHT
+            : workingStatusClosesMessage
+              ? 32
+              : AGENT_WORKING_STATUS_ROW_HEIGHT
         : 0;
     return (
         <section
@@ -497,27 +581,31 @@ export function ConversationView(props: ConversationViewProps) {
                     data-happy-desktop-ui="conversation-empty"
                     viewportClassName="happy-conversation__empty-viewport"
                 >
-                    <EmptyState
-                        // A conversation with nothing in it is an agent waiting
-                        // to be told what to do, so that is what it looks like.
-                        animation="robot"
-                        description="Send a message to start working in this conversation."
-                        icon="chat"
-                        size="panel"
-                        title="Nothing here yet"
-                    />
+                    {props.emptyContent ?? (
+                        <EmptyState
+                            // A conversation with nothing in it is something small
+                            // about to come out, so that is what it looks like.
+                            animation="hatching-chick"
+                            description="Send a message to start working in this conversation."
+                            icon="chat"
+                            size="panel"
+                            title="Nothing here yet"
+                        />
+                    )}
                     {activityFallback}
                 </ScrollArea>
             ) : (
                 <MessageList
                     estimateDependencies={[
-                        props.entries,
+                        props.errorAssistance,
+                        props.errorAssistanceUnavailable,
                         props.viewerId,
                         props.activityTreatment,
                         statusVisible,
                         workingStatusStartsGroup,
                         props.activityControl !== undefined,
                         rowExpansion,
+                        props.references,
                     ]}
                     estimateRowSize={(index, width) =>
                         conversationRowHeight(
@@ -525,17 +613,21 @@ export function ConversationView(props: ConversationViewProps) {
                             index,
                             {
                                 activityTreatment: props.activityTreatment,
+                                errorAssistance: errorAssistanceFor(transcript[index]),
                                 expanded:
                                     transcript[index] === undefined
                                         ? false
                                         : rowExpanded(transcript[index]),
                                 surface: "conversation",
+                                liveStatus: statusVisible,
+                                ...(props.references ? { references: props.references } : {}),
                                 viewerId: props.viewerId,
                                 width,
                             },
                             rowHeightCache,
                         )
                     }
+                    estimateRows={transcript}
                     estimateRowWidth={contentWidth}
                     estimateVersion={textLayoutGeneration}
                     footer={
@@ -554,6 +646,9 @@ export function ConversationView(props: ConversationViewProps) {
                                                     ? entry.message.id
                                                     : entry.id
                                             }
+                                            {...(props.references
+                                                ? { references: props.references }
+                                                : {})}
                                             viewerId={props.viewerId}
                                         />
                                     ))}
@@ -581,6 +676,9 @@ export function ConversationView(props: ConversationViewProps) {
                                                 ? false
                                                 : rowExpanded(queued[index]),
                                         surface: "conversation",
+                                        ...(props.references
+                                            ? { references: props.references }
+                                            : {}),
                                         viewerId: props.viewerId,
                                         width,
                                     },
@@ -609,6 +707,12 @@ export function ConversationView(props: ConversationViewProps) {
                                 : undefined;
                         return (
                             <ConversationEntryView
+                                /* The key leads the spread props below so React
+                                   takes its direct element path for each of the
+                                   transcript's rows instead of copying props. */
+                                key={entry.kind === "message" ? entry.message.id : entry.id}
+                                errorAssistance={errorAssistanceFor(entry)}
+                                onErrorAssistanceRequest={props.onErrorAssistanceRequest}
                                 activityMotion={props.motion}
                                 activityTreatment={props.activityTreatment}
                                 {...(props.streamingCaret === undefined
@@ -624,37 +728,16 @@ export function ConversationView(props: ConversationViewProps) {
                                         ? props.agentAuthor
                                         : undefined
                                 }
-                                className={
-                                    [
-                                        entry.kind === "turnStatus" &&
-                                        conversationTurnStatusAfterActivity(transcript, index)
-                                            ? "happy-turn-status--after-trace"
-                                            : undefined,
-                                        conversationEntryResumesAfterActivity(transcript, index)
-                                            ? "happy-conversation__resumed"
-                                            : undefined,
-                                        conversationEntryPrecedesActivity(transcript, index)
-                                            ? "happy-conversation__continues"
-                                            : undefined,
-                                        conversationMessageClosedByStatus(transcript, index)
-                                            ? "happy-conversation__closing"
-                                            : undefined,
-                                    ]
-                                        .filter(Boolean)
-                                        .join(" ") || undefined
-                                }
+                                className={conversationRowClassName(
+                                    transcript,
+                                    index,
+                                    statusVisible,
+                                )}
                                 entry={entry}
                                 grouped={
                                     entry.kind === "message"
                                         ? conversationMessageGrouped(transcript, index)
                                         : undefined
-                                }
-                                key={
-                                    entry.kind === "message"
-                                        ? entry.message.id
-                                        : entry.kind === "turnStatus"
-                                          ? entry.id
-                                          : entry.id
                                 }
                                 onImageOpen={props.onImageOpen}
                                 onAttachmentOpen={props.onAttachmentOpen}
@@ -672,6 +755,11 @@ export function ConversationView(props: ConversationViewProps) {
                                 onDelegationSelect={props.onDelegationSelect}
                                 now={props.now}
                                 {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+                                {...(props.onLinkOpen ? { onLinkOpen: props.onLinkOpen } : {})}
+                                {...(props.references ? { references: props.references } : {})}
+                                {...(props.linkOpenDefault
+                                    ? { linkOpenDefault: props.linkOpenDefault }
+                                    : {})}
                                 onTraceToggle={props.onTraceToggle}
                                 /* Either kind of row can be the one a turn hung
                                    its control on: the answer when the turn is

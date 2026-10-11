@@ -15,6 +15,7 @@ declare const happyAgentProjectIdBrand: unique symbol;
 declare const happyAgentWorktreeIdBrand: unique symbol;
 declare const happyAgentTerminalIdBrand: unique symbol;
 declare const happyAgentBotIdBrand: unique symbol;
+declare const happyAgentTaskIdBrand: unique symbol;
 
 /** Branded session identifier (CUID2 on the wire) so ids are not interchangeable with plain strings. */
 export type HappyAgentSessionId = string & { readonly [happyAgentSessionIdBrand]: true };
@@ -37,6 +38,9 @@ export type HappyAgentTerminalId = string & { readonly [happyAgentTerminalIdBran
 
 /** Branded identifier of a bot the daemon owns durably (CUID2 on the wire). */
 export type HappyAgentBotId = string & { readonly [happyAgentBotIdBrand]: true };
+
+/** Branded identifier of a task the daemon owns durably (CUID2 on the wire). */
+export type HappyAgentTaskId = string & { readonly [happyAgentTaskIdBrand]: true };
 
 /**
  * A bot: one persistent assistant, one dedicated workspace, one conversation
@@ -62,9 +66,12 @@ export interface HappyAgentBot {
      * out again from a narrower field.
      */
     readonly conversation: ConversationSummary;
+    readonly subtasks: readonly HappyAgentBotSubtask[];
     readonly name: string;
     /** Immutable local snake_case name, also the folder the bot works in. */
     readonly username: string;
+    /** Daemon-provided built-in bot identity; null or absent for ordinary bots. */
+    readonly systemKey?: string | null;
     /** Fractional index the host sorts the bot catalog by. */
     readonly orderKey: string;
     readonly path: string;
@@ -73,8 +80,84 @@ export interface HappyAgentBot {
      * The bot's picture. Unlike a project avatar it has no intrinsic size: the
      * daemon serves the bytes and a thumbhash to stand in until they arrive,
      * and the row draws it at whatever size the row is.
+     *
+     * The thumbhash is absent while the picture is one this client painted and
+     * is still sending up. Its bytes are already here as the URL, so nothing
+     * needs to stand in for them; the host's own record replaces it.
      */
+    readonly avatar?: { readonly url: string; readonly thumbhash?: string };
+}
+
+/**
+ * A bot this window has asked the host for and the host has not yet listed.
+ *
+ * It is not a `HappyAgentBot` with a phase: there is no conversation to
+ * report on and no folder to name until the host answers, and a row that
+ * claimed either would be claiming something the host has not said. What is
+ * here is exactly what was decided before asking — the identities the host
+ * will honour, the name, and the face — which is all a row waiting under the
+ * Bots heading has to show. The row leaves the moment the host's own listing
+ * carries the bot, and its `workspaceId` is that listing's row id, so the row
+ * the reader watched being made is the row the bot arrives as.
+ */
+export interface HappyAgentBotCreating {
+    readonly id: HappyAgentBotId;
+    readonly workspaceId: HappyAgentWorktreeId;
+    /** The chosen name, or what the host will call an unnamed bot until its first message. */
+    readonly name: string;
+    /** The face painted for it, as a URL the row can draw without the host. */
+    readonly avatar?: { readonly url: string };
+}
+
+/**
+ * Who a team task belongs to. A task has no face of its own, so in a team its
+ * row wears this person's. Every field is optional: a team task may name
+ * nobody, and a named owner may have no picture or not have been read yet.
+ */
+export interface HappyAgentTaskOwner {
+    /** The team member; absent when nobody was identified. */
+    readonly userId?: string;
+    readonly name?: string;
+    /** The owner's photo, drawn at whatever size the row is. */
     readonly avatar?: { readonly url: string; readonly thumbhash: string };
+}
+
+/**
+ * A task: one piece of work with one permanent conversation, like a bot, but
+ * with no avatar of its own, an owner, and a place in each member's own list.
+ *
+ * The workspace is what the conversation is addressed through, so `workspaceId`
+ * is the group id a route names — a task is opened the way a bot is. Unlike a
+ * bot's, that workspace cannot be browsed yet: the host answers its file,
+ * terminal, and git routes with 404, so a task is never offered those panels.
+ */
+export interface HappyAgentTask {
+    readonly id: HappyAgentTaskId;
+    readonly workspaceId: HappyAgentWorktreeId;
+    readonly name: string;
+    readonly conversation: ConversationSummary;
+    readonly subtasks: readonly HappyAgentBotSubtask[];
+    /**
+     * The team member it belongs to, or `null` on a standalone Happy Agent,
+     * where every task is the reader's own and no owner is shown.
+     */
+    readonly owner: HappyAgentTaskOwner | null;
+    readonly path: string;
+    readonly displayPath: string;
+    readonly createdAt: number;
+    readonly archived: boolean;
+    /** Whether the reader may archive and unarchive it. */
+    readonly canArchive: boolean;
+    /** The reader's place in it; absent until they join. */
+    readonly membership?: { readonly orderKey: string };
+}
+
+/** An active interactive task; its workspace may be shared with its parent. */
+export interface HappyAgentBotSubtask {
+    readonly workspaceId: HappyAgentWorktreeId;
+    readonly path: string;
+    readonly conversation: ConversationSummary;
+    readonly subtasks: readonly HappyAgentBotSubtask[];
 }
 
 /** The one application collection containing a visible primary chat. */
@@ -157,15 +240,28 @@ export type HappyAgentGoalStatus = "active" | "blocked" | "complete" | "paused";
 export interface HappyAgentModel {
     readonly id: string;
     readonly name: string;
+    /** The complete, labeled speed menu offered by this model/account, including its default. */
+    readonly serviceTierOptions: readonly HappyAgentServiceTierChoice[];
     readonly thinkingLevels: readonly HappyAgentThinkingLevel[];
     readonly defaultThinkingLevel: HappyAgentThinkingLevel;
+    /** The hard window in tokens; absent for a custom model whose limit is unknown. */
     readonly contextWindow?: number;
+    /**
+     * The measured conversation size at which the daemon compacts automatically, below the
+     * window. Absent when the daemon predates the field or the model has no curated threshold.
+     */
+    readonly autoCompactWindow?: number;
 }
 
 export interface HappyAgentModelProvider {
     readonly id: string;
+    /**
+     * The canonical kind of service behind this provider, as configured: `"codex"`,
+     * `"claude"`, `"grok"`, `"bedrock"`, … Several providers may share one type,
+     * each being a separate account with that service.
+     */
+    readonly type: string;
     readonly models: readonly HappyAgentModel[];
-    readonly serviceTiers: readonly HappyAgentServiceTier[];
     /**
      * Whether the machine will use this provider at all, as its own
      * configuration states it. Stated rather than read back out of
@@ -173,6 +269,12 @@ export interface HappyAgentModelProvider {
      * simply offers nothing.
      */
     readonly enabled: boolean;
+    /**
+     * Kept out of the pickers. A hidden account still works — it serves pools,
+     * and a conversation already on it keeps running there — it is just not
+     * offered as a choice. An older daemon does not report it: false.
+     */
+    readonly hidden: boolean;
     readonly disabledReason?: "not_authenticated" | "not_enabled" | "no_models";
 }
 
@@ -190,6 +292,17 @@ export interface HappyAgentModelCatalog {
 export interface HappyAgentImageInput {
     readonly mediaType: string;
     readonly data: string;
+}
+
+/**
+ * A picture being put on something the host keeps — a bot's face. The host
+ * stores encoded bytes and answers with a thumbhash and a URL, so this is the
+ * one shape a picture has on its way up: raster bytes in one of the three
+ * encodings the host accepts, never an SVG or a data URL.
+ */
+export interface HappyAgentAvatarImage {
+    readonly contentType: "image/png" | "image/jpeg" | "image/webp";
+    readonly data: ArrayBuffer;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +332,7 @@ export interface HappyAgentUserInputRequest {
 // Tasks, goals, subagents, background processes
 // ---------------------------------------------------------------------------
 
-export interface HappyAgentTask {
+export interface HappyAgentTodo {
     readonly id: string;
     readonly subject: string;
     readonly description: string;
@@ -311,6 +424,12 @@ export interface HappyAgentContextGauge {
     readonly totalTokens: number;
     /** Remaining share of the window, 0–1. */
     readonly remainingFraction: number;
+    /**
+     * Tokens at which the daemon compacts the conversation on its own, when the model
+     * publishes that point. The meter draws its notch and takes colour from this, not from a
+     * fixed share of the window.
+     */
+    readonly compactTokens?: number;
     /** True when the underlying token count is estimated, not provider-reported. */
     readonly approximate: boolean;
     /** False until the provider reports the active conversation's token count. */
@@ -405,6 +524,8 @@ export interface HappyAgentProject {
     readonly requiredSecretKind?: "github";
     readonly avatar?: HappyAgentProjectAvatar;
     /** Current changed-file total for this checkout, omitted until Git state is available. */
+    /** Explicit scan state; unavailable totals must not look like a clean checkout. */
+    readonly changesStatus?: "loading" | "ready" | "stale" | "unavailable";
     readonly changedFiles?: number;
     /** Aggregate textual diff against HEAD, omitted until Git state is available. */
     readonly addedLines?: number;
@@ -427,14 +548,16 @@ export type HappyAgentProjectCompute =
     | { readonly type: "docker"; readonly image: string };
 
 /**
- * One project's durable compute configuration, exactly as the host holds it.
+ * What one project says about the workspaces cut from it, exactly as the host
+ * holds it: where their sessions run, what a new checkout runs to set itself
+ * up, and what its first agent is told.
  *
  * It is read on its own rather than carried on the project row because the live
  * catalog the workspace list is built from does not describe it at all: a row
  * that carried it would have it only on the reads that happen to come from the
  * host's own project read, and lose it again on the next live publish.
  */
-export interface HappyAgentProjectComputeState {
+export interface HappyAgentProjectSettingsState {
     readonly projectId: HappyAgentProjectId;
     /** Absent when the project states nothing and the host's configuration decides. */
     readonly compute?: HappyAgentProjectCompute;
@@ -444,6 +567,26 @@ export interface HappyAgentProjectComputeState {
      * previous choice built instead of reusing it.
      */
     readonly generation: number;
+    /**
+     * The shell commands a new workspace runs, in order, once its checkout
+     * exists — as the host last read them from the project's own `happy.toml`.
+     * The file is the source of truth; Happy shows the list and never writes it.
+     */
+    readonly setupCommands: readonly string[];
+    /**
+     * What Happy sends as the first message to the first agent in every new
+     * workspace of this project. Absent when the project says nothing.
+     */
+    readonly initialPrompt?: string;
+}
+
+/**
+ * The settings a project accepts new values for, written together: the host
+ * replaces them as one, so whoever changes one field carries the other along.
+ */
+export interface HappyAgentProjectSettingsInput {
+    readonly compute?: HappyAgentProjectCompute;
+    readonly initialPrompt?: string;
 }
 
 /**
@@ -473,6 +616,8 @@ export interface HappyAgentWorktree {
      */
     readonly error?: string;
     /** Current changed-file total for this checkout, omitted until Git state is available. */
+    /** Explicit scan state; unavailable totals must not look like a clean checkout. */
+    readonly changesStatus?: "loading" | "ready" | "stale" | "unavailable";
     readonly changedFiles?: number;
     /** Aggregate textual diff against HEAD, omitted until Git state is available. */
     readonly addedLines?: number;
@@ -544,6 +689,12 @@ export interface HappyAgentProjectCatalog {
     readonly worktrees: readonly HappyAgentWorktree[];
     /** Every active bot, in the order the host keeps them. */
     readonly bots: readonly HappyAgentBot[];
+    /**
+     * Every task the host holds, oldest first, archived ones included. Each
+     * carries the reader's membership when they have joined it; the reader's
+     * own list is these, sorted by that membership.
+     */
+    readonly tasks: readonly HappyAgentTask[];
 }
 
 // ---------------------------------------------------------------------------
@@ -633,7 +784,7 @@ export interface HappyAgentSession {
     readonly queuedMessages: readonly HappyAgentQueuedMessage[];
     readonly pendingUserInputs: readonly HappyAgentUserInputRequest[];
     readonly goal?: HappyAgentGoal;
-    readonly tasks: readonly HappyAgentTask[];
+    readonly tasks: readonly HappyAgentTodo[];
     readonly subagents: readonly SubagentSummary[];
     readonly backgroundProcesses: readonly HappyAgentBackgroundProcess[];
     readonly createdAt: number;
@@ -660,6 +811,24 @@ export interface HappyAgentModelOption {
     readonly name: string;
     readonly disabled: boolean;
     readonly current: boolean;
+    /** The configured service type of the provider, shared by every account of that service. */
+    readonly providerType: string;
+    /** Every reasoning level this model supports, least to most; empty when it has none. */
+    readonly efforts: readonly HappyAgentModelEffortOption[];
+    readonly defaultEffort: HappyAgentThinkingLevel;
+    /** The effort last chosen for this model on this provider, when one is remembered. */
+    readonly rememberedEffort?: HappyAgentThinkingLevel;
+}
+
+/** Looks up the effort last chosen for one model on one provider. */
+export type HappyAgentModelEffortRemembered = (
+    providerId: string,
+    modelId: string,
+) => HappyAgentThinkingLevel | undefined;
+
+export interface HappyAgentModelEffortOption {
+    readonly level: HappyAgentThinkingLevel;
+    readonly label: string;
 }
 
 export interface HappyAgentEffortOption {
@@ -675,6 +844,11 @@ export interface HappyAgentPermissionModeOption {
     readonly current: boolean;
 }
 
+export interface HappyAgentServiceTierChoice {
+    readonly id: HappyAgentServiceTier | null;
+    readonly label: string;
+}
+
 export interface HappyAgentServiceTierOption {
     readonly tier: HappyAgentServiceTier | null;
     readonly label: string;
@@ -688,10 +862,28 @@ export interface HappyAgentMenusSnapshot {
     readonly serviceTierOptions: readonly HappyAgentServiceTierOption[];
     readonly currentProviderId: string;
     readonly currentModelId: string;
+    /** Whether the selection's account is one the pickers offer, and if not, why. */
+    readonly currentAccount: HappyAgentCurrentAccount;
+    /**
+     * The selected model, described as a picker row would describe it. Present
+     * whenever the catalog still names the model, including on a hidden or
+     * switched-off account, whose rows `modelOptions` does not list.
+     */
+    readonly currentOption?: HappyAgentModelOption;
     readonly currentEffort?: HappyAgentThinkingLevel;
     readonly currentPermissionMode: HappyAgentPermissionMode;
     readonly currentServiceTier?: HappyAgentServiceTier;
 }
+
+/**
+ * How the account a selection names stands in the catalog.
+ *
+ * - `available`: offered in the pickers.
+ * - `hidden`: still works and stays selected, but is not offered.
+ * - `disabled`: configured but switched off; nothing is routed to it.
+ * - `missing`: no longer configured on this machine at all.
+ */
+export type HappyAgentCurrentAccount = "available" | "hidden" | "disabled" | "missing";
 
 /**
  * Where a conversation is being read. `following` distinguishes a reader parked

@@ -1,23 +1,32 @@
 /*
- * C-270 SetupAssistants — three assistants side by side, on a setup page.
+ * C-270 SetupAssistants — the assistants side by side, on a setup page, with
+ * a last column for model access configured some other way.
  *
- * Three equal columns with nothing drawn around them. The row sits under a
+ * Equal columns with nothing drawn around them. The row sits under a
  * centred paragraph on a plain surface, and a card, a border or a tile behind
  * each mark would be three boxes' worth of furniture around nine words. What
  * separates the columns is the space between them.
  *
- * They do not wrap: three fit the setup measure at any window size this app
+ * They do not wrap: four fit the setup measure at any window size this app
  * opens at, and a wrapped column would leave a stranded one under a centred
  * column of text. Every dimension is on the 4px grid.
  */
 
 .happy-setup-assistants,
+.happy-setup-assistants__row,
 .happy-setup-assistants__item,
 .happy-setup-assistants__mark {
     box-sizing: border-box;
 }
 
 .happy-setup-assistants {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    width: 100%;
+}
+
+.happy-setup-assistants__row {
     display: flex;
     flex: none;
     align-items: flex-start;
@@ -33,7 +42,8 @@
     flex: 1 1 0;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
+    /* Mark, name and state read as one label; the remedy keeps 8px below it. */
+    gap: 4px;
     min-width: 0;
     text-align: center;
     transition: opacity 180ms ease;
@@ -63,6 +73,15 @@
     text-wrap: pretty;
 }
 
+/* A sentence is one line, so every column's remedy starts at one height and
+   the row of actions reads across as a single line. */
+.happy-setup-assistants__detail[data-kind="sentence"] {
+    overflow: hidden;
+    max-width: 100%;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* A location rather than a sentence: the monospace face, one size down, and
    free to break at the separators the path already has. */
 .happy-setup-assistants__detail[data-kind="path"] {
@@ -75,17 +94,148 @@
 /*
  * The whole column carries its own status, because there is no badge to carry
  * it. A machine that does not have the command at all keeps its place in the row
- * and steps back out of the reading order; one that has it but cannot use it is
- * the only thing here anybody can act on, so its line is the only one at full
- * ink — read as an instruction rather than as a location.
+ * and steps back out of the reading order. Only a usable assistant is at full
+ * ink; finding an installed command alone does not make it ready.
  */
-.happy-setup-assistants__item[data-status="checking"],
-.happy-setup-assistants__item[data-status="missing"] {
+/* Dims what the column says about itself, never what it asks you to do: the
+   column nobody has signed into is precisely the one with something to act on. */
+.happy-setup-assistants__item:not([data-status="found"]) .happy-setup-assistants__mark,
+.happy-setup-assistants__item:not([data-status="found"]) .happy-setup-assistants__name,
+.happy-setup-assistants__item:not([data-status="found"]) .happy-setup-assistants__detail {
     opacity: 0.45;
 }
 
-.happy-setup-assistants__item[data-status="signed-out"] .happy-setup-assistants__detail {
+/* A remedy's instruction uses primary text with the unresolved emphasis above. */
+.happy-setup-assistants__item[data-status="signed-out"] .happy-setup-assistants__detail,
+.happy-setup-assistants__item[data-status="missing"] .happy-setup-assistants__detail {
     color: var(--text);
+}
+
+/* The remedy sits under the column it belongs to and is never dimmed: a
+   machine missing an assistant is exactly the column somebody has to act on.
+   It is never wider than its column; a long command scrolls in its own well. */
+.happy-setup-assistants__action {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+    margin-top: 4px;
+    opacity: 1;
+}
+
+.happy-setup-assistants__note {
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 16px;
+    text-wrap: pretty;
+}
+
+/* As tall as a command well, with its line centred the same way, so a link and
+   a command in neighbouring columns share one text baseline. */
+.happy-setup-assistants__link {
+    display: block;
+    margin: 0;
+    padding: 10px 0;
+    border: 0;
+    background: none;
+    color: var(--text-link);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 16px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+}
+
+/*
+ * The prompts for the person's own coding agent, opened right over the link
+ * that asked for them. Right-aligned to it, because this is the last column
+ * and a popover centred on it would run off the window.
+ */
+.happy-setup-assistants__prompts {
+    position: relative;
+    display: flex;
+    flex: none;
+    justify-content: center;
+}
+
+.happy-setup-assistants__prompts-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--happy-z-overlay) - 1);
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    cursor: default;
+}
+
+.happy-setup-assistants__popover {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    z-index: var(--happy-z-overlay);
+    display: flex;
+    flex-direction: column;
+    width: 380px;
+    max-width: calc(100vw - 32px);
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--modal-border);
+    border-radius: var(--happy-radius-md);
+    box-shadow: 0 2px 8px var(--shadow-color);
+    color: var(--text);
+    text-align: left;
+}
+
+.happy-setup-assistants__popover-title {
+    padding: 8px 12px 4px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 16px;
+}
+
+.happy-setup-assistants__prompt {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 8px 8px 8px 12px;
+}
+
+.happy-setup-assistants__prompt + .happy-setup-assistants__prompt {
+    border-top: 1px solid var(--modal-border);
+}
+
+.happy-setup-assistants__prompt-words {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.happy-setup-assistants__prompt-label {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 16px;
+}
+
+.happy-setup-assistants__prompt-text {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 16px;
+    -webkit-user-select: text;
+    user-select: text;
+}
+
+/* Copying is the whole point here, so the icon never hides behind hover. */
+.happy-setup-assistants__popover .happy-copy-button {
+    opacity: 1;
 }
 
 @media (prefers-reduced-motion: reduce) {

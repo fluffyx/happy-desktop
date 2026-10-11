@@ -1,4 +1,5 @@
 import { partitionComponentProps } from "./componentProps";
+import type { FileOpenHandler } from "./fileReference";
 import { useState, type CSSProperties, type ReactNode } from "react";
 import { Button } from "./Button";
 import { CodeBlock } from "./CodeBlock";
@@ -71,11 +72,16 @@ export type FilePreviewProps = {
      */
     onMediaWindowOpen?: () => void;
     /**
+     * Saves this file to the reader's machine. Absent where there is nothing to
+     * save yet, so the control is missing rather than inert.
+     */
+    onDownload?: () => void;
+    /**
      * Opens a file a rendered Markdown document links to. Absent leaves those
      * links inert, which is the honest answer on a surface with no workspace
      * behind it.
      */
-    onFileOpen?: (path: string) => void;
+    onFileOpen?: FileOpenHandler;
     /**
      * The file as a page rather than as characters, supplied by the host: an
      * HTML document has a rendered face this surface cannot draw itself, since
@@ -83,6 +89,13 @@ export type FilePreviewProps = {
      * as source only, which is the honest state before its address is known.
      */
     rendered?: ReactNode;
+    /**
+     * The file's characters, editable, supplied by the host. Present where this
+     * file can be written: reading it and writing it are one place, so the
+     * source face is the editor rather than a second copy of the same lines
+     * that refuses to take any.
+     */
+    editor?: ReactNode;
     onClose?: () => void;
     closeLabel?: string;
 };
@@ -223,9 +236,11 @@ export function FilePreview(props: FilePreviewProps) {
         "updating",
         "dimensions",
         "actions",
+        "onDownload",
         "onFileOpen",
         "onMediaWindowOpen",
         "rendered",
+        "editor",
         "onClose",
         "closeLabel",
     ]);
@@ -294,6 +309,19 @@ export function FilePreview(props: FilePreviewProps) {
                         />
                     ) : null}
                     {local.actions}
+                    {local.onDownload ? (
+                        <Button
+                            aria-label="Download"
+                            data-testid="file-preview-download"
+                            iconOnly
+                            onClick={() => local.onDownload?.()}
+                            size="small"
+                            title="Download"
+                            variant="ghost"
+                        >
+                            <Ionicon name="download-outline" size={14} />
+                        </Button>
+                    ) : null}
                     {local.onClose ? (
                         <Button
                             aria-label={local.closeLabel ?? "Close preview"}
@@ -322,6 +350,7 @@ export function FilePreview(props: FilePreviewProps) {
                     }
                     onMediaWindowOpen={local.onMediaWindowOpen}
                     rendered={local.rendered}
+                    editor={local.editor}
                 />
             </div>
         </section>
@@ -338,10 +367,11 @@ function FilePreviewBody(props: {
     face: MarkdownFace;
     kind: FilePreviewKind;
     name: string;
-    onFileOpen?: (path: string) => void;
+    onFileOpen?: FileOpenHandler;
     onMediaMeasure: (size: { readonly width: number; readonly height: number }) => void;
     onMediaWindowOpen?: () => void;
     rendered?: ReactNode;
+    editor?: ReactNode;
 }) {
     // A picture is handed to the shared viewer in every state, including the
     // ones that have no picture: its loading, failed, and unviewable notices are
@@ -454,6 +484,10 @@ function FilePreviewBody(props: {
                 text={props.content.text}
             />
         );
+    // Where the file can be written, its characters are the editor. A second
+    // read-only copy of the same lines beside an editable one is not a view of
+    // the file, it is a place a typo cannot be fixed.
+    if (props.editor !== undefined && props.content.type === "text") return props.editor;
     // Source is highlighted by the same engine as the working-tree diff, and
     // numbered, because a file read whole is a file whose lines get referred to.
     // The header above already names it, so the renderer's own header is off.

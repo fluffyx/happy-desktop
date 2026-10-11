@@ -1,0 +1,15 @@
+.happy-onboarding-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 560px;
+    color: var(--button-primary-tint);
+    font-family: var(--happy-font-ui);
+}
+
+/* Five steps on one line: the bar is the whole report, so nothing counts them
+   in words above it. */
+.happy-onboarding-steps {
+    max-width: 640px;
+}

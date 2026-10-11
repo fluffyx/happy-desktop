@@ -2,6 +2,7 @@ import type {
     HappyAgentTerminalHandle,
     HappyAgentTerminalStore,
 } from "./happyAgentTerminalStore.js";
+import type { HappyAgentArtifactId } from "../artifacts/artifactTypes.js";
 import type { HappyAgentGroupId, HappyAgentSessionId } from "./happyAgentTypes.js";
 import type { HappyAgentPanelMemory } from "./happyAgentWorkspaceMemory.js";
 
@@ -38,6 +39,8 @@ export type HappyAgentPanelTabSnapshot =
       })
     | (HappyAgentPanelTabSnapshotBase & {
           readonly kind: "browser";
+          /** Authoritative workspace network boundary, independent of the open chat. */
+          readonly workspaceId: HappyAgentGroupId;
           /** Last committed main-frame location, restored if the surface remounts. */
           readonly url: string;
       });
@@ -67,15 +70,17 @@ export interface HappyAgentPanelSnapshot {
     /** Whether the transient Usage tab is open for this conversation. */
     readonly usageViewOpen: boolean;
     /**
-     * The permanent files view, the transient tool preview, the transient file
-     * viewer, or one live tool tab.
+     * The permanent files view, the permanent list of the chat's artifacts, the
+     * transient tool preview, the transient file viewer, or one live tool tab.
      */
     readonly activeViewId:
         | "files"
+        | "artifacts"
         | "activity"
         | "usage"
         | "preview"
         | "file"
+        | "artifact"
         | HappyAgentPanelTabId;
     /** Conversation entry selected into the replaceable Preview tab. */
     readonly previewEntryId?: string;
@@ -86,12 +91,23 @@ export interface HappyAgentPanelSnapshot {
      */
     readonly fileViewOpen: boolean;
     /**
+     * The artifact a conversation link opened in the transient artifact tab,
+     * and the version it named when it named one. Absent, the tab is closed.
+     */
+    readonly artifactView?: HappyAgentPanelArtifactView;
+    /**
      * Why a new terminal cannot be opened here, or absent when one can. A shell
      * runs in the checkout, so a checkout that is not there cannot host one; the
      * owner supplies the sentence with the scope, since it is the one that knows
      * the group's state. Terminals already running are untouched by it.
      */
     readonly terminalRefusal?: string;
+}
+
+/** What the transient artifact tab is showing. */
+export interface HappyAgentPanelArtifactView {
+    readonly artifactId: HappyAgentArtifactId;
+    readonly version?: number;
 }
 
 export interface HappyAgentPanelStore {
@@ -106,6 +122,12 @@ export interface HappyAgentPanelStore {
     panelToggle(): void;
     /** Selects the permanent workspace-files tab and opens the panel. */
     filesSelect(): void;
+    /**
+     * Selects the permanent list of what the open chat has published and opens
+     * the panel. The owner offers the tab only where the Happy Agent has
+     * artifacts at all.
+     */
+    artifactsSelect(): void;
     /** Opens or selects the transient Activity tab for the current conversation. */
     activitySelect(): void;
     /** Hides Activity while another panel is shown without dismissing its tab. */
@@ -128,6 +150,14 @@ export interface HappyAgentPanelStore {
     fileViewOpen(): void;
     /** Closes the file-viewer tab and returns to Files. */
     fileViewClose(): void;
+    /**
+     * Shows one artifact — at one version, when a link named one — in the
+     * transient artifact tab and opens the panel. Like the file viewer it is a
+     * replaceable tab: the next artifact link opened lands in it.
+     */
+    artifactViewOpen(artifactId: HappyAgentArtifactId, version?: number): void;
+    /** Closes the artifact tab and returns to Files. */
+    artifactViewClose(): void;
     /**
      * Adds a terminal tab to the open group and selects it. The shell runs in
      * the open session, so there has to be one; the tab itself belongs to the
@@ -221,7 +251,10 @@ function tabSame(
         before.kind === next.kind &&
         before.label === next.label &&
         before.placement === next.placement &&
-        (before.kind === "terminal" || (next.kind !== "terminal" && before.url === next.url))
+        (before.kind === "terminal" ||
+            (next.kind !== "terminal" &&
+                before.url === next.url &&
+                before.workspaceId === next.workspaceId))
     );
 }
 
@@ -260,6 +293,7 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
     let previewEntryId: string | undefined;
     let previewConversationId: HappyAgentSessionId | undefined;
     let fileViewShown = false;
+    let artifactView: HappyAgentPanelArtifactView | undefined;
     let nextTabNumber = 1;
     let disposed = false;
     let snapshot: HappyAgentPanelSnapshot = {
@@ -280,6 +314,7 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
             activityViewOpen: activityViewShown,
             usageViewOpen: usageViewShown,
             fileViewOpen: fileViewShown,
+            ...(artifactView === undefined ? {} : { artifactView }),
             open,
             tabs: visible.map(
                 (tab): HappyAgentPanelTabSnapshot =>
@@ -290,6 +325,7 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
                               label: tab.label,
                               placement: tab.placement,
                               url: tab.url ?? "about:blank",
+                              workspaceId: tab.groupId,
                           }
                         : {
                               id: tab.id,
@@ -321,6 +357,7 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
             next.usageViewOpen === snapshot.usageViewOpen &&
             next.previewEntryId === snapshot.previewEntryId &&
             next.fileViewOpen === snapshot.fileViewOpen &&
+            next.artifactView === snapshot.artifactView &&
             next.terminalRefusal === snapshot.terminalRefusal &&
             tabsSame
         )
@@ -339,6 +376,7 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
             activityViewOpen: next.activityViewOpen,
             usageViewOpen: next.usageViewOpen,
             fileViewOpen: next.fileViewOpen,
+            ...(next.artifactView === undefined ? {} : { artifactView: next.artifactView }),
             open: next.open,
             tabs: projectedTabs,
             ...(next.previewEntryId === undefined ? {} : { previewEntryId: next.previewEntryId }),
@@ -470,6 +508,13 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
             remember();
             recompute();
         },
+        artifactsSelect() {
+            if (disposed) return;
+            activeViewId = "artifacts";
+            open = true;
+            remember();
+            recompute();
+        },
         activitySelect() {
             if (disposed || !conversationId) return;
             activityViewShown = true;
@@ -540,6 +585,22 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
             if (disposed) return;
             fileViewShown = false;
             if (activeViewId === "file") activeViewId = "files";
+            remember();
+            recompute();
+        },
+        artifactViewOpen(artifactId, version) {
+            if (disposed) return;
+            if (artifactView?.artifactId !== artifactId || artifactView.version !== version)
+                artifactView = version === undefined ? { artifactId } : { artifactId, version };
+            activeViewId = "artifact";
+            open = true;
+            remember();
+            recompute();
+        },
+        artifactViewClose() {
+            if (disposed) return;
+            artifactView = undefined;
+            if (activeViewId === "artifact") activeViewId = "files";
             remember();
             recompute();
         },
@@ -647,6 +708,7 @@ export function happyAgentPanelStoreCreate(deps: HappyAgentPanelDeps): HappyAgen
             activityViewDismissed = false;
             usageViewShown = false;
             fileViewShown = false;
+            artifactView = undefined;
             if (nextGroupId) groupRestore(nextGroupId);
             const chrome = nextGroupId ? chromeByGroup.get(nextGroupId) : undefined;
             open = chrome?.open ?? false;
