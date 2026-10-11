@@ -105,6 +105,7 @@ export function desktopConnectionUiCreate(input: {
                   preferences: current?.preferences ?? {},
                   defaultEffort: value.defaultEffort,
                   defaultPermissionMode: value.defaultPermissionMode,
+                  disabledModels: [...value.disabledModels],
                   ...(value.defaultProviderId && value.defaultModelId
                       ? {
                             defaultSelection: {

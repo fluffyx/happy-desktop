@@ -5204,6 +5204,7 @@ export function happyAgentWorkspaceStoreCreate(
                     modelSelect: (current, input) => client.models.modelSelect(current, input),
                     effortRemembered: (providerId, modelId) =>
                         client.models.effortRemembered(providerId, modelId),
+                    disabledModels: models.disabledModels,
                 });
                 botCreateSessionDraft = owned.store;
                 botCreateSessionDraftWriter = owned.writer;
@@ -5511,6 +5512,7 @@ export function happyAgentWorkspaceStoreCreate(
                     modelSelect: (current, input) => client.models.modelSelect(current, input),
                     effortRemembered: (providerId, modelId) =>
                         client.models.effortRemembered(providerId, modelId),
+                    disabledModels: models.disabledModels,
                 });
                 groupDraft = owned.store;
                 groupDraftWriter = owned.writer;
@@ -5982,17 +5984,18 @@ export function happyAgentWorkspaceStoreCreate(
     };
 
     /**
-     * Hands the connection's current catalog to the open drafts, so their
-     * pickers list what the daemon offers now rather than what it offered when
-     * they were opened. The reader's selection stays as they left it.
+     * Hands the connection's current catalog and switched-off models to the
+     * open drafts, so their pickers list what is offered now rather than what
+     * was offered when they were opened. The reader's selection stays as they
+     * left it.
      */
     const draftsCatalogApply = (): void => {
         const models = client.models.get();
         if (models.type !== "ready") return;
         draftsCatalogApplying = true;
         try {
-            groupDraftWriter?.catalogChanged(models.catalog);
-            botCreateSessionDraftWriter?.catalogChanged(models.catalog);
+            groupDraftWriter?.catalogChanged(models.catalog, models.disabledModels);
+            botCreateSessionDraftWriter?.catalogChanged(models.catalog, models.disabledModels);
         } finally {
             draftsCatalogApplying = false;
         }

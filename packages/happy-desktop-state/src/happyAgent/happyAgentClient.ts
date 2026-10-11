@@ -50,6 +50,7 @@ import type {
 } from "./happyAgentTypes.js";
 import { happyAgentModelStoreCreate, type HappyAgentModelStore } from "./happyAgentModelStore.js";
 import type { HappyAgentModelPreferencePersistence } from "./happyAgentModelStore.js";
+import type { HappyAgentModelKey } from "./happyAgentSettingsStore.js";
 import {
     happyAgentWorkspaceMemoryStoreCreate,
     type HappyAgentWorkspaceMemoryPersistence,
@@ -470,16 +471,27 @@ export function happyAgentWorkspaceClientCreate(
 
     /**
      * The owner-only catalog input every materialized conversation follows:
-     * this connection's catalog, as the model store holds it now and whenever
-     * it changes.
+     * this connection's catalog and the models switched off in Settings, as the
+     * model store holds them now and whenever either changes.
      */
-    const catalogFollow = (listener: (catalog: HappyAgentModelCatalog) => void): (() => void) => {
+    const catalogFollow = (
+        listener: (
+            catalog: HappyAgentModelCatalog,
+            disabledModels: ReadonlySet<HappyAgentModelKey>,
+        ) => void,
+    ): (() => void) => {
         let last: HappyAgentModelCatalog | undefined;
+        let lastDisabled: ReadonlySet<HappyAgentModelKey> | undefined;
         const deliver = (): void => {
             const snapshot = models.get();
-            if (snapshot.type !== "ready" || snapshot.catalog === last) return;
+            if (
+                snapshot.type !== "ready" ||
+                (snapshot.catalog === last && snapshot.disabledModels === lastDisabled)
+            )
+                return;
             last = snapshot.catalog;
-            listener(snapshot.catalog);
+            lastDisabled = snapshot.disabledModels;
+            listener(snapshot.catalog, snapshot.disabledModels);
         };
         const unsubscribe = models.subscribe(deliver);
         deliver();

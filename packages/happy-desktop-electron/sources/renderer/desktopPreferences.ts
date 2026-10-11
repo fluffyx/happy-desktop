@@ -1,4 +1,5 @@
 import type {
+    HappyAgentModelKey,
     HappyAgentModelPreferenceDocument,
     HappyAgentModelPreferencePersistence,
     HappyAgentPermissionMode,
@@ -59,11 +60,18 @@ export function desktopPreferencesCreate(
     initial: DesktopConfig,
 ): DesktopPreferences {
     let config = initial;
+    // Models switched off in Settings. Held for this run only: they are not
+    // part of the desktop document, so switching one never writes it.
+    let disabledModels: readonly HappyAgentModelKey[] = [];
     const preferenceListeners = new Set<() => void>();
+
+    const preferencesNotify = (): void => {
+        for (const listener of preferenceListeners) listener();
+    };
 
     const commit = (next: DesktopConfig): void => {
         config = next;
-        for (const listener of preferenceListeners) listener();
+        preferencesNotify();
         // Invoke immediately; the privileged store is the single serialization
         // authority, so every quick selection enters its ordered write queue.
         void bridge.desktopConfigWrite(next).catch((error: unknown) => {
@@ -72,7 +80,7 @@ export function desktopPreferencesCreate(
     };
 
     const preferencePersistence: HappyAgentModelPreferencePersistence = {
-        read: () => preferenceDocument(config),
+        read: () => preferenceDocument(config, disabledModels),
         write(document) {
             commit(configFromPreferenceDocument(config, document));
         },
@@ -111,6 +119,13 @@ export function desktopPreferencesCreate(
             commit({ ...config, keepAwake: mode });
         },
         settingsChanged(snapshot) {
+            if (
+                disabledModels.length !== snapshot.disabledModels.size ||
+                disabledModels.some((key) => !snapshot.disabledModels.has(key))
+            ) {
+                disabledModels = [...snapshot.disabledModels];
+                preferencesNotify();
+            }
             const nextEffort = snapshot.defaultEffort;
             const nextPermissionMode = snapshot.defaultPermissionMode;
             const nextDefault =
@@ -201,7 +216,10 @@ function settingsInitial(config: DesktopConfig): HappyAgentSettingsInitial {
     };
 }
 
-function preferenceDocument(config: DesktopConfig): HappyAgentModelPreferenceDocument {
+function preferenceDocument(
+    config: DesktopConfig,
+    disabledModels: readonly HappyAgentModelKey[],
+): HappyAgentModelPreferenceDocument {
     const preferences: {
         [providerId: string]: {
             [modelId: string]: {
@@ -233,6 +251,7 @@ function preferenceDocument(config: DesktopConfig): HappyAgentModelPreferenceDoc
         ...(config.lastPickedModel ? { lastPickedModel: config.lastPickedModel } : {}),
         defaultPermissionMode: permissionMode(config.defaultPermissionMode),
         preferences,
+        ...(disabledModels.length > 0 ? { disabledModels } : {}),
     };
 }
 

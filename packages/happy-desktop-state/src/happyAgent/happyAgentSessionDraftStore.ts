@@ -4,6 +4,7 @@ import {
     happyAgentMenusReferencesPreserve,
     happyAgentMenusSelectionProject,
 } from "./happyAgentMenusStore.js";
+import type { HappyAgentModelKey } from "./happyAgentSettingsStore.js";
 import type {
     HappyAgentMenusSnapshot,
     HappyAgentModelCatalog,
@@ -50,10 +51,14 @@ export interface HappyAgentSessionDraftStore {
 /** Owner-only authoritative input to a draft; never a reader's action. */
 export interface HappyAgentSessionDraftWriter {
     /**
-     * The daemon changed what it offers. The pickers re-derive from the new
-     * catalog; a speed tier the model/account no longer offers is cleared.
+     * The daemon changed what it offers, or the reader switched models on or
+     * off in Settings. The pickers re-derive from both; a speed tier the
+     * model/account no longer offers is cleared.
      */
-    catalogChanged(catalog: HappyAgentModelCatalog): void;
+    catalogChanged(
+        catalog: HappyAgentModelCatalog,
+        disabledModels?: ReadonlySet<HappyAgentModelKey>,
+    ): void;
 }
 
 export interface HappyAgentSessionDraftOptions {
@@ -63,6 +68,8 @@ export interface HappyAgentSessionDraftOptions {
         input: HappyAgentModelSelection,
     ) => HappyAgentSelection;
     readonly effortRemembered?: HappyAgentModelEffortRemembered;
+    /** Models switched off in Settings, which the pickers leave out. */
+    readonly disabledModels?: ReadonlySet<HappyAgentModelKey>;
     /**
      * What to open the draft on — the workspace's most recent selection, so a
      * new session starts configured the way the last one was. Absent for the
@@ -245,13 +252,14 @@ export function happyAgentSessionDraftStoreOwnedCreate(options: HappyAgentSessio
     readonly writer: HappyAgentSessionDraftWriter;
 } {
     let catalog = options.catalog;
+    let disabledModels = options.disabledModels;
     const seed = happyAgentSelectionServiceTierReconcile(
         catalog,
         options.selection ?? happyAgentSessionSelectionDefault(catalog),
     );
     const snapshotOf = (selection: HappyAgentSelection): HappyAgentSessionDraftSnapshot => ({
         selection,
-        menus: happyAgentMenusDerive(catalog, selection, options.effortRemembered),
+        menus: happyAgentMenusDerive(catalog, selection, options.effortRemembered, disabledModels),
     });
     const store = createStore<HappyAgentSessionDraftSnapshot>()(() => snapshotOf(seed));
     const selectionSet = (selection: HappyAgentSelection): void => {
@@ -266,6 +274,7 @@ export function happyAgentSessionDraftStoreOwnedCreate(options: HappyAgentSessio
                     previous.menus,
                     selection,
                     options.effortRemembered,
+                    disabledModels,
                 ),
             },
             true,
@@ -297,9 +306,10 @@ export function happyAgentSessionDraftStoreOwnedCreate(options: HappyAgentSessio
                 ),
         },
         writer: {
-            catalogChanged(next) {
-                if (next === catalog) return;
+            catalogChanged(next, nextDisabled) {
+                if (next === catalog && nextDisabled === disabledModels) return;
                 catalog = next;
+                disabledModels = nextDisabled;
                 const previous = store.getState();
                 const selection = happyAgentSelectionServiceTierReconcile(
                     catalog,
@@ -307,7 +317,12 @@ export function happyAgentSessionDraftStoreOwnedCreate(options: HappyAgentSessio
                 );
                 const menus = happyAgentMenusReferencesPreserve(
                     previous.menus,
-                    happyAgentMenusDerive(catalog, selection, options.effortRemembered),
+                    happyAgentMenusDerive(
+                        catalog,
+                        selection,
+                        options.effortRemembered,
+                        disabledModels,
+                    ),
                 );
                 if (menus === previous.menus && selection === previous.selection) return;
                 store.setState({ selection, menus }, true);

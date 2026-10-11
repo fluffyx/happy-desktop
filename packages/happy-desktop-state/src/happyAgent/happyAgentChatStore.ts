@@ -20,6 +20,7 @@ import {
     happyAgentConversationProject,
 } from "./happyAgentConversationProject.js";
 import { happyAgentMenusDerive } from "./happyAgentMenusStore.js";
+import type { HappyAgentModelKey } from "./happyAgentSettingsStore.js";
 import {
     happyAgentSelectionEffortUpdate,
     happyAgentSelectionModelUpdate,
@@ -587,13 +588,18 @@ export interface HappyAgentChatStore {
 export interface HappyAgentChatDeps {
     readonly catalog: HappyAgentModelCatalog;
     /**
-     * Owner-only authoritative input: the connection's current model catalog.
-     * The listener is called with it now and again on every change; the
-     * returned function stops it, and the store calls it when disposed. The
-     * pickers and context gauge re-derive from it; the session's own selection
-     * is the daemon's and is left alone.
+     * Owner-only authoritative input: the connection's current model catalog,
+     * with the models switched off in Settings. The listener is called with
+     * them now and again on every change; the returned function stops it, and
+     * the store calls it when disposed. The pickers and context gauge re-derive
+     * from them; the session's own selection is the daemon's and is left alone.
      */
-    readonly catalogFollow?: (listener: (catalog: HappyAgentModelCatalog) => void) => () => void;
+    readonly catalogFollow?: (
+        listener: (
+            catalog: HappyAgentModelCatalog,
+            disabledModels?: ReadonlySet<HappyAgentModelKey>,
+        ) => void,
+    ) => () => void;
     readonly transcriptConnect: HappyAgentChatTranscriptConnect;
     readonly connectActions: Pick<
         HappyAgentConnection,
@@ -684,6 +690,7 @@ export function happyAgentChatStoreCreate(
     /* The connection's current model catalog; the daemon can change what it
        offers while this conversation is open. */
     let catalog = deps.catalog;
+    let disabledModels: ReadonlySet<HappyAgentModelKey> | undefined;
     let disposed = false;
     let active = false;
     let status: "loading" | "ready" | "error" = "loading";
@@ -910,6 +917,7 @@ export function happyAgentChatStoreCreate(
                           catalog,
                           transcriptSelectionOf(connected),
                           deps.effortRemembered,
+                          disabledModels,
                       ),
                   }),
         };
@@ -1021,9 +1029,10 @@ export function happyAgentChatStoreCreate(
         return pendingMutationIds.size > 0;
     };
 
-    const unsubscribeCatalog = deps.catalogFollow?.((next) => {
-        if (disposed || next === catalog) return;
+    const unsubscribeCatalog = deps.catalogFollow?.((next, nextDisabled) => {
+        if (disposed || (next === catalog && nextDisabled === disabledModels)) return;
         catalog = next;
+        disabledModels = nextDisabled;
         commit();
     });
 
