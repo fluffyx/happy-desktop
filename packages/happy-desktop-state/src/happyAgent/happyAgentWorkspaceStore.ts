@@ -814,10 +814,14 @@ export const HAPPY_AGENT_PANEL_FILE_VIEW_ID = "file";
 
 /**
  * One tab the reader closed and may want back: a session or a file, in the
- * same shape the recents remember them, or a browser page by its address.
+ * same shape the recents remember them, or a browser page by its address. A
+ * file also says which side it was closed from, so it returns there.
  */
 export type HappyAgentClosedTab =
-    | HappyAgentRecentTabMemory
+    | Extract<HappyAgentRecentTabMemory, { readonly type: "session" }>
+    | (Extract<HappyAgentRecentTabMemory, { readonly type: "file" }> & {
+          readonly placement: HappyAgentViewPlacement;
+      })
     | {
           readonly type: "browser";
           readonly groupId: HappyAgentGroupId;
@@ -4157,7 +4161,7 @@ export function happyAgentWorkspaceStoreCreate(
         };
         if (!restoring)
             client.memory.recentTabRemember({ type: "file", groupId, path, fileKind: kind });
-        closedTabForget({ type: "file", groupId, path, fileKind: kind });
+        closedTabForget({ type: "file", groupId, path, fileKind: kind, placement });
         const id = fileTabIdOf(groupId, path);
         const existing = fileTabs.find((tab) => tab.id === id);
         // Only the main content selects what it is showing. A file opening in
@@ -4343,6 +4347,7 @@ export function happyAgentWorkspaceStoreCreate(
             groupId: closing.groupId,
             path: closing.path,
             fileKind: closing.kind,
+            placement: closing.placement,
         });
         fileTabCacheStore(closing);
         fileTabRelease(tabId);
@@ -7137,6 +7142,7 @@ export function happyAgentWorkspaceStoreCreate(
                     groupId: held.groupId,
                     path: held.path,
                     fileKind: held.kind,
+                    placement: "panel",
                 });
             panelFileTabClose();
             panel.fileViewClose();

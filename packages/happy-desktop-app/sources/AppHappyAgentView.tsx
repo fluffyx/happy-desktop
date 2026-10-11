@@ -1283,10 +1283,16 @@ function closedTabReopen(
     },
 ): void {
     if (closed.type === "file") {
-        // The file is addressed over a chat of its own group: the one on
-        // screen when it is this group, otherwise the one that group would
-        // resume, the way its sidebar row does.
         const current = workspace.get();
+        // A file closed from the panel returns to the panel's viewer, beside
+        // the chat on screen, when its group is the one open.
+        if (closed.placement === "panel" && current.address.groupId === closed.groupId) {
+            workspace.filePanelOpen(closed.groupId, closed.path, closed.fileKind);
+            return;
+        }
+        // Otherwise the file is addressed over a chat of its own group: the
+        // one on screen when it is this group, or the one that group would
+        // resume, the way its sidebar row does.
         const chatId =
             current.address.groupId === closed.groupId
                 ? current.address.conversationId
