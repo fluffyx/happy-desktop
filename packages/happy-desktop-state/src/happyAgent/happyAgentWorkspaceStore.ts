@@ -2452,6 +2452,35 @@ export function happyAgentWorkspaceStoreCreate(
             CLOSED_TAB_LIMIT,
         );
     };
+    /** The list snapshot closed sessions were last checked against. */
+    let closedTabsListChecked: HappyAgentSessionListSnapshot | undefined;
+    /**
+     * Drops closed sessions the list shows open again. An archive the host
+     * refuses is withdrawn by a later reconcile, after `conversationArchive`
+     * has returned, so the list is where that withdrawal can be seen.
+     */
+    const closedTabsReconcile = (snapshot: HappyAgentSessionListSnapshot): void => {
+        if (snapshot === closedTabsListChecked) return;
+        closedTabsListChecked = snapshot;
+        if (!closedTabs.some((entry) => entry.type === "session")) return;
+        const listed = new Set<string>();
+        for (const entry of [
+            ...snapshot.bots,
+            ...snapshot.tasks,
+            ...happyAgentBotSubtasks([...snapshot.bots, ...snapshot.tasks]),
+        ])
+            listed.add(entry.conversation.id);
+        if (snapshot.projects.type === "ready")
+            for (const project of snapshot.projects.value) {
+                for (const summary of project.conversations) listed.add(summary.id);
+                for (const worktree of project.worktrees)
+                    for (const summary of worktree.conversations) listed.add(summary.id);
+            }
+        const kept = closedTabs.filter(
+            (entry) => entry.type !== "session" || !listed.has(entry.sessionId),
+        );
+        if (kept.length !== closedTabs.length) closedTabs = kept;
+    };
     /** Drops the entry for a tab that is open again, however it was reopened. */
     const closedTabForget = (tab: HappyAgentClosedTab): void => {
         const key = closedTabKey(tab);
@@ -2924,6 +2953,7 @@ export function happyAgentWorkspaceStoreCreate(
     const recompute = (): void => {
         if (composing > 0) return;
         const listSnapshot = list.get();
+        closedTabsReconcile(listSnapshot);
         groupResume = groupResumeCompute();
         const nextTabOrder = groupTabOrderCompute(addressedGroupId);
         // The strip keeps its identity across ticks that did not move anything,
