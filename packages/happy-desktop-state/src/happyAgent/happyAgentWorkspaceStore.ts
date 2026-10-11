@@ -2455,6 +2455,12 @@ export function happyAgentWorkspaceStoreCreate(
     /** The list snapshot closed sessions were last checked against. */
     let closedTabsListChecked: HappyAgentSessionListSnapshot | undefined;
     /**
+     * Sessions this store is asking the host to restore. The list shows them
+     * before the host answers, so they are left to `conversationRestore`,
+     * which forgets them only once the restore is confirmed.
+     */
+    const closedTabsRestoring = new Set<HappyAgentSessionId>();
+    /**
      * Drops closed sessions the list shows open again. An archive the host
      * refuses is withdrawn by a later reconcile, after `conversationArchive`
      * has returned, so the list is where that withdrawal can be seen.
@@ -2477,7 +2483,10 @@ export function happyAgentWorkspaceStoreCreate(
                     for (const summary of worktree.conversations) listed.add(summary.id);
             }
         const kept = closedTabs.filter(
-            (entry) => entry.type !== "session" || !listed.has(entry.sessionId),
+            (entry) =>
+                entry.type !== "session" ||
+                closedTabsRestoring.has(entry.sessionId) ||
+                !listed.has(entry.sessionId),
         );
         if (kept.length !== closedTabs.length) closedTabs = kept;
     };
@@ -6901,7 +6910,15 @@ export function happyAgentWorkspaceStoreCreate(
             }
         },
         conversationRestore: async (conversationId) => {
-            const result = await list.sessionRestore(conversationId);
+            closedTabsRestoring.add(conversationId);
+            let result: Awaited<ReturnType<typeof list.sessionRestore>>;
+            try {
+                result = await list.sessionRestore(conversationId);
+            } finally {
+                closedTabsRestoring.delete(conversationId);
+                // Checked again on the next change, now that the answer is in.
+                closedTabsListChecked = undefined;
+            }
             if (result.type === "failed") throw result.error;
             client.chatRestore(conversationId);
             const restored = closedTabs.find(
