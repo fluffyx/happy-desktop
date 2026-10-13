@@ -4,6 +4,7 @@ import type {
     HappyAgentSessionSummary,
     HappyAgentWorktreeGroup,
     HappyAgentLinkOpenPlacement,
+    MessageDelivery,
     ScrollbarVisibility,
     ThemeMode,
 } from "happy-desktop-state";
@@ -122,6 +123,18 @@ export type CommandPaletteSettingRow =
           };
       })
     | (CommandPaletteSettingRowBase & {
+          readonly setting: "followUp";
+          readonly control: {
+              readonly kind: "segmented";
+              readonly value: MessageDelivery;
+              readonly segments: readonly {
+                  readonly value: MessageDelivery;
+                  readonly label: string;
+              }[];
+              readonly next: MessageDelivery;
+          };
+      })
+    | (CommandPaletteSettingRowBase & {
           readonly setting: "titleShimmer";
           readonly control: {
               readonly kind: "switch";
@@ -224,6 +237,8 @@ export interface CommandPaletteInput extends CommandPaletteContext {
     readonly themeMode: ThemeMode;
     readonly scrollbarVisibility: ScrollbarVisibility;
     readonly linkOpenPlacement: HappyAgentLinkOpenPlacement;
+    /** Absent where the host keeps no follow-up choice, which offers no row for it. */
+    readonly followUp?: MessageDelivery;
     readonly titleShimmerEnabled: boolean;
     readonly experimentalFeaturesEnabled: boolean;
 }
@@ -255,6 +270,14 @@ const LINK_OPEN_SEGMENTS: readonly {
 }[] = [
     { value: "panel", label: "Side panel" },
     { value: "browser", label: "Browser" },
+];
+
+const FOLLOW_UP_SEGMENTS: readonly {
+    readonly value: MessageDelivery;
+    readonly label: string;
+}[] = [
+    { value: "steer", label: "Steer" },
+    { value: "queue", label: "Queue" },
 ];
 
 /**
@@ -712,6 +735,26 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
                 next: LINK_OPEN_SEGMENTS[(linkOpenIndex + 1) % LINK_OPEN_SEGMENTS.length].value,
             },
         },
+        ...(input.followUp === undefined
+            ? []
+            : [
+                  {
+                      kind: "setting" as const,
+                      setting: "followUp" as const,
+                      id: "setting:follow-up",
+                      label: "Follow-up behavior",
+                      description:
+                          "Steer the agent mid-turn, or queue messages to send after it finishes",
+                      controlId: "happy-agent-palette-follow-up",
+                      control: {
+                          kind: "segmented" as const,
+                          value: input.followUp,
+                          segments: FOLLOW_UP_SEGMENTS,
+                          next:
+                              input.followUp === "steer" ? ("queue" as const) : ("steer" as const),
+                      },
+                  },
+              ]),
         {
             kind: "setting",
             setting: "titleShimmer",
@@ -751,6 +794,7 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
  */
 const SETTINGS_INLINE_SECTIONS: Record<CommandPaletteSettingRow["setting"], string> = {
     experimentalFeatures: "Settings General Experimental features",
+    followUp: "Settings General Conversations steer queue",
     linkOpenPlacement: "Settings General Links",
     scrollbarVisibility: "Settings General Appearance",
     themeMode: "Settings General Appearance",

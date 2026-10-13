@@ -314,6 +314,13 @@
     width: 32px;
 }
 
+/* Holding ⌘ in the draft opens the send control's tooltip on what ⌘↵ would
+   do. It waits a moment first, so a chord such as ⌘V — which closes it at its
+   second key — never flashes it. */
+.happy-tooltip.happy-composer__send-tip[data-open] > .happy-tooltip__bubble {
+    transition-delay: 240ms;
+}
+
 .happy-composer__leading .happy-button[data-icon-only][data-size="small"] {
     width: 32px;
     border-radius: 50%;

@@ -11,6 +11,7 @@ import {
     type ConversationErrorAssistanceEntry,
     type ConversationRequestSubmission,
     type ConversationToolCall,
+    type MessageDelivery,
 } from "happy-desktop-state";
 import { type ActivityMotion, type ActivityTreatment } from "./AgentActivityRow";
 import { HAPPY_AGENT_ACTIVITY_CONTROL_TRANSCRIPT_HEIGHT } from "./HappyAgentActivityControl";
@@ -168,8 +169,6 @@ export type ConversationViewProps = {
     onTraceToggle?: (turnId: string) => void;
     /** Finished turns currently listing their intermediate entries. */
     expandedTurnIds?: ReadonlySet<string>;
-    /** @deprecated Pending steering now renders as an ordered transcript message. */
-    queued?: readonly { readonly id: string; readonly text: string }[];
     /** The composer surface snapshot; the draft never lives in this component. */
     composer: ComposerSnapshot;
     /** Keeps the conversation readable while disabling every composer action. */
@@ -183,7 +182,10 @@ export type ConversationViewProps = {
     composerFocusKey?: string;
     onComposerValueChange: (value: string) => void;
     onComposerFocusChange?: (focused: boolean) => void;
-    onComposerSend: () => void;
+    /** Receives the delivery the key or control that sent the draft stands for. */
+    onComposerSend: (delivery: MessageDelivery) => void;
+    /** What a plain send does while the agent is working; see `Composer.followUp`. */
+    composerFollowUp?: MessageDelivery;
     /** Receives images picked through the composer's picker or pasted into it. */
     onComposerAttachmentsSelect?: (files: File[]) => void;
     /** Removes one attachment chip from the draft. */
@@ -227,8 +229,8 @@ export type ConversationViewProps = {
      * a new value re-renders the references and re-sizes the rows naming them.
      */
     references?: MessageReferences;
-    /** Runs a command chosen from the `/` palette. */
-    onCommandInvoke?: (commandId: string) => void;
+    /** Runs a command chosen from the `/` palette, delivered like a send if it becomes one. */
+    onCommandInvoke?: (commandId: string, delivery: MessageDelivery) => void;
     /** Stops the current run; the composer's send control becomes this while running. */
     onAbort?: () => void;
     onRequestAnswer?: (requestId: string, answers: HappyAgentUserInputAnswerMap) => void;
@@ -309,32 +311,95 @@ function conversationRowClassName(
     return classNames.length === 0 ? undefined : classNames.join(" ");
 }
 
+/** Messages the agent has not taken yet, grouped by when it will take them. */
+export interface ConversationPendingGroup {
+    readonly delivery: MessageDelivery;
+    readonly entries: readonly ConversationEntry[];
+    /** What the group waits for; absent while it holds only sends still in flight. */
+    readonly caption?: { readonly label: string; readonly detail: string };
+}
+
+/** One caption line above a pending group: 4px above, a 16px line, 4px below. */
+export const CONVERSATION_PENDING_CAPTION_HEIGHT = 24;
+
 /**
- * Splits off the queued steering waiting at the end of the transcript.
+ * Splits off the messages waiting at the end of the transcript for the agent to
+ * take them, grouped as it will: steering at its next step, then the queue once
+ * the run finishes.
  *
- * Steering is the one thing in a conversation that has not happened yet: the
- * reader typed it while the agent was working and it will be handed over at the
- * next boundary. Ordered among the rows above the live status, it reads as
- * something already said and answers the wrong question — the reader looks at
- * their own words sitting above "Thinking" and cannot tell whether the turn has
- * seen them. Below that line it reads as what it is, next in the queue.
+ * These are the only things in a conversation that have not happened yet: the
+ * reader sent them while the agent was working. Ordered among the rows above
+ * the live status, they read as something already said and answer the wrong
+ * question — the reader looks at their own words sitting above "Thinking" and
+ * cannot tell whether the turn has seen them. Below that line they read as what
+ * they are, next in line, with a caption saying when.
  *
- * Only a run of them at the very tail moves. Steering that was already applied
- * is ordinary history and stays where it happened.
+ * Only a run of them at the very tail moves; the producer already orders that
+ * run steering first. A message already taken is ordinary history and stays
+ * where it happened. A stopped agent leaves them waiting, and they go with the
+ * next message anyone sends, so an idle agent's groups say so — once the host
+ * holds them: a send still in flight to an idle agent is about to start a run,
+ * not waiting for one.
  */
-function conversationPendingSteering(entries: readonly ConversationEntry[]): {
+export function conversationPending(
+    entries: readonly ConversationEntry[],
+    running: boolean,
+): {
     readonly transcript: readonly ConversationEntry[];
-    readonly queued: readonly ConversationEntry[];
+    readonly pending: readonly ConversationPendingGroup[];
 } {
     let start = entries.length;
     while (start > 0) {
         const entry = entries[start - 1];
-        if (entry?.kind !== "message" || entry.delivery !== "pending_steering") break;
+        if (
+            entry?.kind !== "message" ||
+            (entry.delivery !== "pending_steering" && entry.delivery !== "pending_queue")
+        )
+            break;
         start -= 1;
     }
-    return start === entries.length
-        ? { transcript: entries, queued: [] }
-        : { transcript: entries.slice(0, start), queued: entries.slice(start) };
+    if (start === entries.length) return { transcript: entries, pending: [] };
+    const tail = entries.slice(start);
+    const pending: ConversationPendingGroup[] = [];
+    for (const delivery of ["steer", "queue"] as const) {
+        const group = tail.filter(
+            (entry) =>
+                entry.kind === "message" &&
+                entry.delivery === (delivery === "steer" ? "pending_steering" : "pending_queue"),
+        );
+        if (group.length === 0) continue;
+        const held = group.some((entry) => entry.kind === "message" && entry.pendingSend !== true);
+        const caption = running || held ? conversationPendingCaption(delivery, running) : undefined;
+        pending.push({ delivery, entries: group, ...(caption ? { caption } : {}) });
+    }
+    return { transcript: entries.slice(0, start), pending };
+}
+
+function conversationPendingCaption(
+    delivery: MessageDelivery,
+    running: boolean,
+): { readonly label: string; readonly detail: string } {
+    if (delivery === "steer")
+        return running
+            ? { label: "Steering", detail: "Read at the agent's next step" }
+            : { label: "Steering paused", detail: "Sends with your next message" };
+    return running
+        ? { label: "Queued", detail: "Sends when the agent finishes" }
+        : { label: "Queue paused", detail: "Resumes after your next message" };
+}
+
+/** A pending group's caption, the same element in the footer and in Blueprint. */
+export function ConversationPendingCaption(props: { label: string; detail: string }) {
+    return (
+        <div
+            className="happy-conversation__pending-caption"
+            data-happy-desktop-ui="conversation-pending-caption"
+        >
+            <span className="happy-conversation__pending-label">{props.label}</span>
+            <span aria-hidden="true">·</span>
+            <span className="happy-conversation__pending-detail">{props.detail}</span>
+        </div>
+    );
 }
 
 /**
@@ -444,7 +509,7 @@ export function ConversationView(props: ConversationViewProps) {
         });
     };
     const rowHeightCache = conversationRowHeightCacheGet(conversationCacheKey);
-    const { transcript, queued } = conversationPendingSteering(props.entries);
+    const { transcript, pending } = conversationPending(props.entries, props.running === true);
     const awaitingInput = transcript.some(
         (entry) =>
             entry.kind === "request" &&
@@ -673,24 +738,39 @@ export function ConversationView(props: ConversationViewProps) {
                     footer={
                         <>
                             {workingStatusRow}
-                            {queued.length > 0 ? (
+                            {pending.length > 0 ? (
                                 <div
                                     className="happy-conversation__queued"
                                     data-happy-desktop-ui="conversation-queued"
                                 >
-                                    {queued.map((entry) => (
-                                        <ConversationEntryView
-                                            entry={entry}
-                                            key={
-                                                entry.kind === "message"
-                                                    ? entry.message.id
-                                                    : entry.id
-                                            }
-                                            {...(props.references
-                                                ? { references: props.references }
-                                                : {})}
-                                            viewerId={props.viewerId}
-                                        />
+                                    {pending.map((group) => (
+                                        <div
+                                            className="happy-conversation__pending-group"
+                                            data-delivery={group.delivery}
+                                            data-happy-desktop-ui="conversation-pending-group"
+                                            key={group.delivery}
+                                        >
+                                            {group.caption ? (
+                                                <ConversationPendingCaption
+                                                    detail={group.caption.detail}
+                                                    label={group.caption.label}
+                                                />
+                                            ) : null}
+                                            {group.entries.map((entry) => (
+                                                <ConversationEntryView
+                                                    entry={entry}
+                                                    key={
+                                                        entry.kind === "message"
+                                                            ? entry.message.id
+                                                            : entry.id
+                                                    }
+                                                    {...(props.references
+                                                        ? { references: props.references }
+                                                        : {})}
+                                                    viewerId={props.viewerId}
+                                                />
+                                            ))}
+                                        </div>
                                     ))}
                                 </div>
                             ) : null}
@@ -703,27 +783,30 @@ export function ConversationView(props: ConversationViewProps) {
                                 ? HAPPY_AGENT_ACTIVITY_CONTROL_TRANSCRIPT_HEIGHT
                                 : 0,
                         ) +
-                        queued.reduce(
-                            (total, entry, index) =>
+                        pending.reduce(
+                            (total, group) =>
                                 total +
-                                (conversationRowHeight(
-                                    queued,
-                                    index,
-                                    {
-                                        activityTreatment: props.activityTreatment,
-                                        expanded:
-                                            queued[index] === undefined
-                                                ? false
-                                                : rowExpanded(queued[index]),
-                                        surface: "conversation",
-                                        ...(props.references
-                                            ? { references: props.references }
-                                            : {}),
-                                        viewerId: props.viewerId,
-                                        width,
-                                    },
-                                    rowHeightCache,
-                                ) ?? 0),
+                                (group.caption ? CONVERSATION_PENDING_CAPTION_HEIGHT : 0) +
+                                group.entries.reduce(
+                                    (rows, entry, index) =>
+                                        rows +
+                                        (conversationRowHeight(
+                                            group.entries,
+                                            index,
+                                            {
+                                                activityTreatment: props.activityTreatment,
+                                                expanded: rowExpanded(entry),
+                                                surface: "conversation",
+                                                ...(props.references
+                                                    ? { references: props.references }
+                                                    : {}),
+                                                viewerId: props.viewerId,
+                                                width,
+                                            },
+                                            rowHeightCache,
+                                        ) ?? 0),
+                                    0,
+                                ),
                             0,
                         )
                     }
@@ -843,6 +926,9 @@ export function ConversationView(props: ConversationViewProps) {
                 onComposerFocusChange={props.onComposerFocusChange}
                 onComposerSend={props.onComposerSend}
                 onComposerValueChange={props.onComposerValueChange}
+                {...(props.composerFollowUp === undefined
+                    ? {}
+                    : { followUp: props.composerFollowUp })}
                 running={props.running}
             />
 

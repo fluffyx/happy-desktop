@@ -1,4 +1,5 @@
 import { createStore, type StoreApi } from "zustand/vanilla";
+import type { MessageDelivery } from "../../happyAgentConnection/types.js";
 import { type MessageAudience, type UserError } from "../../types.js";
 
 /** One slash command a composer may offer while the draft begins with `/`. */
@@ -185,6 +186,8 @@ export type ComposerOutput =
           readonly commandId: string;
           readonly arguments?: string;
           readonly revision?: number;
+          /** How a command that becomes a message (a skill) is delivered. */
+          readonly delivery: MessageDelivery;
       }
     | {
           readonly type: "shellCommandSubmitted";
@@ -196,6 +199,8 @@ export type ComposerOutput =
           readonly type: "textSubmitted";
           readonly scopeId: string;
           readonly text: string;
+          /** Chosen by the key that sent it; the owner sends it unchanged. */
+          readonly delivery: MessageDelivery;
           readonly attachments: readonly ComposerAttachment[];
           readonly revision: number;
           readonly audience?: MessageAudience;
@@ -225,8 +230,8 @@ export interface ComposerState extends ComposerSnapshot {
     agentUserAdd(agentUserId: string): void;
     agentUserRemove(agentUserId: string): void;
     /** Runs one offered slash command and clears the draft that opened it. */
-    commandInvoke(commandId: string): void;
-    textSubmit(): void;
+    commandInvoke(commandId: string, delivery: MessageDelivery): void;
+    textSubmit(delivery: MessageDelivery): void;
     composerInput(event: ComposerInput): void;
 }
 
@@ -451,7 +456,7 @@ export function composerStoreCreate(
             output({ type: "agentUserRemoved", scopeId, agentUserId });
         },
 
-        commandInvoke(commandId): void {
+        commandInvoke(commandId, delivery): void {
             const previous = get();
             if (previous.voiceDraft) return;
             if (!previous.capabilities.commands.some((command) => command.id === commandId)) return;
@@ -470,10 +475,10 @@ export function composerStoreCreate(
             // text. Clearing only this in-memory store lets a later durable
             // draft reconciliation restore it and reopen its picker.
             output({ type: "textUpdated", scopeId, text: "" });
-            output({ type: "commandInvoked", scopeId, commandId });
+            output({ type: "commandInvoked", scopeId, commandId, delivery });
         },
 
-        textSubmit(): void {
+        textSubmit(delivery): void {
             const previous = get();
             if (
                 previous.submission.status === "pending" ||
@@ -494,6 +499,7 @@ export function composerStoreCreate(
                         ? {}
                         : { arguments: commandInvocation.arguments }),
                     revision: previous.revision,
+                    delivery,
                 });
                 return;
             }
@@ -516,6 +522,7 @@ export function composerStoreCreate(
                 type: "textSubmitted",
                 scopeId,
                 text: previous.text,
+                delivery,
                 attachments: previous.attachments,
                 revision: previous.revision,
                 audience: previous.audience,

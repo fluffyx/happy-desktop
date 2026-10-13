@@ -1,4 +1,6 @@
+import type { MessageDelivery } from "happy-desktop-state";
 import { Banner } from "../../Banner";
+import { KeyCap } from "../../Badge";
 import { Box } from "../../Box";
 import { Button } from "../../Button";
 import { FormRow } from "../../FormRow";
@@ -44,6 +46,12 @@ export type HappyAgentGeneralSettingsProps = {
      */
     projectsHidden?: boolean;
     onProjectsHiddenChange?: (hidden: boolean) => void;
+    /**
+     * What a message sent while the agent works does. Absent where the host
+     * keeps no such choice, which offers no control.
+     */
+    followUp?: MessageDelivery;
+    onFollowUpChange?: (followUp: MessageDelivery) => void;
     /** "Show in status bar" switches; absent where the host keeps no such choice. */
     statusBar?: {
         themeShown: boolean;
@@ -129,6 +137,16 @@ const scrollbarSegments = [
     { value: "automatic", label: "Automatic" },
     { value: "always", label: "Always visible" },
 ];
+
+const followUpSegments = [
+    { value: "steer", label: "Steer" },
+    { value: "queue", label: "Queue" },
+];
+
+/** The other delivery, the one ⌘↵ sends with. */
+function followUpOpposite(followUp: MessageDelivery): MessageDelivery {
+    return followUp === "steer" ? "queue" : "steer";
+}
 
 const linkOpenSegments = [
     { value: "panel", label: "Side panel" },
@@ -258,6 +276,35 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                               props.statusBar.onKeepAwakeShownChange,
                           )
                         : null}
+                </HappyAgentSettingsSection>
+            ) : null}
+            {props.followUp !== undefined && props.onFollowUpChange ? (
+                <HappyAgentSettingsSection
+                    description="How messages are sent from the composer on this machine."
+                    title="Conversations"
+                >
+                    <FormRow
+                        control={
+                            <SegmentedControl
+                                aria-label="Follow-up behavior"
+                                onChange={(value) =>
+                                    props.onFollowUpChange?.(value as MessageDelivery)
+                                }
+                                segments={followUpSegments}
+                                size="small"
+                                value={props.followUp}
+                            />
+                        }
+                        description="Steer the agent mid-turn, or queue messages to send after it finishes"
+                        detail={
+                            <>
+                                <span>Use</span>
+                                <KeyCap keys="⌘↵" />
+                                <span>to {followUpOpposite(props.followUp)}</span>
+                            </>
+                        }
+                        label="Follow-up behavior"
+                    />
                 </HappyAgentSettingsSection>
             ) : null}
             <HappyAgentSettingsSection

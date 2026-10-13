@@ -368,12 +368,6 @@ export interface SubagentSummary {
     readonly totalTokens?: number;
 }
 
-export interface HappyAgentQueuedMessage {
-    readonly id: string;
-    /** Flattened text of the queued user turn, shown as a preview in the composer. */
-    readonly text: string;
-}
-
 export interface HappyAgentFileSearchResult {
     /** Basename shown as the primary label in the mention list. */
     readonly fileName: string;
@@ -778,12 +772,6 @@ export interface HappyAgentSession {
     readonly recap?: string;
     readonly draft?: string;
     readonly draftUpdatedAt?: number;
-    /**
-     * Steering messages queued to submit after the current tool call. Non-internal
-     * user turns the runner has accepted but not yet started; the composer previews
-     * them so a person sees what will be sent next (and can flush early with esc).
-     */
-    readonly queuedMessages: readonly HappyAgentQueuedMessage[];
     readonly pendingUserInputs: readonly HappyAgentUserInputRequest[];
     readonly goal?: HappyAgentGoal;
     readonly tasks: readonly HappyAgentTodo[];

@@ -90,9 +90,14 @@
     opacity: 0.56;
 }
 
-.happy-message[data-own][data-delivery-state="pending_steering"] .happy-message__bubble {
-    border: 1px solid var(--box-warning-border);
-    background: var(--box-warning-background);
+/* A queued message waits for the run to finish, so it is drawn as not yet
+ * there: an empty bubble with the dashed hairline every queued thing in Happy
+ * wears. The border comes out of the padding, so the bubble keeps the exact
+ * geometry it has once the agent takes it. */
+.happy-message:not([data-agent])[data-delivery-state="pending_queue"] .happy-message__body {
+    padding: 9px 11px;
+    border: 1px dashed color-mix(in srgb, var(--text) 32%, transparent);
+    background: transparent;
     color: var(--text);
 }
 

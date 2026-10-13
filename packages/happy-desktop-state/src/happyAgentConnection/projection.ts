@@ -169,20 +169,6 @@ export function projectSession(input: SessionProjectionInput): SessionState {
         modelCatalog: modelCatalog(config),
         models: modelDefinitionsProject(config),
         pendingUserInputs,
-        pendingSteeringMessages: input.messages
-            .filter(
-                (
-                    entry,
-                ): entry is TranscriptMessage & {
-                    message: Extract<Message, { role: "user" }>;
-                } =>
-                    entry.message.role === "user" &&
-                    entry.message.status === "pending" &&
-                    entry.message.delivery === "steer",
-            )
-            .map((entry) => ({
-                message: { id: entry.message.id, blocks: entry.message.content },
-            })),
         slashCommands: input.slashCommands,
         tasks: [],
         subagents: projectSubagents(agent, input.activity),
@@ -332,7 +318,9 @@ export function projectElements(input: SessionProjectionInput): readonly ChatEle
         const end = projectRunEnd(run, input.runFinalContextTokens?.get(run.id));
         if (end !== undefined) elements.push(end);
     }
-    if (!messagesOrdered(pending)) pending.sort(compareMessages);
+    // Pending messages read in the order the agent will accept them: every
+    // steering message at the next step, then the queue one run at a time.
+    if (!messagesOrdered(pending, comparePendingMessages)) pending.sort(comparePendingMessages);
     for (const entry of pending)
         for (const element of projectMessage(
             entry,
@@ -1032,9 +1020,11 @@ function messageElementsProject(
                       }),
                 ...(senderAgent === undefined ? {} : { senderAgent }),
                 delivery:
-                    message.status === "pending" && message.delivery === "steer"
-                        ? "pending_steering"
-                        : "sent",
+                    message.status !== "pending"
+                        ? "sent"
+                        : message.delivery === "steer"
+                          ? "pending_steering"
+                          : "pending_queue",
                 text: messageText(message),
                 attachments: message.content
                     .filter(
@@ -1449,9 +1439,12 @@ function orderCompare<T extends { id: string; orderKey: string | null }>(
     return left.orderKey.localeCompare(right.orderKey);
 }
 
-function messagesOrdered(messages: readonly TranscriptMessage[]): boolean {
+function messagesOrdered(
+    messages: readonly TranscriptMessage[],
+    compare: (left: TranscriptMessage, right: TranscriptMessage) => number = compareMessages,
+): boolean {
     for (let index = 1; index < messages.length; index += 1)
-        if (compareMessages(messages[index - 1]!, messages[index]!) > 0) return false;
+        if (compare(messages[index - 1]!, messages[index]!) > 0) return false;
     return true;
 }
 
@@ -1460,6 +1453,15 @@ function compareMessages(left: TranscriptMessage, right: TranscriptMessage): num
         left.message.createdAt - right.message.createdAt ||
         left.message.id.localeCompare(right.message.id)
     );
+}
+
+/** Steering is accepted before anything queued; within each, oldest first. */
+function comparePendingMessages(left: TranscriptMessage, right: TranscriptMessage): number {
+    return pendingRank(left) - pendingRank(right) || compareMessages(left, right);
+}
+
+function pendingRank(entry: TranscriptMessage): number {
+    return entry.message.role === "user" && entry.message.delivery === "steer" ? 0 : 1;
 }
 
 /** Deterministically projects a daemon CUID2 into the UI's numeric process identity space. */

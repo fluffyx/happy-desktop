@@ -24,6 +24,8 @@ import {
 import { EmojiPicker, type EmojiItem } from "./EmojiPicker";
 import { Icon, type IconName } from "./Icon";
 import { ScrollbarTracks, useScrollbarController } from "./Scrollbar";
+import { Tooltip } from "./Tooltip";
+import type { MessageDelivery } from "happy-desktop-state";
 /* ---- ContextChips ----------------------------------------------------- */
 export type ContextKind = "file" | "run";
 export type ContextItem = {
@@ -305,7 +307,14 @@ export type ComposerProps = {
     modelControl?: ReactNode;
     /** Optional controlled accessory rendered below the composer card. */
     footerControl?: ReactNode;
-    onSend: () => unknown;
+    /**
+     * The delivery a plain send uses while the agent is working: `steer` is read
+     * at the agent's next step, `queue` waits for its run to finish. ⌘↵ sends
+     * with the other one. Defaults to steer.
+     */
+    followUp?: MessageDelivery;
+    /** Receives the delivery the key or control that sent the draft stands for. */
+    onSend: (delivery: MessageDelivery) => unknown;
     /**
      * Ends the agent's current inference. With `running`, it takes over the send
      * control while the draft is empty; typing gives the control back to sending,
@@ -456,6 +465,10 @@ function typingIsUnclaimed(event: KeyboardEvent, textarea: HTMLTextAreaElement):
         return false;
     return textarea.isConnected && textarea.checkVisibility();
 }
+function deliveryName(delivery: MessageDelivery): string {
+    return delivery === "steer" ? "Steer" : "Queue";
+}
+
 /**
  * Message composer: focus-within surface card with a one-line resting textarea
  * that grows through eight lines, context chips, capability-driven file/mention/emoji actions,
@@ -495,7 +508,16 @@ export function Composer(props: ComposerProps) {
     const [dropActive, setDropActive] = useState(false);
     const restoreFocusAfterSend = useRef(false);
     const [selection, setSelection] = useState({ start: 0, end: 0 });
+    /*
+     * Whether ⌘ is being held on its own in the draft. While it is, the send
+     * control says what ⌘↵ would do. Tracked from the textarea's own key events:
+     * a chord such as ⌘V clears it at its second key, so only a deliberate hold
+     * ever shows the opposite delivery.
+     */
+    const [oppositeHeld, setOppositeHeld] = useState(false);
     const busy = Boolean(props.disabled || props.pending);
+    const followUp = props.followUp ?? "steer";
+    const opposite: MessageDelivery = followUp === "steer" ? "queue" : "steer";
     const mentionsSupported = () => props.mentions !== undefined;
     const mentions = () => props.mentions ?? [];
     const mentionQuery = () => props.mentionQuery ?? typedMentionQuery;
@@ -539,6 +561,17 @@ export function Composer(props: ComposerProps) {
      * be able to end. Whenever sending is impossible, stopping takes the
      * circle back regardless of what is written.
      */
+    /*
+     * While the agent is working, sending is one of two acts, so the control
+     * names the one it will do — and, while ⌘ is held, the one ⌘↵ will. On an
+     * idle agent both are the same, and the control is just Send.
+     */
+    const sendDelivery = (): MessageDelivery => (oppositeHeld ? opposite : followUp);
+    const followUpLabel = (): string | undefined => {
+        if (!props.running) return undefined;
+        if (oppositeHeld) return deliveryName(opposite);
+        return `${deliveryName(followUp)} · ⌘↵ to ${opposite}`;
+    };
     const stopShown = () =>
         Boolean(props.running && props.onStop) && (busy || props.value.trim().length === 0);
     const emoji = () => props.emoji ?? [];
@@ -747,11 +780,12 @@ export function Composer(props: ComposerProps) {
         event.currentTarget.value = "";
         textareaEl.current?.focus();
     };
-    const send = () => {
+    const send = (delivery: MessageDelivery) => {
         if (!canSend()) return;
         closePopovers();
         restoreFocusAfterSend.current = true;
-        void props.onSend();
+        setOppositeHeld(false);
+        void props.onSend(delivery);
         queueMicrotask(() => {
             const textarea = textareaEl.current;
             if (!textarea || textarea.disabled || textarea.readOnly) return;
@@ -760,6 +794,7 @@ export function Composer(props: ComposerProps) {
         });
     };
     const onKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+        setOppositeHeld(event.key === "Meta" && !event.shiftKey && !event.altKey && !event.ctrlKey);
         if (
             event.key === "Tab" &&
             event.shiftKey &&
@@ -851,10 +886,18 @@ export function Composer(props: ComposerProps) {
             props.onStop();
             return;
         }
-        if (event.key === "Enter" && !event.shiftKey) {
+        /*
+         * ↵ sends with the follow-up behavior and ⌘↵ with the other one. ⇧↵ is
+         * a new line. ⌃↵ and ⌥↵ keep sending as they always have. A composition
+         * in flight owns its Enter: it commits the candidate, never the draft.
+         */
+        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
-            send();
+            send(event.metaKey ? opposite : followUp);
         }
+    };
+    const onKeyUp = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+        if (event.key === "Meta") setOppositeHeld(false);
     };
     const onInput = (event: FormEvent<HTMLTextAreaElement>) => {
         // A new query is a new list; start its highlight at the top.
@@ -1064,12 +1107,14 @@ export function Composer(props: ComposerProps) {
                             readOnly={props.pending}
                             onBlur={() => {
                                 rememberSelection();
+                                setOppositeHeld(false);
                                 props.onFocusChange?.(false);
                             }}
                             onClick={rememberSelection}
                             onFocus={() => props.onFocusChange?.(true)}
                             onInput={onInput}
                             onKeyDown={onKeyDown}
+                            onKeyUp={onKeyUp}
                             onPaste={onPaste}
                             onScroll={(event) => draftFadeSync(event.currentTarget)}
                             onSelect={rememberSelection}
@@ -1159,16 +1204,24 @@ export function Composer(props: ComposerProps) {
                                 variant="primary"
                             />
                         ) : (
-                            <Button
-                                aria-label="Send message"
-                                className="happy-composer__send"
-                                disabled={!canSend()}
-                                icon="arrow-up"
-                                iconOnly
-                                onClick={send}
-                                size="small"
-                                variant="primary"
-                            />
+                            <Tooltip
+                                className="happy-composer__send-tip"
+                                label={followUpLabel()}
+                                open={followUpLabel() !== undefined && oppositeHeld}
+                                placement="top"
+                            >
+                                <Button
+                                    aria-label={followUpLabel() ?? "Send message"}
+                                    className="happy-composer__send"
+                                    data-delivery={props.running ? sendDelivery() : undefined}
+                                    disabled={!canSend()}
+                                    icon="arrow-up"
+                                    iconOnly
+                                    onClick={() => send(followUp)}
+                                    size="small"
+                                    variant="primary"
+                                />
+                            </Tooltip>
                         )}
                     </div>
                 </div>

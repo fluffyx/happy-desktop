@@ -3223,7 +3223,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         markSessionRead(sessionId) {
             return sessionReadMark(sessionId);
         },
-        sendMessage(sessionId, message) {
+        sendMessage(sessionId, input) {
             const mutationId = nextId();
             const acceptance = sendAcceptanceCreate(mutationId);
             const created = sessionCreations.get(sessionId);
@@ -3237,7 +3237,6 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                 );
                 return mutationId;
             }
-            const input = typeof message === "string" ? { text: message } : message;
             const mode = modeOf(
                 config,
                 agentDrafts.get(sessionId),
@@ -3268,10 +3267,11 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
                                   : `[tool:${block.name}]`,
                           )
                           .join("");
-            // Always steer: a message sent mid-run interrupts the run rather
-            // than waiting behind it, and on an idle agent the daemon treats
-            // steer and queue identically.
-            const delivery = "steer" as const;
+            // The sender chose the delivery; agent status is never consulted,
+            // because the daemon decides when a message is accepted and on an
+            // idle agent it treats steer and queue identically. The optimistic
+            // entry and every retry carry the same choice as the request.
+            const delivery = input.delivery;
             let confirmSend!: () => void;
             const confirmed = new Promise<void>((resolve) => {
                 confirmSend = resolve;
