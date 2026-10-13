@@ -7040,23 +7040,41 @@ export function happyAgentWorkspaceStoreCreate(
             if (disposed) return;
             clearTimeout(transcriptCopyTimer);
             transcriptCopyTimer = undefined;
+            // The copy this one replaces stops downloading a history nobody
+            // will read.
+            transcriptCopyController?.abort();
+            const controller = new AbortController();
+            transcriptCopyController = controller;
             transcriptCopyGeneration += 1;
             const generation = transcriptCopyGeneration;
+            const current = (): boolean => !disposed && generation === transcriptCopyGeneration;
             transcriptCopyReport(generation, { sessionId, status: "copying" });
             const clipboardWrite = deps.clipboardWrite;
             void client
-                .transcriptRead(sessionId, mode)
+                .transcriptRead(sessionId, mode, controller.signal)
                 .then(async (text) => {
                     // A later copy owns the clipboard as well as the report.
-                    if (disposed || generation !== transcriptCopyGeneration) return;
+                    if (!current()) return;
                     if (text.length === 0) {
                         transcriptCopyReport(generation, { sessionId, status: "empty" });
                         return;
                     }
                     if (clipboardWrite === undefined)
                         throw new Error("This window has no clipboard to copy into.");
-                    await clipboardWrite(text);
-                    transcriptCopyReport(generation, { sessionId, status: "copied" });
+                    // Writes go one after another, and one that has been
+                    // replaced while it waited is skipped, so an older copy can
+                    // never land on the clipboard after a newer one.
+                    const write = transcriptCopyWrites.then(async () => {
+                        if (!current()) return false;
+                        await clipboardWrite(text);
+                        return true;
+                    });
+                    transcriptCopyWrites = write.then(
+                        () => undefined,
+                        () => undefined,
+                    );
+                    if (await write)
+                        transcriptCopyReport(generation, { sessionId, status: "copied" });
                 })
                 .catch(() => transcriptCopyReport(generation, { sessionId, status: "failed" }));
         },
