@@ -3,6 +3,15 @@ import { AgentActivityRow } from "../../src/AgentActivityRow";
 import { ComponentPage, Specimen } from "../kit";
 import { agentSpawnRows } from "./agentSpawnFixtures";
 import {
+    artifactReferences,
+    createdArtifactTool,
+    generatedImageTool,
+    generatedImagesTool,
+    presentedFilesTool,
+    presentedVideoTool,
+    updatedArtifactTool,
+} from "./conversationMediaFixtures";
+import {
     happyAgentAwaitingTool,
     happyAgentCompactionCompletedTool,
     happyAgentCompactionFailedTool,
@@ -49,6 +58,40 @@ export function AgentActivityRowPage() {
                             activity={{ kind: "tool", tool }}
                             key={tool.toolCallId}
                             motion="calm"
+                            singleLine
+                            treatment="focused"
+                        />
+                    ))}
+                </div>
+            </Specimen>
+            <Specimen
+                detail="Generated pictures, a presented recording and files, and published artifacts · the result sits 8px under the call's line · focused production treatment"
+                label="Presented media and artifacts"
+                number="media"
+                stage="surface"
+            >
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "12px",
+                        width: "720px",
+                    }}
+                >
+                    {[
+                        generatedImageTool,
+                        generatedImagesTool,
+                        presentedVideoTool,
+                        presentedFilesTool,
+                        createdArtifactTool,
+                        updatedArtifactTool,
+                    ].map((tool) => (
+                        <AgentActivityRow
+                            activity={{ kind: "tool", tool }}
+                            key={tool.toolCallId}
+                            motion="calm"
+                            onMediaOpen={() => {}}
+                            references={artifactReferences}
                             singleLine
                             treatment="focused"
                         />
@@ -119,6 +162,27 @@ export function AgentActivityRowPage() {
                     <AgentActivityRow
                         activity={{ kind: "tool", tool: happyAgentCompactionFailedTool }}
                     />
+                </div>
+            </Specimen>
+
+            <Specimen
+                detail="a scheduled wait and a question hold the turn open without working · while they run the glyph stays still instead of spinning · a settled wait keeps the clock"
+                label="Waiting without working"
+                number="02b"
+                stage="surface"
+            >
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "12px",
+                        width: "720px",
+                    }}
+                >
+                    <AgentActivityRow activity={{ kind: "tool", tool: happyAgentRunningTool }} />
+                    {waitTools.map((tool) => (
+                        <AgentActivityRow activity={{ kind: "tool", tool }} key={tool.toolCallId} />
+                    ))}
                 </div>
             </Specimen>
 
@@ -314,6 +378,37 @@ const AGENT_MESSAGE_TEXT = [
 ].join("\n");
 
 /** A command far wider than a 420px row, so the scroll and its fade are visible. */
+const waitTools: readonly ConversationToolCall[] = [
+    {
+        toolCallId: "tool-wait",
+        toolName: "wait",
+        arguments: { duration: "1h 30m" },
+        status: "running",
+        failed: false,
+    },
+    {
+        toolCallId: "tool-wait-until",
+        toolName: "wait_until",
+        arguments: { at: "18:30" },
+        status: "running",
+        failed: false,
+    },
+    {
+        toolCallId: "tool-request-user-input",
+        toolName: "request_user_input",
+        arguments: { questions: [] },
+        status: "running",
+        failed: false,
+    },
+    {
+        toolCallId: "tool-wait-done",
+        toolName: "wait",
+        arguments: { minutes: 5 },
+        status: "success",
+        failed: false,
+    },
+];
+
 const longExecTool: ConversationToolCall = {
     ...happyAgentExecTool,
     toolCallId: "tool-exec-long",

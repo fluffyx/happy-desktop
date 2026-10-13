@@ -75,6 +75,28 @@ export type ToolPresentation =
           target: "web" | "x";
           query: string;
           sources?: readonly { url: string; title: string }[];
+      }
+    | {
+          kind: "media";
+          items: readonly {
+              kind: "image" | "video" | "document" | "file";
+              name: string;
+              mimeType: string;
+              size: number;
+              width?: number;
+              height?: number;
+              thumbhash?: string;
+              /** The item's bytes on this connection's authenticated origin. */
+              url: string;
+          }[];
+      }
+    | {
+          kind: "artifact";
+          artifactId: string;
+          version: number;
+          /** The daemon's artifact type, which grows with the product. */
+          artifactType: string;
+          title: string;
       };
 
 interface BaseChatElement {
@@ -534,6 +556,8 @@ export interface GroupSession {
     orderKey?: string;
     /** The session that spawned this one, for a subagent. Absent for a top-level session. */
     parentSessionId?: string;
+    /** Whether the agent's run is stopped on a question only the person can answer. */
+    pendingQuestion: boolean;
     permissionMode: string;
     scope:
         | { kind: "project"; projectId: string }

@@ -26,6 +26,7 @@ export const ARTIFACT_READING: MessageReferenceView = {
     type: "link",
     label: "artifact",
     busy: false,
+    reading: true,
 };
 
 /** One agent, workspace, or project a reference can name, as the list shows it. */
@@ -51,9 +52,12 @@ const ENTITIES_EMPTY: MessageReferenceEntities = {
     projects: new Map(),
 };
 
-/** Working, or queued to work: the agent states the API reports as not idle. */
+/**
+ * Doing work right now. A scheduled wait or an open question is the agent
+ * deliberately not working, so neither shimmers the reference.
+ */
 function agentBusy(conversation: ConversationSummary): boolean {
-    return conversation.activity === "running" || conversation.activity === "waiting";
+    return conversation.activity === "running";
 }
 
 const entitiesCache = new WeakMap<HappyAgentSessionListSnapshot, MessageReferenceEntities>();

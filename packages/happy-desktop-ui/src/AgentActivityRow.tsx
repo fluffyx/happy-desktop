@@ -1,4 +1,5 @@
 import { useState, type CSSProperties } from "react";
+import { happyAgentArtifactTypeLabel } from "happy-desktop-state";
 import type {
     ConversationActivity,
     ConversationActivityPresentation,
@@ -12,6 +13,7 @@ import type {
 import { compactCount, changeCountLabel } from "./countText";
 import { Avatar } from "./Avatar";
 import { AvatarBrutalist } from "./AvatarBrutalist";
+import { ConversationMedia } from "./ConversationMedia";
 import { CopyButton } from "./CopyButton";
 import { DiffSnippet, type DiffLine } from "./DiffSnippet";
 import { filePreviewKind } from "./FilePreview";
@@ -19,8 +21,11 @@ import { Icon, type IconName } from "./Icon";
 import { useMessageListDisclosureAnchor } from "./messageListDisclosureAnchor";
 import { renderMessageMarkdown } from "./MessageMarkdown";
 import { messageReferencesPlainText, type MessageReferences } from "./messageReferences";
+import { ArtifactTypeGlyph } from "./pages/artifacts/artifactPresentation";
+import { ResultCard } from "./ResultCard";
 import { ScrollingText } from "./ScrollingText";
 import { Spinner } from "./Spinner";
+import { toolCallStillGlyph } from "./toolCallStillGlyph";
 import { TypedText } from "./TypedText";
 import { Ionicon, Octicon } from "./vectorIcons/VectorIcon";
 
@@ -52,6 +57,11 @@ export type AgentActivityRowProps = {
      * and a surface with no workspace behind it passes nothing.
      */
     onFileOpen?: (path: string) => void;
+    /**
+     * Opens one file a tool call presented, by its position in the call's
+     * media: a picture full size, a document or file in its preview.
+     */
+    onMediaOpen?: (tool: ConversationToolCall, index: number) => void;
     /** Start expanded (blueprint/tests). Otherwise rich bodies collapse by default. */
     defaultExpanded?: boolean;
     /** Controlled disclosure state for a virtualized transcript row. */
@@ -65,7 +75,10 @@ export type AgentActivityRowProps = {
     singleLine?: boolean;
     /** Durable event time, revealed with the row's trailing hover metadata. */
     time?: string;
-    /** What the Happy references in a reasoning or agent-message body read as. */
+    /**
+     * What the Happy references in a reasoning or agent-message body read as,
+     * and what a published artifact is called now and how it opens.
+     */
     references?: MessageReferences;
     className?: string;
     "data-testid"?: string;
@@ -177,6 +190,9 @@ function toolVerb(
         return status === "failed" ? "Failed" : active ? "Compacting" : "Compacted";
     }
     if (presentation?.type === "search") return active ? "Searching" : "Searched";
+    if (presentation?.type === "media") return mediaNoun(presentation.items);
+    if (presentation?.type === "artifact")
+        return presentation.version === 1 ? "Created" : "Updated";
     if (presentation?.type === "exploration") return active ? "Exploring" : "Explored";
     // Typing into a terminal that is already running is not the same act as
     // starting one, and it is certainly not editing a file: `write_stdin` would
@@ -186,7 +202,9 @@ function toolVerb(
         return active ? "Typing" : "Typed";
     // Waiting ends when a child sends input. That expected wake-up is projected
     // as success; the verb describes the wait rather than a generic tool use.
-    if (lower === "wait_agent") return active ? "Waiting" : "Waited";
+    const still = toolCallStillGlyph(name);
+    if (lower === "wait_agent" || still === "clock") return active ? "Waiting" : "Waited";
+    if (still === "question") return active ? "Asking" : "Asked";
     if (presentation?.type === "execCommand" || /(bash|exec|shell|command|run)/.test(lower))
         return lower === "powershell" ? "PowerShell" : lower === "bash" ? "Bash" : "Shell";
     if (/(grep|find|glob|^ls$|list|search)/.test(lower)) return active ? "Exploring" : "Explored";
@@ -212,8 +230,15 @@ function toolVerbFocused(verb: string): string {
         case "Waiting":
         case "Waited":
             return "Wait";
+        case "Asking":
+        case "Asked":
+            return "Ask";
         case "Used":
             return "Tool";
+        case "Created":
+            return "Create";
+        case "Updated":
+            return "Update";
         default:
             return verb;
     }
@@ -226,7 +251,7 @@ function toolVerbFocused(verb: string): string {
  */
 type ToolGlyph =
     | { set: "house"; name: IconName }
-    | { set: "ionicons"; name: "document-outline" | "terminal-outline" }
+    | { set: "ionicons"; name: "document-outline" | "film-outline" | "terminal-outline" }
     | { set: "octicons"; name: "alert" | "code" };
 
 function toolGlyph(
@@ -235,11 +260,20 @@ function toolGlyph(
     failed: boolean,
 ): ToolGlyph {
     if (failed) return { set: "octicons", name: "alert" };
+    const still = toolCallStillGlyph(name);
+    if (still !== undefined) return { set: "house", name: still };
     if (presentation?.type === "agentSpawn") return { set: "house", name: "agents" };
     if (presentation?.type === "compaction") return { set: "house", name: "filter" };
     if (presentation?.type === "search") return { set: "house", name: "globe" };
     if (presentation?.type === "exploration") return { set: "house", name: "search" };
     if (presentation?.type === "fileDiff") return { set: "ionicons", name: "document-outline" };
+    if (presentation?.type === "artifact") return { set: "house", name: "package" };
+    if (presentation?.type === "media")
+        return presentation.items.some((item) => item.kind === "image")
+            ? { set: "house", name: "image" }
+            : presentation.items.some((item) => item.kind === "video")
+              ? { set: "ionicons", name: "film-outline" }
+              : { set: "ionicons", name: "document-outline" };
     const lower = name.toLowerCase();
     // Typing into a running terminal gets the terminal itself, so it is not
     // mistaken for the command that started one or for a file edit.
@@ -336,6 +370,28 @@ function contextTokenCount(tokens: number): string {
     return `${thousands < 100 ? thousands.toFixed(1).replace(/\.0$/, "") : String(Math.round(thousands))}k`;
 }
 
+/**
+ * What a call presented, as the row's leading word: the kind its files share,
+ * counted, or "Files" for a mix.
+ */
+function mediaNoun(
+    items: Extract<ConversationActivityPresentation, { type: "media" }>["items"],
+): string {
+    const kinds = new Set(items.map((item) => item.kind));
+    const plural = items.length > 1;
+    if (kinds.size !== 1) return "Files";
+    switch (items[0]?.kind) {
+        case "image":
+            return plural ? "Images" : "Image";
+        case "video":
+            return plural ? "Videos" : "Video";
+        case "document":
+            return plural ? "Documents" : "Document";
+        default:
+            return plural ? "Files" : "File";
+    }
+}
+
 /** Status → semantic dot tone: warning while active/awaiting, error on stop/fail. */
 function statusTone(status: ConversationActivityStatus): "success" | "warning" | "error" {
     if (status === "success") return "success";
@@ -394,6 +450,29 @@ function toolFilePath(tool: ConversationToolCall): string | undefined {
             : argumentFilePath(tool.arguments);
     if (candidate === undefined || candidate.trim().length === 0) return undefined;
     return filePreviewKind(candidate) === "binary" ? undefined : candidate;
+}
+
+/**
+ * What a scheduled wait is waiting for, in the words its own arguments use:
+ * `wait_until`'s date, or `wait`'s duration as text or as one count per unit.
+ */
+function waitSubject(tool: ConversationToolCall): string | undefined {
+    const args = tool.arguments;
+    if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+    const fields = args as Record<string, ConversationJson>;
+    if (tool.toolName === "wait_until") {
+        const at = fields.at;
+        return typeof at === "string" || typeof at === "number" ? `until ${at}` : undefined;
+    }
+    if (typeof fields.duration === "string" && fields.duration.trim().length > 0)
+        return `for ${fields.duration.trim()}`;
+    const parts = (["days", "hours", "minutes", "seconds"] as const).flatMap((unit) => {
+        const count = fields[unit];
+        return typeof count === "number" && count > 0
+            ? [`${count} ${count === 1 ? unit.slice(0, -1) : unit}`]
+            : [];
+    });
+    return parts.length > 0 ? `for ${parts.join(" ")}` : undefined;
 }
 
 function argumentFilePath(argumentsValue: ConversationToolCall["arguments"]): string | undefined {
@@ -547,6 +626,8 @@ function AgentToolActivity(props: {
     treatment?: ActivityTreatment;
     onSelect?: (tool: ConversationToolCall) => void;
     onFileOpen?: (path: string) => void;
+    onMediaOpen?: (tool: ConversationToolCall, index: number) => void;
+    references?: MessageReferences;
     singleLine?: boolean;
     time?: string;
 }) {
@@ -559,6 +640,10 @@ function AgentToolActivity(props: {
     );
     const singleLine = props.singleLine ?? false;
     const running = tool.status === "running";
+    /* A call that holds the turn open without working — a scheduled wait, a
+       question for the reader — keeps its still glyph while it runs. */
+    const stillGlyph = toolCallStillGlyph(tool.toolName);
+    const spinning = running && stillGlyph === undefined;
     const motion = props.motion ?? "typewriter";
     const focused = props.treatment === "focused";
     const verbTyped = motion === "typewriter" || motion === "verb-typed";
@@ -587,6 +672,12 @@ function AgentToolActivity(props: {
     } else if (presentation?.type === "search") {
         verb = toolVerb(tool.toolName, tool.status, presentation);
         primaryText = presentation.query;
+    } else if (presentation?.type === "media") {
+        verb = toolVerb(tool.toolName, tool.status, presentation);
+        primaryText = presentation.items.map((item) => item.name).join(", ");
+    } else if (presentation?.type === "artifact") {
+        verb = toolVerb(tool.toolName, tool.status, presentation);
+        primaryText = "artifact";
     } else if (presentation?.type === "exploration") {
         verb = toolVerb(tool.toolName, tool.status, presentation);
         primaryText = explorationSummary(presentation);
@@ -619,7 +710,10 @@ function AgentToolActivity(props: {
         primaryText =
             tool.toolName.toLowerCase() === "wait_agent"
                 ? "for subagents"
-                : humanizeToolName(tool.toolName);
+                : stillGlyph === "question"
+                  ? "a question"
+                  : ((stillGlyph === "clock" ? waitSubject(tool) : undefined) ??
+                    humanizeToolName(tool.toolName));
     }
     if (focused && presentation?.type !== "fileDiff") verb = toolVerbFocused(verb);
     /* Ran outside the sandbox. Said in colour alone — the whole line turns
@@ -660,9 +754,11 @@ function AgentToolActivity(props: {
               ? presentation.sources?.map((source) => `${source.title}\n${source.url}`).join("\n")
               : presentation?.type === "compaction"
                 ? presentation.failureReason
-                : presentation === undefined
-                  ? tool.display
-                  : undefined,
+                : presentation?.type === "artifact"
+                  ? presentation.title
+                  : presentation === undefined
+                    ? tool.display
+                    : undefined,
     ]
         .map((part) => part?.replace(/\n+$/, ""))
         .filter((part): part is string => part !== undefined && part.length > 0)
@@ -714,8 +810,9 @@ function AgentToolActivity(props: {
                 aria-hidden="true"
                 className="happy-agent-activity__glyph"
                 data-happy-desktop-ui="agent-activity-glyph"
+                data-still={stillGlyph}
             >
-                {running ? (
+                {spinning ? (
                     <Spinner
                         label={`${humanizeToolName(tool.toolName)} is running`}
                         size={12}
@@ -874,6 +971,19 @@ function AgentToolActivity(props: {
                 )}
             </div>
 
+            {presentation?.type === "media" && presentation.items.length > 0 ? (
+                <ConversationMedia
+                    items={presentation.items}
+                    {...(props.onMediaOpen
+                        ? { onItemOpen: (index: number) => props.onMediaOpen?.(tool, index) }
+                        : {})}
+                />
+            ) : null}
+
+            {presentation?.type === "artifact" ? (
+                <ArtifactResultCard presentation={presentation} references={props.references} />
+            ) : null}
+
             {!singleLine && tool.review ? <PermissionReviewRow review={tool.review} /> : null}
 
             {!singleLine && genericResult !== undefined ? (
@@ -997,6 +1107,39 @@ function AgentToolActivity(props: {
                 </div>
             ) : null}
         </div>
+    );
+}
+
+/**
+ * The artifact a call published, as a card that opens it the way a reference
+ * to it in a message does. It reads the live title through the same
+ * references, keeping the title the call published while that is still being
+ * read; an artifact the reader cannot open stays a plain record.
+ */
+function ArtifactResultCard(props: {
+    presentation: Extract<ConversationActivityPresentation, { type: "artifact" }>;
+    references?: MessageReferences;
+}) {
+    const { presentation, references } = props;
+    const reference = {
+        kind: "artifact",
+        id: presentation.artifactId,
+        version: presentation.version,
+    };
+    const view = references?.view(reference);
+    const title =
+        view === undefined || (view.type === "link" && view.reading === true)
+            ? presentation.title || "Untitled artifact"
+            : view.label;
+    return (
+        <ResultCard
+            detail={`${happyAgentArtifactTypeLabel(presentation.artifactType)} · Version ${String(presentation.version)}`}
+            glyph={<ArtifactTypeGlyph size={20} type={presentation.artifactType} />}
+            {...(references !== undefined && view?.type === "link"
+                ? { onOpen: () => references.open(reference) }
+                : {})}
+            title={title}
+        />
     );
 }
 
@@ -1383,6 +1526,8 @@ export function AgentActivityRow(props: AgentActivityRowProps) {
                     treatment={props.treatment}
                     onSelect={props.onToolSelect}
                     {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+                    {...(props.onMediaOpen ? { onMediaOpen: props.onMediaOpen } : {})}
+                    {...(props.references ? { references: props.references } : {})}
                     singleLine={props.singleLine}
                     time={props.time}
                     tool={activity.tool}

@@ -20,8 +20,10 @@ import type {
     ComposerSnapshot,
     ExperimentsStore,
     GptLiveStore,
+    ConversationMediaItem,
     ConversationToolCall,
     HappyAgentClockStore,
+    HappyAgentToolMediaDocumentStore,
     HappyAgentCloudStore,
     HappyAgentTeamsStore,
     HappyAgentFileLineRange,
@@ -30,6 +32,8 @@ import type {
     HappyAgentConnectionStore,
     HappyAgentDebugLogStore,
     HappyAgentConversationSnapshot,
+    HappyAgentDeviceBridgesStore,
+    HappyAgentDeviceBridgeSupportStore,
     HappyAgentFileLayout,
     HappyAgentWorkspaceFiles,
     HappyAgentCommentDraft,
@@ -73,6 +77,10 @@ import type {
     HappyAgentTaskId,
     ProjectsVisibilityStore,
     HappyAgentGroupLifecycle,
+    HappyAgentChangeTier,
+    HappyAgentChangeTierId,
+    HappyAgentChangeTiersSnapshot,
+    HappyAgentChangeTiersStore,
     HappyAgentProjectGroup,
     HappyAgentProjectId,
     HappyAgentServiceTier,
@@ -97,13 +105,16 @@ import type {
     StatusBarStore,
 } from "happy-desktop-state";
 import {
+    HAPPY_AGENT_FILE_LINK_READ_ONLY_REFUSAL,
     HAPPY_AGENT_PANEL_FILE_VIEW_ID,
     agentAuthor,
+    happyAgentChangeTiersAssign,
     happyAgentArtifactAuthorLabel,
     happyAgentArtifactCatalogStoreNoop,
     happyAgentArtifactChatContext,
     happyAgentArtifactNames,
     happyAgentArtifactSourceLabel,
+    happyAgentDeviceBridgeSupportStoreNone,
     commandPaletteStoreNoop,
     experimentsStoreNoop,
     projectsVisibilityStoreNoop,
@@ -158,6 +169,7 @@ import {
     FileBrowser,
     FileEditor,
     FilePreview,
+    type FilePreviewContent,
     FormRow,
     type FilePreviewKind,
     filePreviewKind,
@@ -176,6 +188,7 @@ import {
     fileTreeRanked,
     filePathMatches,
     fileNameCompare,
+    type FileLinkOpenHandler,
     type FileOpenHandler,
     type LinkOpenHandler,
     type LinkOpenPlacement,
@@ -189,6 +202,7 @@ import {
     HappyAgentSessionControls,
     type HappyAgentUserInputAnswerMap,
     HappyAgentUsagePanel,
+    HappyAgentDevicesPanel,
     PanelHeader,
     QuickActionsCard,
     type QuickActionsCardItem,
@@ -769,11 +783,7 @@ function botSidebarItem(bot: HappyAgentBot, titleShimmerEnabled: boolean): Sideb
         // actually has still outranks it.
         avatarId: bot.id,
         ...(bot.avatar ? { imageUrl: bot.avatar.url } : {}),
-        ...(bot.conversation.activity === "running"
-            ? { status: "working" as const }
-            : bot.conversation.activity === "waiting"
-              ? { status: "waiting" as const }
-              : {}),
+        ...sidebarActivity(bot.conversation.activity),
         ...(bot.conversation.unread ? { unread: true } : {}),
     };
 }
@@ -853,11 +863,7 @@ function taskSidebarItem(task: HappyAgentTask, titleShimmerEnabled: boolean): Si
             label: `Leave ${task.name}`,
             reveal: "hover" as const,
         },
-        ...(task.conversation.activity === "running"
-            ? { status: "working" as const }
-            : task.conversation.activity === "waiting"
-              ? { status: "waiting" as const }
-              : {}),
+        ...sidebarActivity(task.conversation.activity),
         ...(task.conversation.unread ? { unread: true } : {}),
     };
 }
@@ -898,11 +904,7 @@ function botSubtaskSidebarItems(
                       }
                     : {}),
                 ...(worktree ? sidebarLifecycle(worktree.lifecycle) : {}),
-                ...(task.conversation.activity === "running"
-                    ? { status: "working" as const }
-                    : task.conversation.activity === "waiting"
-                      ? { status: "waiting" as const }
-                      : {}),
+                ...sidebarActivity(task.conversation.activity),
                 ...(task.conversation.unread ? { unread: true } : {}),
                 ...((worktree?.addedLines ?? 0) > 0 || (worktree?.deletedLines ?? 0) > 0
                     ? {
@@ -968,11 +970,7 @@ function sidebarItems(
             // A row only carries a status while one of its sessions is live.
             // Waiting is the low-priority modifier: any session doing real work
             // makes the row spin, and only an all-waiting row wears the clock.
-            ...(project.activity === "running"
-                ? { status: "working" as const }
-                : project.activity === "waiting"
-                  ? { status: "waiting" as const }
-                  : {}),
+            ...sidebarActivity(project.activity),
             ...(project.conversations.some((conversation) => conversation.unread)
                 ? { unread: true }
                 : {}),
@@ -1002,11 +1000,7 @@ function sidebarItems(
             // or is no longer there says so on the row: the reader is looking at
             // a place they may be about to send work into.
             ...sidebarLifecycle(worktree.lifecycle),
-            ...(worktree.activity === "running"
-                ? { status: "working" as const }
-                : worktree.activity === "waiting"
-                  ? { status: "waiting" as const }
-                  : {}),
+            ...sidebarActivity(worktree.activity),
             ...(worktree.conversations.some((conversation) => conversation.unread)
                 ? { unread: true }
                 : {}),
@@ -1020,6 +1014,21 @@ function sidebarItems(
                 : {}),
         })),
     ];
+}
+
+/**
+ * The status a row wears for what its sessions are doing. An open question
+ * outranks everything and a scheduled wait is the low-priority modifier, both
+ * already decided by the activity rollup; each maps to its own static mark so
+ * neither claims, with a spinner, that work is happening.
+ */
+function sidebarActivity(
+    activity: "running" | "awaitingInput" | "waiting" | "idle",
+): Pick<SidebarItem, "status"> {
+    if (activity === "awaitingInput") return { status: "awaitingInput" };
+    if (activity === "running") return { status: "working" };
+    if (activity === "waiting") return { status: "waiting" };
+    return {};
 }
 
 /**
@@ -1193,6 +1202,7 @@ function panelCloseTargetFind(panel: HappyAgentPanelSnapshot): string | undefine
         return undefined;
     if (panel.activeViewId === "activity") return "activity";
     if (panel.activeViewId === "usage") return "usage";
+    if (panel.activeViewId === "devices") return "devices";
     if (panel.activeViewId === "preview") return panel.previewEntryId ? "preview" : undefined;
     if (panel.activeViewId === "file") return panel.fileViewOpen ? "file" : undefined;
     if (panel.activeViewId === "artifact") return panel.artifactView ? "artifact" : undefined;
@@ -1271,6 +1281,33 @@ function previewToolFind(
         : undefined;
 }
 
+/** One file a previewed tool call presented, with the call it is read through. */
+interface HappyAgentPreviewMedia {
+    readonly agentId: string;
+    readonly toolCallId: string;
+    readonly index: number;
+    readonly item: ConversationMediaItem;
+}
+
+/** The presented file the Preview tab names, when it names one that is still there. */
+function previewMediaFind(
+    conversation: HappyAgentWorkspaceSnapshot["conversation"],
+    tool: ConversationToolCall | undefined,
+    index: number | undefined,
+): HappyAgentPreviewMedia | undefined {
+    if (conversation.type !== "ready" || tool === undefined || index === undefined)
+        return undefined;
+    const item = tool.presentation?.type === "media" ? tool.presentation.items[index] : undefined;
+    return item === undefined
+        ? undefined
+        : {
+              agentId: conversation.value.conversationId,
+              toolCallId: tool.toolCallId,
+              index,
+              item,
+          };
+}
+
 /** One tab per session in the open group, marked while the agent is working. */
 function sessionTabs(
     group: OpenGroup,
@@ -1288,6 +1325,7 @@ function sessionTabs(
         // without sliding the title sideways under the reader.
         busy: summary.activity === "running",
         waiting: summary.activity === "waiting",
+        awaitingInput: summary.activity === "awaitingInput",
         unread: summary.unread === true,
     }));
 }
@@ -2359,6 +2397,9 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
         updateStore.get,
     );
     const updateHost = hostHappyAgent(directory);
+    // Tiers are one list for the window, remembered by the host: every
+    // machine's Changes is split by the same tiers Settings shows.
+    const changeTiersStore = updateHost?.session?.workspace.changeTiers;
     // An update under way owns the slot: the window keeps working beside it,
     // and the offer comes back only once it has finished and been cleared.
     const sidebarUpdate = updateProgress ? (
@@ -3028,6 +3069,7 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
                     titleShimmerEnabled={titleShimmerEnabled}
                     viewerId={viewerId}
                     workspace={active.session.workspace}
+                    {...(changeTiersStore === undefined ? {} : { changeTiers: changeTiersStore })}
                     {...(artifactsAvailable && active.session.artifacts
                         ? {
                               artifacts: active.session.artifacts,
@@ -4092,6 +4134,12 @@ interface HappyAgentWorkspaceSurfaceProps {
     /** Joined conversation-list + active-conversation product store. */
     workspace: HappyAgentWorkspaceStore;
     /**
+     * The tiers every Changes listing is split by. The host's, whichever
+     * machine this workspace is on: tiers are one list for the whole window,
+     * and Settings edits the host's.
+     */
+    changeTiers?: HappyAgentChangeTiersStore;
+    /**
      * The Happy Agent's projects, for the surfaces that address a project the window is
      * not currently open on — the settings dialog reached from any row.
      */
@@ -4550,6 +4598,7 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
     const panelViewClose = (viewId: string) => {
         if (viewId === "activity") props.workspace.activityPanelClose();
         else if (viewId === "usage") props.workspace.usagePanelClose();
+        else if (viewId === "devices") props.workspace.panel.devicesClose();
         else if (viewId === "preview") props.workspace.panel.previewClose();
         else if (viewId === "file") props.workspace.filePanelClose();
         else if (viewId === "artifact") props.workspace.panel.artifactViewClose();
@@ -4587,6 +4636,7 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
     // never reaches it.
     const sweepableTabs = groupTabs.filter((entry) => entry.id !== detachedConversationId);
     const previewTool = previewToolFind(conversation, panel.previewEntryId);
+    const previewMedia = previewMediaFind(conversation, previewTool, panel.previewMediaIndex);
     const desktop = props.platform === "desktop";
 
     // Whether the chat this workspace was made with is what is on screen. That
@@ -4624,7 +4674,11 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                 props.onFileSelect(file.groupId, props.chatId, path, kind);
             }}
             wrap={workspace.fileViewWrap}
-            {...(access.writeRefusal === undefined ? {} : { writeRefusal: access.writeRefusal })}
+            {...(file.linked
+                ? { writeRefusal: HAPPY_AGENT_FILE_LINK_READ_ONLY_REFUSAL }
+                : access.writeRefusal === undefined
+                  ? {}
+                  : { writeRefusal: access.writeRefusal })}
             {...(connectionRefusal === undefined ? {} : { saveRefusal: connectionRefusal })}
             workspace={props.workspace}
         />
@@ -4867,6 +4921,13 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                         selection,
                     );
                 }}
+                // A link into another agent's or workspace's folder opens a
+                // read-only preview beside this conversation. It is not gated
+                // on the connection here: an unreachable Happy Agent is one of
+                // the reasons the notice gives, rather than a silent no-op.
+                onFileLinkOpen={(link) =>
+                    props.workspace.fileLinkOpen(link, fileTabKind(link.path))
+                }
                 onLinkOpen={(url, placement) => {
                     // The side panel's browser tab is this workspace's own; the
                     // machine's browser is the host's door, and only the host
@@ -4889,6 +4950,12 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                 workspace={props.workspace}
             />
         );
+
+    // Devices reach a workspace on another machine, so only a connection the
+    // host can bridge offers them, and only for the workspace that is open.
+    const deviceBridgeSupport = props.workspace.deviceBridgeSupport();
+    const deviceBridges =
+        deviceBridgeSupport && openGroup ? props.workspace.deviceBridges(openGroup.id) : undefined;
 
     return (
         <AppShell
@@ -4930,6 +4997,15 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                         activity={conversation.type === "ready" ? conversation.value : undefined}
                         canStartBrowser={availability.online && openGroup !== undefined}
                         canStartTerminal={availability.online && props.chatId !== undefined}
+                        {...(deviceBridgeSupport && deviceBridges && openGroup
+                            ? {
+                                  devices: {
+                                      groupId: openGroup.id,
+                                      support: deviceBridgeSupport,
+                                      bridges: deviceBridges,
+                                  },
+                              }
+                            : {})}
                         browserContent={props.browserContent}
                         browserConnectionId={props.browserConnectionId}
                         htmlPreview={props.htmlPreview}
@@ -4938,6 +5014,9 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                         {...(openGroup?.changesStatus === undefined
                             ? {}
                             : { changesStatus: openGroup.changesStatus })}
+                        {...(props.changeTiers === undefined
+                            ? {}
+                            : { changeTiers: props.changeTiers })}
                         expanded={workspace.fileTreeExpanded}
                         collapsed={workspace.fileTreeCollapsed}
                         layout={workspace.fileLayout}
@@ -5031,6 +5110,12 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                         }}
                         panel={panel}
                         previewTool={previewTool}
+                        {...(previewMedia
+                            ? {
+                                  previewMedia,
+                                  toolMediaDocument: props.workspace.toolMediaDocument(),
+                              }
+                            : {})}
                         {...(terminalHappyAgentAvailability === undefined
                             ? {}
                             : {
@@ -5629,10 +5714,24 @@ function HappyAgentFileBody(props: {
     const linkedFileOpen: FileOpenHandler = (target, selection): void => {
         if (!props.happyAgentOnline()) return;
         const kind = fileTabKind(target);
-        if (file.placement === "panel")
+        // A file read through a link into another workspace names its
+        // neighbours in that workspace, so they are followed there too.
+        if (file.linked)
+            workspace.fileLinkOpen(
+                {
+                    target: { type: "workspace", workspaceId: file.groupId },
+                    path: target,
+                    ...(selection === undefined ? {} : { selection }),
+                },
+                kind,
+            );
+        else if (file.placement === "panel")
             workspace.fileReferenceOpen(file.groupId, target, kind, selection);
         else props.onMainFileOpen(target, kind, selection);
     };
+    /** Follows a `happy-file:` link the document carries, into the panel. */
+    const fileLinkOpen: FileLinkOpenHandler = (link): void =>
+        workspace.fileLinkOpen(link, fileTabKind(link.path));
     // Typing into a document that could never be written back is worse than not
     // offering the editor at all: the reader loses what they typed and learns
     // why only when they try to save it.
@@ -5706,6 +5805,7 @@ function HappyAgentFileBody(props: {
                                           selection,
                                       )
                                   }
+                                  onFileLinkOpen={fileLinkOpen}
                                   {...(markdownCacheKey === undefined
                                       ? {}
                                       : { cacheKey: markdownCacheKey })}
@@ -5833,6 +5933,7 @@ function HappyAgentFileBody(props: {
                                   <HappyAgentChangedFilePreview
                                       file={file}
                                       onFileOpen={linkedFileOpen}
+                                      onFileLinkOpen={fileLinkOpen}
                                       openDisabled={props.saveRefusal !== undefined}
                                       text={current}
                                       // The file's characters, where they can be
@@ -5939,6 +6040,8 @@ function HappyAgentChangedFilePreview(props: {
     openDisabled: boolean;
     /** Opens a linked file on the side this one is being read on. */
     onFileOpen: FileOpenHandler;
+    /** Opens a `happy-file:` link the document carries, into the panel. */
+    onFileLinkOpen: FileLinkOpenHandler;
     text: string;
     /** The file's characters, editable, where this checkout can be written. */
     editor?: ReactNode;
@@ -5980,6 +6083,7 @@ function HappyAgentChangedFilePreview(props: {
                 if (props.openDisabled) return;
                 props.onFileOpen(documentLinkResolve(file.path, href), selection);
             }}
+            onFileLinkOpen={props.onFileLinkOpen}
             path={file.path}
         />
     );
@@ -6038,6 +6142,77 @@ function HappyAgentFilePreview(props: {
             path={props.path}
             size={fileSizeFormat(value.size)}
             updating={props.revalidating}
+        />
+    );
+}
+
+/**
+ * One file a tool call presented, in the same preview every other file opens
+ * in. Pictures and recordings load from their address; a document is read
+ * whole for the host's viewer, held by this preview for as long as it shows
+ * that document; any other file states its facts and can be saved.
+ */
+function HappyAgentToolMediaPreview(props: {
+    media: HappyAgentPreviewMedia;
+    documents: HappyAgentToolMediaDocumentStore;
+    onClose(): void;
+}) {
+    const { agentId, toolCallId, index, item } = props.media;
+    const documentKey =
+        item.kind === "document" ? `${agentId}/${toolCallId}/${String(index)}` : undefined;
+    useDisposableLease(documentKey, () => {
+        props.documents.documentOpen({ agentId, toolCallId, index, mimeType: item.mimeType });
+        return { [Symbol.dispose]: () => props.documents.documentOpen(undefined) };
+    });
+    const documents = useSyncExternalStore(
+        props.documents.subscribe,
+        props.documents.get,
+        props.documents.get,
+    );
+    const document =
+        documentKey !== undefined &&
+        documents.document?.toolCallId === toolCallId &&
+        documents.document.index === index
+            ? documents.content
+            : undefined;
+    const kind =
+        item.kind === "image"
+            ? "image"
+            : item.kind === "video"
+              ? "video"
+              : item.kind === "document"
+                ? document?.type === "external"
+                    ? "binary"
+                    : "pdf"
+                : "binary";
+    const content: FilePreviewContent =
+        item.kind === "image" || item.kind === "video"
+            ? { type: "url", url: item.url }
+            : item.kind !== "document" || document === undefined || document.type === "idle"
+              ? item.kind === "document"
+                  ? { type: "loading" }
+                  : { type: "unavailable" }
+              : document.type === "ready"
+                ? { type: "url", url: document.url }
+                : document.type === "failed"
+                  ? { type: "error", message: document.error.message }
+                  : document.type === "loading"
+                    ? { type: "loading" }
+                    : { type: "unavailable" };
+    return (
+        <FilePreview
+            closeLabel="Close preview"
+            content={content}
+            {...(item.width !== undefined && item.height !== undefined
+                ? { dimensions: `${String(item.width)} × ${String(item.height)}` }
+                : {})}
+            kind={kind}
+            onClose={props.onClose}
+            onDownload={() =>
+                void fileDownload(item.name, { type: "url", url: item.url }).catch(() => undefined)
+            }
+            path={item.name}
+            size={fileSizeFormat(item.size)}
         />
     );
 }
@@ -6190,6 +6365,8 @@ function HappyAgentConversationBody(props: {
     onCreate?: () => void;
     onChatSelect: HappyAgentWorkspaceSurfaceProps["onChatSelect"];
     onFileOpen: FileOpenHandler;
+    /** Opens a file a `happy-file:` link names in another workspace, beside this one. */
+    onFileLinkOpen: FileLinkOpenHandler;
     /** Opens a web link a message carries where its context menu asked for it. */
     onLinkOpen: LinkOpenHandler;
     /** Which of the two places a plain click on a link goes, marked in its menu. */
@@ -6232,6 +6409,7 @@ function HappyAgentConversationBody(props: {
                 now={props.now}
                 onChatSelect={props.onChatSelect}
                 onFileOpen={props.onFileOpen}
+                onFileLinkOpen={props.onFileLinkOpen}
                 onLinkOpen={props.onLinkOpen}
                 linkOpenDefault={props.linkOpenDefault}
                 canAbort={props.canAbort}
@@ -6384,6 +6562,8 @@ function HappyAgentConversationSurface(props: {
     onChatSelect: HappyAgentWorkspaceSurfaceProps["onChatSelect"];
     /** Opens a file the transcript names, in the panel beside it, at the lines it named. */
     onFileOpen: FileOpenHandler;
+    /** Opens a file a `happy-file:` link names in another workspace, beside this one. */
+    onFileLinkOpen: FileLinkOpenHandler;
     /** Opens a web link a message carries where its context menu asked for it. */
     onLinkOpen: LinkOpenHandler;
     /** Which of the two places a plain click on a link goes, marked in its menu. */
@@ -6641,6 +6821,7 @@ function HappyAgentConversationSurface(props: {
             onFileOpen={(path, selection) => {
                 if (props.happyAgentOnline()) props.onFileOpen(path, selection);
             }}
+            onFileLinkOpen={props.onFileLinkOpen}
             onLinkOpen={props.onLinkOpen}
             linkOpenDefault={props.linkOpenDefault}
             onImageOpen={(messageId, attachmentId) => {
@@ -6664,6 +6845,17 @@ function HappyAgentConversationSurface(props: {
                 if (attachment.openUrl) openExternalLink(attachment.openUrl);
             }}
             onToolSelect={(entryId) => workspace.panel.previewOpen(entryId)}
+            onToolMediaOpen={(entryId, tool, index) => {
+                // A picture opens full size over the conversation, stepping
+                // through every picture it shows; a document or any other file
+                // opens in the preview beside it.
+                const item =
+                    tool.presentation?.type === "media"
+                        ? tool.presentation.items[index]
+                        : undefined;
+                if (item?.kind === "image") workspace.toolImageOpen(entryId, index);
+                else if (item !== undefined) workspace.panel.previewOpen(entryId, index);
+            }}
             onDelegationSelect={(sessionId) =>
                 props.onChatSelect(props.groupId, sessionId as HappyAgentSessionId)
             }
@@ -7432,6 +7624,62 @@ function workspaceFileTreeNodes(
     });
 }
 
+const changeTiersEmpty: HappyAgentChangeTiersSnapshot = { tiers: [] };
+const changeTiersNone = (): HappyAgentChangeTiersSnapshot => changeTiersEmpty;
+const changeTiersNoSubscribe = (): (() => void) => () => undefined;
+
+/**
+ * The Changes listing with its tiers: the files no tier claims, laid out as the
+ * reader chose, then a section for each tier that claimed any, laid out the same
+ * way beneath its heading. `sections` names the tier behind each heading, so a
+ * fold is reported against the tier rather than mistaken for a directory.
+ */
+function changeTierNodes(
+    entries: readonly FileTreeBuildEntry[],
+    tiers: readonly HappyAgentChangeTier[],
+    layout: HappyAgentFileLayout,
+    expansion: FileTreeExpansion,
+): { nodes: FileTreeNode[]; sections: ReadonlyMap<string, HappyAgentChangeTierId> } {
+    const arrange = (files: readonly FileTreeBuildEntry[]): FileTreeNode[] =>
+        layout === "tree" ? fileTreeBuild(files, expansion) : fileTreeFlatten(files);
+    const assignment = happyAgentChangeTiersAssign(entries, tiers);
+    const sections = new Map<string, HappyAgentChangeTierId>();
+    const tierNodes = assignment.tiers.map(({ tier, files }): FileTreeNode => {
+        // NUL appears in no path, so a heading can never share an id with a
+        // file or directory listed above it.
+        const id = `\u0000tier\u0000${tier.id}`;
+        sections.set(id, tier.id);
+        return {
+            id,
+            kind: "section",
+            name: tier.name.trim() === "" ? "Untitled tier" : tier.name.trim(),
+            count: files.length,
+            expanded: !tier.collapsed,
+            ...(tier.collapsed ? {} : { children: arrange(files) }),
+        };
+    });
+    return { nodes: [...arrange(assignment.primary), ...tierNodes], sections };
+}
+
+/** The Devices tab: one subscription to the open workspace's bridges. */
+function HappyAgentDevicesSurface(props: { store: HappyAgentDeviceBridgesStore }) {
+    const store = props.store;
+    const devices = useSyncExternalStore(store.subscribe, store.get, store.get);
+    return (
+        <HappyAgentDevicesPanel
+            devices={devices}
+            onBridgeClose={(id) => store.bridgeClose(id)}
+            onLocalToWorkspaceOpen={(workspacePort, localPort) =>
+                store.localToWorkspaceOpen(workspacePort, localPort)
+            }
+            onUsbAttach={(busId) => store.usbAttach(busId)}
+            onWorkspaceToLocalOpen={(localPort, workspacePort) =>
+                store.workspaceToLocalOpen(localPort, workspacePort)
+            }
+        />
+    );
+}
+
 function HappyAgentPanelBody(props: {
     activity?: HappyAgentConversationSnapshot;
     /**
@@ -7453,8 +7701,24 @@ function HappyAgentPanelBody(props: {
     mediaWindow?: MediaWindowOpener;
     canStartBrowser: boolean;
     canStartTerminal: boolean;
+    /**
+     * The open workspace's local bridges, where the host can bridge to its
+     * machine. Its Happy Agent says whether Devices is offered at all.
+     */
+    devices?: {
+        readonly groupId: HappyAgentGroupId;
+        readonly support: HappyAgentDeviceBridgeSupportStore;
+        readonly bridges: HappyAgentDeviceBridgesStore;
+    };
     changes: OpenGroup["changes"];
     changesStatus?: OpenGroup["changesStatus"];
+    /**
+     * The tiers Changes lists secondary files under. Read here rather than by
+     * the workspace surface, so editing a tier's patterns redraws the listing
+     * it regroups and nothing around it. Absent while the host has no
+     * workspace to remember them in, when every change is listed together.
+     */
+    changeTiers?: HappyAgentChangeTiersStore;
     closeShortcut?: KeyboardShortcut;
     expanded: ReadonlySet<string>;
     collapsed: ReadonlySet<string>;
@@ -7496,6 +7760,10 @@ function HappyAgentPanelBody(props: {
     onViewClose: (viewId: string) => void;
     panel: HappyAgentPanelSnapshot;
     previewTool?: ConversationToolCall;
+    /** The presented file the Preview tab shows instead of its call, when it names one. */
+    previewMedia?: HappyAgentPreviewMedia;
+    /** Reads a presented document for the preview's viewer. */
+    toolMediaDocument?: HappyAgentToolMediaDocumentStore;
     /** Owning Happy Agent availability applied to every retained terminal tab. */
     happyAgentAvailability?: "reconnecting" | "unavailable";
     happyAgentAvailabilityReason?: string;
@@ -7536,6 +7804,20 @@ function HappyAgentPanelBody(props: {
         () => new Map(props.changes.map((change) => [change.path, change])),
         [props.changes],
     );
+    const changeTiersStore = props.changeTiers;
+    const { tiers } = useSyncExternalStore(
+        changeTiersStore?.subscribe ?? changeTiersNoSubscribe,
+        changeTiersStore?.get ?? changeTiersNone,
+        changeTiersStore?.get ?? changeTiersNone,
+    );
+    // The changed files split into the reader's tiers: the ones no tier claims
+    // first, then one section per tier that claimed anything. A query narrows
+    // the entries before they are split, so a section whose files all fail to
+    // match leaves with them.
+    const changeListing = useMemo(
+        () => changeTierNodes(entries, tiers, props.layout, expansion),
+        [entries, tiers, props.layout, expansion],
+    );
     const searchResults = props.search.results;
     const nodes: FileTreeNode[] = useMemo(
         () =>
@@ -7556,19 +7838,8 @@ function HappyAgentPanelBody(props: {
                           }),
                       )
                     : workspaceFileTreeNodes(props.workspaceFiles, "", expansion, changesByPath)
-                : props.layout === "tree"
-                  ? fileTreeBuild(entries, expansion)
-                  : fileTreeFlatten(entries),
-        [
-            all,
-            changesByPath,
-            entries,
-            expansion,
-            props.layout,
-            props.workspaceFiles,
-            query,
-            searchResults,
-        ],
+                : changeListing.nodes,
+        [all, changeListing, changesByPath, expansion, props.workspaceFiles, query, searchResults],
     );
     const loading = all ? props.workspaceFilesLoading : props.changesStatus === "loading";
     const changesUnavailable = props.changesStatus === "unavailable";
@@ -7585,6 +7856,13 @@ function HappyAgentPanelBody(props: {
     // reference itself reads as.
     const titlesStore = props.artifacts?.artifacts.titles() ?? artifactTitlesStoreNoop;
     const titles = useSyncExternalStore(titlesStore.subscribe, titlesStore.get, titlesStore.get);
+    const deviceSupportStore = props.devices?.support ?? happyAgentDeviceBridgeSupportStoreNone;
+    const deviceSupport = useSyncExternalStore(
+        deviceSupportStore.subscribe,
+        deviceSupportStore.get,
+        deviceSupportStore.get,
+    );
+    const devicesOffered = props.devices !== undefined && deviceSupport.status === "supported";
     const artifactView = props.panel.artifactView;
     const artifactTabView =
         artifactView === undefined
@@ -7623,6 +7901,9 @@ function HappyAgentPanelBody(props: {
         ...(props.panel.usageViewOpen
             ? [{ closable: true, icon: "clock" as const, id: "usage", label: "Usage" }]
             : []),
+        ...(props.panel.devicesViewOpen && props.devices
+            ? [{ closable: true, icon: "link" as const, id: "devices", label: "Devices" }]
+            : []),
         ...(props.panel.fileViewOpen && panelFile
             ? [
                   {
@@ -7653,7 +7934,7 @@ function HappyAgentPanelBody(props: {
                   {
                       closable: true,
                       icon:
-                          props.previewTool?.presentation?.type === "fileDiff"
+                          props.previewTool?.presentation?.type === "fileDiff" || props.previewMedia
                               ? ("doc" as const)
                               : props.previewTool?.presentation?.type === "execCommand" ||
                                   props.previewTool?.presentation?.type ===
@@ -7695,6 +7976,7 @@ function HappyAgentPanelBody(props: {
                 <TabbedPane
                     actions={
                         props.canStartTerminal ||
+                        devicesOffered ||
                         (props.browserContent && props.canStartBrowser) ? (
                             <>
                                 {props.browserContent && props.canStartBrowser ? (
@@ -7722,6 +8004,20 @@ function HappyAgentPanelBody(props: {
                                         variant="ghost"
                                     />
                                 ) : null}
+                                {/* Offered only where the workspace's Happy
+                                Agent says it can take this Mac's devices and
+                                ports. */}
+                                {devicesOffered ? (
+                                    <Button
+                                        aria-label="Devices"
+                                        icon="link"
+                                        iconOnly
+                                        onClick={() => props.store.devicesSelect()}
+                                        size="small"
+                                        title="Devices and ports"
+                                        variant="ghost"
+                                    />
+                                ) : null}
                             </>
                         ) : undefined
                     }
@@ -7734,6 +8030,7 @@ function HappyAgentPanelBody(props: {
                         else if (tabId === "artifacts") props.store.artifactsSelect();
                         else if (tabId === "activity") props.onActivityOpen();
                         else if (tabId === "usage") props.onUsageOpen();
+                        else if (tabId === "devices") props.store.devicesSelect();
                         else if (tabId === "preview" && props.panel.previewEntryId)
                             props.store.previewOpen(props.panel.previewEntryId);
                         else if (tabId === HAPPY_AGENT_PANEL_FILE_VIEW_ID)
@@ -7750,13 +8047,18 @@ function HappyAgentPanelBody(props: {
                     // The listing opens content rather than being content, and a
                     // tool-call preview is bound to an entry of the conversation
                     // the main content is showing; neither has a form over there.
+                    // A file read through a link into another workspace is a
+                    // preview beside this conversation, not one of this
+                    // checkout's tabs.
                     transferable={(tab) =>
                         tab.id !== "files" &&
                         tab.id !== "artifacts" &&
                         tab.id !== "activity" &&
                         tab.id !== "usage" &&
+                        tab.id !== "devices" &&
                         tab.id !== "preview" &&
-                        tab.id !== "artifact"
+                        tab.id !== "artifact" &&
+                        !(tab.id === HAPPY_AGENT_PANEL_FILE_VIEW_ID && panelFile?.linked)
                     }
                     transferTargets={PANEL_TRANSFER_TARGETS}
                 >
@@ -7839,7 +8141,15 @@ function HappyAgentPanelBody(props: {
                                       },
                                   })}
                             onSelect={(path: string) => props.onFileSelect(path)}
-                            onToggle={props.onToggle}
+                            onToggle={(id, expanded) => {
+                                // A tier's heading folds the tier, which is
+                                // remembered with the tier rather than with the
+                                // directories of this checkout.
+                                const tierId = all ? undefined : changeListing.sections.get(id);
+                                if (tierId !== undefined && changeTiersStore !== undefined)
+                                    changeTiersStore.tierCollapsedUpdate(tierId, !expanded);
+                                else props.onToggle(id, expanded);
+                            }}
                             scope={props.scope}
                             selectedId={props.selectedPath}
                         />
@@ -7916,8 +8226,30 @@ function HappyAgentPanelBody(props: {
                                 title="No session usage"
                             />
                         )
+                    ) : props.panel.activeViewId === "devices" ? (
+                        props.devices ? (
+                            <HappyAgentDevicesSurface
+                                // Another workspace is another store: what was
+                                // typed for one does not carry to the next.
+                                key={props.devices.groupId}
+                                store={props.devices.bridges}
+                            />
+                        ) : (
+                            <EmptyState
+                                description="Devices and ports reach a workspace on another machine."
+                                icon="link"
+                                size="panel"
+                                title="No devices here"
+                            />
+                        )
                     ) : props.panel.activeViewId === "preview" ? (
-                        props.previewTool ? (
+                        props.previewMedia && props.toolMediaDocument ? (
+                            <HappyAgentToolMediaPreview
+                                documents={props.toolMediaDocument}
+                                media={props.previewMedia}
+                                onClose={() => props.store.previewClose()}
+                            />
+                        ) : props.previewTool ? (
                             <ToolCallPreview tool={props.previewTool} />
                         ) : (
                             <EmptyState

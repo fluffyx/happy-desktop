@@ -45,6 +45,7 @@ import {
     type ServerCompatibility,
     type TerminalColorScheme,
 } from "happy-desktop-state";
+import { imageCropOpen } from "happy-desktop-ui";
 import { completionChimePlay } from "./completionChime";
 import { desktopViewPreferencesPersistence } from "./desktopViewPreferences";
 import { desktopWelcomePersistence } from "./desktopWelcome";
@@ -321,6 +322,8 @@ export function happyAgentConnectionOpen(input: {
     readonly happyAgentHttpUrl: string;
     readonly client?: HappyAgentClient;
     readonly hostServicesUrl?: string;
+    /** Whether this computer's USB devices and ports can be bridged to this Happy Agent. */
+    readonly deviceBridges?: boolean;
     /**
      * The window's appearance right now, read again for every terminal this
      * connection opens. A terminal is started in it and keeps it afterwards.
@@ -377,6 +380,7 @@ export function happyAgentConnectionOpen(input: {
     const hostServices = happyAgentHostServicesCreate(
         input.hostServicesUrl ?? input.happyAgentHttpUrl,
         input.happyAgentHttpUrl,
+        { deviceBridges: input.deviceBridges ?? false },
     );
     const welcome = welcomeStoreCreate(desktopWelcomePersistence(input.happyAgentId));
     const onboarding = happyAgentOnboardingStoreCreate(directClient, agentConnection.sync, {
@@ -397,6 +401,7 @@ export function happyAgentConnectionOpen(input: {
         workspaceMemoryPersistence: workspaceMemoryPersistence(input.happyAgentId),
         catalogSource,
         profileActions: profile.actions,
+        profilePhotoCodec: { open: imageCropOpen },
         profileSource: profile.source,
         providerUsageSource: happyAgentUsageSourceCreate(directClient),
         transcriptConnect: happyAgentTranscriptConnectCreate(agentConnection),

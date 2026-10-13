@@ -5,6 +5,10 @@ import type {
 import type { HappyAgentClient } from "@slopus/happy-agent-client";
 import { happyAgentProjectAddError } from "./happyAgentProjectRegistration.js";
 import {
+    happyAgentFileLinkWorkspaceResolve,
+    type HappyAgentFileLinkTarget,
+} from "./happyAgentFileLink.js";
+import {
     happyAgentAgentIdentitySourceCreate,
     type HappyAgentAgentIdentitySource,
 } from "./happyAgentAgentIdentities.js";
@@ -84,6 +88,7 @@ import {
     type HappyAgentProfileSource,
     type HappyAgentProfileStore,
 } from "./happyAgentProfileStore.js";
+import type { HappyAgentProfilePhotoCodec } from "./happyAgentProfilePhoto.js";
 import {
     happyAgentProvidersStoreCreate,
     type HappyAgentProvidersStore,
@@ -99,6 +104,18 @@ import {
 } from "./happyAgentCloudStore.js";
 import { happyAgentTeamsStoreCreate, type HappyAgentTeamsStore } from "./happyAgentTeamsStore.js";
 import { happyAgentArtifactsCreate, type HappyAgentArtifacts } from "../artifacts/artifacts.js";
+import {
+    happyAgentDeviceBridgesStoreCreate,
+    type HappyAgentDeviceBridgesStore,
+} from "./happyAgentDeviceBridgesStore.js";
+import {
+    happyAgentDeviceBridgeSupportStoreCreate,
+    type HappyAgentDeviceBridgeSupportStore,
+} from "./happyAgentDeviceBridgeSupportStore.js";
+import {
+    happyAgentToolMediaDocumentStoreCreate,
+    type HappyAgentToolMediaDocumentStore,
+} from "./happyAgentToolMediaDocumentStore.js";
 
 /** A disposable view lease on one retained session chat store. */
 export interface HappyAgentChatHandle {
@@ -174,6 +191,25 @@ export interface HappyAgentWorkspaceClient {
      * have artifacts says so through each surface's availability.
      */
     artifacts(): HappyAgentArtifacts;
+    /**
+     * The document a presented-file preview shows, read into memory for the
+     * host's viewer. Materialized on first access and shared, since one
+     * preview shows one document at a time.
+     */
+    toolMediaDocument(): HappyAgentToolMediaDocumentStore;
+    /**
+     * One workspace's local bridges: USB devices, Bluetooth adapters, and ports
+     * of this computer, reaching that workspace's machine. Materialized per
+     * workspace on first access and kept, starting nothing until it is read.
+     * Absent where the host has nothing to bridge, as for the Happy Agent that
+     * runs on this computer.
+     */
+    deviceBridges(groupId: HappyAgentGroupId): HappyAgentDeviceBridgesStore | undefined;
+    /**
+     * Whether this Happy Agent serves local bridges, for the control that offers
+     * them. Absent exactly where `deviceBridges` is.
+     */
+    deviceBridgeSupport(): HappyAgentDeviceBridgeSupportStore | undefined;
     /** Reads one bounded page of one checkout directory. */
     workspaceFileTreeRead(
         groupId: HappyAgentGroupId,
@@ -212,6 +248,12 @@ export interface HappyAgentWorkspaceClient {
         path: string,
         signal?: AbortSignal,
     ): Promise<HappyAgentWorkspaceFileBytes>;
+    /**
+     * The workspace a `happy-file:` link reads from, after the host has said
+     * the agent or workspace it names is there and ready to be read. Rejects
+     * with a `UserError` naming the reason when it is not.
+     */
+    fileLinkWorkspaceResolve(target: HappyAgentFileLinkTarget): Promise<HappyAgentGroupId>;
     /**
      * Where one HTML document of a checkout is served as a page, for a viewer
      * that renders the document rather than its source.
@@ -326,6 +368,8 @@ export interface HappyAgentWorkspaceClientDeps {
     /** Host-only profile read and mutation. Omitted on a node connection. */
     readonly profileSource?: HappyAgentProfileSource;
     readonly profileActions?: HappyAgentProfileActions;
+    /** Opens and crops a picked profile photo; supplied with the profile by a host that has one. */
+    readonly profilePhotoCodec?: HappyAgentProfilePhotoCodec;
     /** Opens the core transcript stream for one materialized chat. */
     readonly transcriptConnect: HappyAgentChatTranscriptConnect;
     /** Maximum number of leased chat stores that may keep a live transcript subscription. */
@@ -465,6 +509,9 @@ export function happyAgentWorkspaceClientCreate(
     let securityPolicyStore: HappyAgentSecurityPolicyStore | undefined;
     let secretsStore: HappyAgentSecretsStore | undefined;
     let artifacts: HappyAgentArtifacts | undefined;
+    let toolMediaDocument: HappyAgentToolMediaDocumentStore | undefined;
+    const deviceBridgeStores = new Map<HappyAgentGroupId, HappyAgentDeviceBridgesStore>();
+    let deviceBridgeSupport: HappyAgentDeviceBridgeSupportStore | undefined;
     const chats = new Map<HappyAgentSessionId, ChatBinding>();
     let disposed = false;
     let chatUseOrder = 0;
@@ -604,6 +651,8 @@ export function happyAgentWorkspaceClientCreate(
         },
         workspaceFileBytesRead: (groupId, path, signal) =>
             deps.hostServices.workspaceFileBytesRead(groupId, path, signal),
+        fileLinkWorkspaceResolve: (target) =>
+            happyAgentFileLinkWorkspaceResolve(deps.client, target),
         htmlPreviewOpen: (groupId, path) => deps.hostServices.htmlPreviewOpen(groupId, path),
         workspaceFileWrite: async (groupId, path, content, expectedHash) => {
             const written = await deps.client.writeFile(groupId, {
@@ -662,6 +711,41 @@ export function happyAgentWorkspaceClientCreate(
             });
             return artifacts;
         },
+        toolMediaDocument() {
+            if (disposed) throw new Error("The Happy Agent client is disposed.");
+            toolMediaDocument ??= happyAgentToolMediaDocumentStoreCreate({
+                client: deps.client,
+                ...(deps.artifactDocumentInline
+                    ? { documentInline: deps.artifactDocumentInline }
+                    : {}),
+            });
+            return toolMediaDocument;
+        },
+        deviceBridges(groupId) {
+            if (disposed) throw new Error("The Happy Agent client is disposed.");
+            const host = deps.hostServices.deviceBridges;
+            if (!host) return undefined;
+            let store = deviceBridgeStores.get(groupId);
+            if (!store) {
+                store = happyAgentDeviceBridgesStoreCreate({
+                    client: deps.client,
+                    sync: deps.connection.sync,
+                    host,
+                    workspaceId: groupId,
+                });
+                deviceBridgeStores.set(groupId, store);
+            }
+            return store;
+        },
+        deviceBridgeSupport() {
+            if (disposed) throw new Error("The Happy Agent client is disposed.");
+            if (!deps.hostServices.deviceBridges) return undefined;
+            deviceBridgeSupport ??= happyAgentDeviceBridgeSupportStoreCreate({
+                client: deps.client,
+                sync: deps.connection.sync,
+            });
+            return deviceBridgeSupport;
+        },
         inbox() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
             const source = deps.inboxSource;
@@ -713,10 +797,12 @@ export function happyAgentWorkspaceClientCreate(
         },
         profile() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
-            if (!deps.profileSource || !deps.profileActions) return undefined;
+            if (!deps.profileSource || !deps.profileActions || !deps.profilePhotoCodec)
+                return undefined;
             profileStore ??= happyAgentProfileStoreCreate({
                 source: deps.profileSource,
                 actions: deps.profileActions,
+                photoCodec: deps.profilePhotoCodec,
             });
             return profileStore;
         },
@@ -873,6 +959,11 @@ export function happyAgentWorkspaceClientCreate(
             secretsStore?.[Symbol.dispose]();
             secretsStore = undefined;
             artifacts?.[Symbol.dispose]();
+            toolMediaDocument?.[Symbol.dispose]();
+            for (const store of deviceBridgeStores.values()) store[Symbol.dispose]();
+            deviceBridgeStores.clear();
+            deviceBridgeSupport?.[Symbol.dispose]();
+            deviceBridgeSupport = undefined;
             artifacts = undefined;
             deps.catalogSource[Symbol.dispose]();
             for (const binding of chats.values()) {

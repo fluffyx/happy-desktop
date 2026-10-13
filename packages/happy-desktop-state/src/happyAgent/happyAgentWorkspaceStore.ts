@@ -1,3 +1,6 @@
+import type { HappyAgentDeviceBridgesStore } from "./happyAgentDeviceBridgesStore.js";
+import type { HappyAgentDeviceBridgeSupportStore } from "./happyAgentDeviceBridgeSupportStore.js";
+import type { HappyAgentToolMediaDocumentStore } from "./happyAgentToolMediaDocumentStore.js";
 import { createStore } from "zustand/vanilla";
 import {
     happyAgentBotSubtasks,
@@ -15,6 +18,12 @@ import {
     type HappyAgentChiefOfStaffRequest,
 } from "./happyAgentChiefOfStaffRequest.js";
 import { happyAgentErrorAssistanceText } from "./happyAgentErrorAssistance.js";
+import {
+    HAPPY_AGENT_FILE_LINK_READ_ONLY_REFUSAL,
+    happyAgentFileLinkReadFailure,
+    type HappyAgentFileLink,
+    type HappyAgentFileLinkTarget,
+} from "./happyAgentFileLink.js";
 import type { ConversationSummary } from "../conversation/conversationSummary.js";
 import type { Loadable } from "../conversation/loadable.js";
 import { UserError } from "../types.js";
@@ -35,6 +44,7 @@ import type { HappyAgentRecentTabMemory } from "./happyAgentWorkspaceMemory.js";
 import {
     HAPPY_AGENT_VIEW_PREFERENCES_EMPTY,
     happyAgentViewPreferencesParse,
+    happyAgentViewPreferencesTiersUpdate,
     happyAgentViewPreferencesUpdate,
     type HappyAgentGroupViewPreferences,
     type HappyAgentViewPreferencesDocument,
@@ -56,6 +66,10 @@ import {
     happyAgentImageInputsOf,
     happyAgentWorkspaceAttachmentData,
 } from "./happyAgentComposerAttachment.js";
+import {
+    happyAgentChangeTiersStoreCreate,
+    type HappyAgentChangeTiersStore,
+} from "./happyAgentChangeTiersStore.js";
 import {
     happyAgentPanelStoreCreate,
     type HappyAgentPanelStore,
@@ -210,6 +224,15 @@ function fileTabIdOf(groupId: HappyAgentGroupId, path: string): string {
 }
 
 /**
+ * A linked file's tab id. It is not the id the same file has as a tab of its
+ * own workspace: that one is editable and belongs to that workspace's strip,
+ * and a preview read through a link must never be mistaken for it.
+ */
+function fileLinkTabIdOf(workspaceId: HappyAgentGroupId, path: string): string {
+    return `link\u0000${workspaceId}\u0000${path}`;
+}
+
+/**
  * The open conversation: its shared entries plus run lifecycle, queued
  * steering, tasks and subagents, background processes, usage, and the
  * model/effort/permission pickers. Loading uses the shared `Loadable` vocabulary.
@@ -305,6 +328,11 @@ export interface HappyAgentFileReveal extends HappyAgentFileLineRange {
     readonly requestId: number;
 }
 
+/** The link a file of another workspace was opened from. */
+export interface HappyAgentFileLinkOrigin {
+    readonly target: HappyAgentFileLinkTarget;
+}
+
 /** One workspace text file opened as a main-content document tab. */
 export interface HappyAgentFileTabSnapshot {
     readonly id: string;
@@ -336,6 +364,17 @@ export interface HappyAgentFileTabSnapshot {
      * file opened from the listing.
      */
     readonly reveal?: HappyAgentFileReveal;
+    /**
+     * What a `happy-file:` link named, for a file of another agent's or
+     * workspace's folder opened beside this conversation. `groupId` is then
+     * that folder's workspace, which this Happy Agent's catalog need not list.
+     *
+     * Such a tab is a read-only preview held in the panel: it cannot be typed
+     * into, saved, moved into the main content, or remembered as one of that
+     * workspace's tabs, because the reader never went there. Absent for every
+     * file of the checkout being read, including one a link named in it.
+     */
+    readonly linked?: HappyAgentFileLinkOrigin;
     readonly revision: string;
     readonly document: Loadable<
         | HappyAgentWorkspaceFileDocument
@@ -1389,6 +1428,26 @@ export interface HappyAgentWorkspaceStore {
      * do it. The workspace keeps it pointed at the addressed group.
      */
     readonly panel: HappyAgentPanelStore;
+    /**
+     * The sections Changes splits secondary files into, one list for every
+     * listing. A store of its own because editing a tier's patterns is typed a
+     * keystroke at a time and has nothing to do with the rest of the workspace;
+     * it is remembered with this connection's other view preferences. The
+     * window reads the host's: every node's Changes is split by those.
+     */
+    readonly changeTiers: HappyAgentChangeTiersStore;
+    /**
+     * The document a presented-file preview shows, read for the host's viewer.
+     * Materialized on first access; the preview leases which document it holds.
+     */
+    toolMediaDocument(): HappyAgentToolMediaDocumentStore;
+    /**
+     * One workspace's local bridges, for the panel's Devices tab and the control
+     * that opens it. Absent where this Happy Agent runs on this computer.
+     */
+    deviceBridges(groupId: HappyAgentGroupId): HappyAgentDeviceBridgesStore | undefined;
+    /** Whether this Happy Agent serves local bridges; absent exactly where `deviceBridges` is. */
+    deviceBridgeSupport(): HappyAgentDeviceBridgeSupportStore | undefined;
 
     // Navigation-applied conversation lifetime. These are not user selection:
     // the router applies them from the addressed URL.
@@ -1613,6 +1672,18 @@ export interface HappyAgentWorkspaceStore {
         kind: HappyAgentFileTabKind,
         selection?: HappyAgentFileLineRange,
     ): void;
+    /**
+     * Follows a `happy-file:` link — a file in another agent's or workspace's
+     * folder — into the panel's file viewer, without leaving this
+     * conversation. The host is asked first whether the agent or workspace the
+     * link names is there and ready, and whether the file is in it; when any
+     * answer is no, nothing opens and `fileOpenFailure` says which.
+     *
+     * The file opens as a read-only preview read from that workspace. A link
+     * into the checkout being read is an ordinary reference to it, and opens
+     * exactly as `fileReferenceOpen` would.
+     */
+    fileLinkOpen(link: HappyAgentFileLink, kind: HappyAgentFileTabKind): void;
     /** Puts away the notice about a reference that could not be followed. */
     fileOpenFailureDismiss(): void;
     /**
@@ -1777,6 +1848,8 @@ export interface HappyAgentWorkspaceStore {
     reasoningToggle(): void;
     /** Opens one transcript image of the open conversation full size. */
     imageOpen(messageId: string, attachmentId: string): void;
+    /** Opens one picture a tool call of the open conversation presented, full size. */
+    toolImageOpen(entryId: string, index: number): void;
     /** Shows the conversation's next image, wrapping past the last one. */
     imageNext(): void;
     /** Shows the conversation's previous image, wrapping past the first one. */
@@ -2303,6 +2376,17 @@ export function happyAgentWorkspaceStoreCreate(
             // as long as it stays open.
         }
     };
+    const changeTiers: HappyAgentChangeTiersStore = happyAgentChangeTiersStoreCreate({
+        initial: viewPreferences.changeTiers,
+        output(event) {
+            viewPreferences = happyAgentViewPreferencesTiersUpdate(viewPreferences, event.tiers);
+            try {
+                deps.viewPreferences?.write(viewPreferences);
+            } catch {
+                // Kept on screen for as long as the window stays open.
+            }
+        },
+    });
     let fileTreeExpanded: ReadonlySet<string> = new Set();
     let fileTreeCollapsed: ReadonlySet<string> = new Set();
     /** Counts the asks to show a region, so each one is its own event. */
@@ -4210,6 +4294,67 @@ export function happyAgentWorkspaceStoreCreate(
     };
 
     /**
+     * Puts one file of another workspace into the panel's viewer as a
+     * read-only preview. It is read the way any tab is, but it is not one of
+     * the addressed group's tabs: nothing remembers it, its kind is never
+     * upgraded to a diff of a checkout the reader is not in, and the main
+     * content is left alone.
+     */
+    const fileLinkTabOpen = (
+        workspaceId: HappyAgentGroupId,
+        path: string,
+        kind: HappyAgentFileTabKind,
+        target: HappyAgentFileLinkTarget,
+        selection?: HappyAgentFileLineRange,
+    ): void => {
+        // A linked preview has no diff face: what was linked is the file.
+        const shown: HappyAgentFileTabKind = kind === "diff" ? "file" : kind;
+        const reveal =
+            selection === undefined
+                ? undefined
+                : { ...selection, requestId: (fileRevealRequests += 1) };
+        const id = fileLinkTabIdOf(workspaceId, path);
+        panelFileTabClose(id);
+        const existing = fileTabs.find((tab) => tab.id === id);
+        if (existing) {
+            if (reveal !== undefined || existing.reveal !== undefined) {
+                fileTabs = fileTabs.map((tab) => {
+                    if (tab.id !== id) return tab;
+                    if (reveal !== undefined) return { ...tab, reveal };
+                    const { reveal: _cleared, ...rest } = tab;
+                    return rest;
+                });
+            }
+            recompute();
+            return;
+        }
+        const presentationId = filePresentationIdNext();
+        const cacheBaseKey = happyAgentReadyDocumentCacheBaseKey(workspaceId, path, shown, "");
+        const cached = readyDocumentCacheRead(cacheBaseKey)?.document;
+        fileTabs = [
+            ...fileTabs,
+            {
+                id,
+                groupId: workspaceId,
+                path,
+                kind: shown,
+                placement: "panel",
+                preview: true,
+                linked: { target },
+                ...(reveal === undefined ? {} : { reveal }),
+                revision: "",
+                presentationId,
+                saving: false,
+                document: cached ? { type: "ready", value: cached } : { type: "loading" },
+                loading: cached === undefined,
+                revalidating: false,
+            },
+        ];
+        recompute();
+        fileLoad(id, "", presentationId);
+    };
+
+    /**
      * Closes one file tab: its pending read is dropped, the strip forgets it,
      * and the group is left reading whatever the tab was covering — the next
      * file open in it, or the conversation behind them all.
@@ -4326,6 +4471,9 @@ export function happyAgentWorkspaceStoreCreate(
     const fileTabsReconcile = (): void => {
         readyDocumentCacheReconcileGit();
         for (const tab of fileTabs) {
+            // A linked preview is not a file of any checkout this catalog
+            // reads changes for, whatever its workspace is.
+            if (tab.linked) continue;
             const kind = fileKindResolve(tab.groupId, tab.path, tab.kind);
             const change = fileChangeFind(tab.groupId, tab.path);
             const revision = change?.revision ?? "";
@@ -6382,9 +6530,48 @@ export function happyAgentWorkspaceStoreCreate(
             groupTabRemember(addressedGroupId, openId);
     };
 
+    /**
+     * Opens the file a reference named once the checkout says it is there.
+     * `generation` is the ask this answers; a later reference supersedes it.
+     */
+    const fileReferenceFollow = (
+        generation: number,
+        groupId: HappyAgentGroupId,
+        path: string,
+        kind: HappyAgentFileTabKind,
+        selection?: HappyAgentFileLineRange,
+    ): void => {
+        // The checkout is asked for the file before a tab is given to it.
+        // The read is not kept: the tab reads for itself, the same way it
+        // does when opened from the listing, and what this settles is only
+        // whether there is anything there to read.
+        const probe =
+            kind === "media"
+                ? client.workspaceFileBytesRead(groupId, path)
+                : client.workspaceFileRead(groupId, path);
+        void probe.then(
+            () => {
+                if (disposed || generation !== fileReferenceGeneration) return;
+                fileOpenFailure = undefined;
+                fileTabOpen(groupId, path, kind, false, "panel", selection);
+                panel.fileViewOpen();
+                recompute();
+            },
+            (error: unknown) => {
+                if (disposed || generation !== fileReferenceGeneration) return;
+                fileOpenFailure = { path, message: happyAgentUserError(error).message };
+                recompute();
+            },
+        );
+    };
+
     return {
         get: () => snapshotStore.getState(),
         panel,
+        changeTiers,
+        toolMediaDocument: () => client.toolMediaDocument(),
+        deviceBridges: (groupId) => client.deviceBridges(groupId),
+        deviceBridgeSupport: () => client.deviceBridgeSupport(),
         subscribe(listener) {
             listeners.add(listener);
             if (listeners.size === 1 && !disposed) start();
@@ -7019,29 +7206,41 @@ export function happyAgentWorkspaceStoreCreate(
         },
         fileReferenceOpen(groupId, path, kind, selection) {
             if (disposed) return;
+            fileReferenceFollow(++fileReferenceGeneration, groupId, path, kind, selection);
+        },
+        fileLinkOpen(link, kind) {
+            if (disposed) return;
             const generation = ++fileReferenceGeneration;
-            // The checkout is asked for the file before a tab is given to it.
-            // The read is not kept: the tab reads for itself, the same way it
-            // does when opened from the listing, and what this settles is only
-            // whether there is anything there to read.
-            const probe =
-                kind === "media"
-                    ? client.workspaceFileBytesRead(groupId, path)
-                    : client.workspaceFileRead(groupId, path);
-            void probe.then(
-                () => {
-                    if (disposed || generation !== fileReferenceGeneration) return;
+            const current = (): boolean => !disposed && generation === fileReferenceGeneration;
+            const fail = (error: unknown): void => {
+                if (!current()) return;
+                fileOpenFailure = {
+                    path: link.path,
+                    message: happyAgentFileLinkReadFailure(error).message,
+                };
+                recompute();
+            };
+            void client.fileLinkWorkspaceResolve(link.target).then((workspaceId) => {
+                if (!current()) return;
+                // A link into the checkout being read names one of its own
+                // files, which is a reference like any other: editable, and
+                // opened exactly the way a written `Store.ts:120` is.
+                if (workspaceId === addressedGroupId) {
+                    fileReferenceFollow(generation, workspaceId, link.path, kind, link.selection);
+                    return;
+                }
+                const probe =
+                    kind === "media"
+                        ? client.workspaceFileBytesRead(workspaceId, link.path)
+                        : client.workspaceFileRead(workspaceId, link.path);
+                void probe.then(() => {
+                    if (!current()) return;
                     fileOpenFailure = undefined;
-                    fileTabOpen(groupId, path, kind, false, "panel", selection);
+                    fileLinkTabOpen(workspaceId, link.path, kind, link.target, link.selection);
                     panel.fileViewOpen();
                     recompute();
-                },
-                (error: unknown) => {
-                    if (disposed || generation !== fileReferenceGeneration) return;
-                    fileOpenFailure = { path, message: happyAgentUserError(error).message };
-                    recompute();
-                },
-            );
+                }, fail);
+            }, fail);
         },
         fileOpenFailureDismiss() {
             if (disposed || fileOpenFailure === undefined) return;
@@ -7097,7 +7296,9 @@ export function happyAgentWorkspaceStoreCreate(
                 viewId === HAPPY_AGENT_PANEL_FILE_VIEW_ID
                     ? fileTabs.find((tab) => tab.placement === "panel")
                     : fileTabs.find((tab) => tab.id === viewId);
-            if (!file || file.placement === placement) return;
+            // A linked preview is read beside this conversation and has no
+            // place among this checkout's tabs.
+            if (!file || file.placement === placement || file.linked) return;
             compose(() => {
                 if (placement === "panel") {
                     // The viewer is one slot, so whatever was in it steps aside.
@@ -7338,7 +7539,7 @@ export function happyAgentWorkspaceStoreCreate(
             // An edit that could never be saved is not an edit; the editor is
             // read-only while the checkout cannot take a write.
             const tab = fileTabs.find((candidate) => candidate.id === tabId);
-            if (!tab || !writeAllowed(groupWorkRefusalFind(tab.groupId))) return;
+            if (!tab || tab.linked || !writeAllowed(groupWorkRefusalFind(tab.groupId))) return;
             fileTabs = fileTabs.map((candidate) =>
                 candidate.id === tabId && !candidate.saving
                     ? { ...candidate, draft, preview: false }
@@ -7364,7 +7565,9 @@ export function happyAgentWorkspaceStoreCreate(
         async fileDraftSave(tabId) {
             const tab = fileTabs.find((candidate) => candidate.id === tabId);
             if (!tab || tab.saving || tab.draft === undefined) return;
-            const refusal = groupWorkRefusalFind(tab.groupId);
+            const refusal = tab.linked
+                ? HAPPY_AGENT_FILE_LINK_READ_ONLY_REFUSAL
+                : groupWorkRefusalFind(tab.groupId);
             if (refusal) throw new Error(refusal);
             const draft = tab.draft;
             fileTabs = fileTabs.map((candidate) =>
@@ -7501,6 +7704,7 @@ export function happyAgentWorkspaceStoreCreate(
         },
         reasoningToggle: () => chatStore?.reasoningToggle(),
         imageOpen: (messageId, attachmentId) => chatStore?.imageOpen(messageId, attachmentId),
+        toolImageOpen: (entryId, index) => chatStore?.toolImageOpen(entryId, index),
         imageNext: () => chatStore?.imageNext(),
         imagePrevious: () => chatStore?.imagePrevious(),
         imageClose: () => chatStore?.imageClose(),

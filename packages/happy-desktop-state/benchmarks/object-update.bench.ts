@@ -278,6 +278,11 @@ const cases: readonly BenchmarkCase[] = [
                         name,
                         updatedAt: 0,
                     }),
+                    photoUpload: async () => undefined,
+                    photoRemove: async () => undefined,
+                },
+                photoCodec: {
+                    open: () => Promise.reject(new Error("The benchmark never opens a picture.")),
                 },
             });
             return {
