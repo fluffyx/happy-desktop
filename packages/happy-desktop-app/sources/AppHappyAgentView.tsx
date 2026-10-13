@@ -242,6 +242,7 @@ import {
     type WorkspaceLifecyclePhase,
 } from "happy-desktop-ui";
 import { APP_SHORTCUTS } from "./appShortcuts";
+import { unreadChats, unreadChatTarget, type UnreadChat } from "./unreadChats";
 import { HappyAgentVersionProvider } from "./HappyAgentVersionProvider";
 import {
     COMMAND_PALETTE_PREVIEW_LIMIT,
@@ -2355,6 +2356,13 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
         happyAgentTaskCreateSupported(active)
             ? active.id
             : undefined;
+    // Where Option-Command-L and its Shift twin go from here. The chat on
+    // screen is already being read, so it is never the answer; with nothing
+    // else unread both chords are left alone, and the palette offers neither.
+    const unread = unreadChats(directory.happyAgents, projectsHidden);
+    const unreadCurrent = { happyAgentId: active?.id ?? props.happyAgentId, chatId: props.chatId };
+    const unreadNext = unreadChatTarget(unread, "next", unreadCurrent);
+    const unreadPrevious = unreadChatTarget(unread, "previous", unreadCurrent);
     const activeHappyAgentOnline = (): boolean => {
         const current = props.happyAgents.get();
         const happyAgent =
@@ -2898,6 +2906,10 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
         workspace: active?.session?.workspace,
         workspaceCreateProjectId: workspaceCreateTarget?.projectId,
         taskCreateAvailable: taskCreateTarget !== undefined,
+        unread:
+            unreadNext && unreadPrevious
+                ? { next: unreadNext, previous: unreadPrevious }
+                : undefined,
     };
     // The same suggestions the empty palette offers, on the gesture the reader
     // already has for discovering chords. The shell mounts it only while
@@ -3170,6 +3182,33 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
                     ]}
                 />
             ) : null}
+            {/* Option-Command-L belongs to the window as well: what is unread
+                is read across every machine, so the chord goes wherever the
+                next one is. Bound only while there is one to go to. */}
+            {unreadNext && unreadPrevious ? (
+                <WindowShortcuts
+                    actions={[
+                        {
+                            run: () =>
+                                props.onChatSelect(
+                                    unreadNext.happyAgentId,
+                                    unreadNext.groupId,
+                                    unreadNext.chatId,
+                                ),
+                            shortcut: APP_SHORTCUTS.unreadNextOpen,
+                        },
+                        {
+                            run: () =>
+                                props.onChatSelect(
+                                    unreadPrevious.happyAgentId,
+                                    unreadPrevious.groupId,
+                                    unreadPrevious.chatId,
+                                ),
+                            shortcut: APP_SHORTCUTS.unreadPreviousOpen,
+                        },
+                    ]}
+                />
+            ) : null}
             {/* The window's own dialogs, mounted once beside whatever screen is
                 showing rather than inside one of them. Naming a row belongs to
                 the sidebar, and Create belongs to the window: both are reached
@@ -3232,6 +3271,8 @@ interface HappyAgentPaletteSubject {
     workspaceCreateProjectId?: HappyAgentProjectId;
     /** Whether a new task can be made on this machine right now. */
     taskCreateAvailable: boolean;
+    /** The chats Go to next and previous unread open, on any machine in the window. */
+    unread?: { readonly next: UnreadChat; readonly previous: UnreadChat };
     updateReady?: { readonly action: "refresh" | "restart"; readonly version?: string };
     workspace?: HappyAgentWorkspaceStore;
 }
@@ -3395,6 +3436,7 @@ function paletteContext(
         sessionCreateAvailable: facts.sessionCreateAvailable,
         tabs: facts.tabs,
         updateReady: subject.updateReady,
+        unread: subject.unread,
         workspaceCreateAvailable:
             subject.online &&
             subject.workspace !== undefined &&

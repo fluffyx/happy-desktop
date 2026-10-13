@@ -10,6 +10,7 @@ import type {
 import { happyAgentSessionGroupIdOf } from "happy-desktop-state";
 import type { CommandPaletteRowEmphasis, CommandShortcut, IconName } from "happy-desktop-ui";
 import { APP_SHORTCUTS } from "./appShortcuts";
+import type { UnreadChat } from "./unreadChats";
 
 /**
  * What the command palette offers, derived from the snapshots the window is
@@ -217,6 +218,12 @@ export interface CommandPaletteContext {
     readonly workspaceCreateAvailable: boolean;
     /** Whether a new task can be made on the addressed Happy Agent. */
     readonly taskCreateAvailable: boolean;
+    /**
+     * The chats Go to next and previous unread would open from here. Supplied
+     * only while something other than the chat on screen is unread, so the
+     * rows are never offered with nowhere to go.
+     */
+    readonly unread?: { readonly next: UnreadChat; readonly previous: UnreadChat };
 }
 
 export interface CommandPaletteInput extends CommandPaletteContext {
@@ -813,13 +820,60 @@ function updateRow(context: CommandPaletteContext): CommandPaletteCommandRow | u
 }
 
 /**
+ * The rows that open the next and the previous unread chat, each naming the
+ * chat it would open, so the reader knows where Enter goes before pressing it.
+ */
+function unreadRows(context: CommandPaletteContext): {
+    readonly next?: CommandPaletteCommandRow;
+    readonly previous?: CommandPaletteCommandRow;
+} {
+    const unread = context.unread;
+    if (!unread) return {};
+    const row = (
+        id: string,
+        title: string,
+        chat: UnreadChat,
+        shortcut: CommandShortcut,
+    ): CommandPaletteCommandRow => ({
+        kind: "command",
+        id,
+        title,
+        meta: chat.title,
+        glyph: { kind: "icon", name: chat.question ? "question" : "bell" },
+        shortcut,
+        command: {
+            kind: "chatOpen",
+            happyAgentId: chat.happyAgentId,
+            groupId: chat.groupId,
+            chatId: chat.chatId,
+            archived: false,
+        },
+    });
+    return {
+        next: row(
+            "action:unread-next",
+            "Go to next unread",
+            unread.next,
+            APP_SHORTCUTS.unreadNextOpen,
+        ),
+        previous: row(
+            "action:unread-previous",
+            "Go to previous unread",
+            unread.previous,
+            APP_SHORTCUTS.unreadPreviousOpen,
+        ),
+    };
+}
+
+/**
  * The things the window can do from anywhere, each with its own chord. The
- * update joins them only under a typed query: without one it already has the
- * top row, and offering it twice would be the palette shouting.
+ * update and the unread rows join them only under a typed query. Without one,
+ * the update and next unread already lead the list and offering either twice
+ * would be the palette shouting; previous unread is the rarer ask, typed for.
  */
 function actionRows(
     context: CommandPaletteContext,
-    update?: CommandPaletteCommandRow,
+    ...searchOnly: readonly (CommandPaletteCommandRow | undefined)[]
 ): CommandPaletteCommandRow[] {
     return [
         ...(context.sessionCreateAvailable
@@ -865,14 +919,15 @@ function actionRows(
             glyph: { kind: "icon" as const, name: "settings" as const },
             command: { kind: "settingsOpen" as const },
         },
-        ...(update ? [update] : []),
+        ...searchOnly.filter((row) => row !== undefined),
     ];
 }
 
 /**
  * What the palette offers before anything is typed, and what the held-Command
- * preview shows: the update if one is waiting, the chats this workspace was
- * last working on, and the things the window can always do.
+ * preview shows: the update if one is waiting, the next unread chat if there is
+ * one, the chats this workspace was last working on, and the things the window
+ * can always do.
  *
  * Recency is `updatedAt` rather than a record of local clicks, so the palette
  * and the workspace's own history menu answer "what was I just working on here"
@@ -887,7 +942,14 @@ export function commandPaletteSuggestionRows(context: CommandPaletteContext): Co
             ? owner.worktree.conversations
             : owner.project.conversations;
         const openIds = new Set(conversations.map((summary) => summary.id));
-        for (const summary of conversations)
+        // The chat Go to next unread already names is not offered again as a
+        // recent one: the card holds only a few rows, and one is already its.
+        const unreadNextId =
+            context.unread?.next.happyAgentId === context.happyAgentId
+                ? context.unread.next.chatId
+                : undefined;
+        for (const summary of conversations) {
+            if (summary.id === unreadNextId) continue;
             recent.push({
                 rank: 0,
                 updatedAt: summary.updatedAt,
@@ -906,6 +968,7 @@ export function commandPaletteSuggestionRows(context: CommandPaletteContext): Co
                     },
                 },
             });
+        }
         for (const session of context.archivedSessions) {
             if (
                 session.parentSessionId !== undefined ||
@@ -934,7 +997,16 @@ export function commandPaletteSuggestionRows(context: CommandPaletteContext): Co
         }
     }
     const update = updateRow(context);
-    return [...(update ? [update] : []), ...ranked(recent, RECENT_LIMIT), ...actionRows(context)];
+    // Next unread stands right under the update, ahead of the recent chats,
+    // so the held-Command card — which shows only the first few — always
+    // carries it while something is waiting.
+    const unreadNext = unreadRows(context).next;
+    return [
+        ...(update ? [update] : []),
+        ...(unreadNext ? [unreadNext] : []),
+        ...ranked(recent, RECENT_LIMIT),
+        ...actionRows(context),
+    ];
 }
 
 /**
@@ -952,6 +1024,7 @@ export function commandPaletteResults(input: CommandPaletteInput): CommandPalett
         const rows = commandPaletteSuggestionRows(input);
         if (rows.length > 0) sections.push({ id: "suggestions", label: "Suggestions", rows });
     } else {
+        const unread = unreadRows(input);
         const offered: readonly {
             readonly id: CommandPaletteSectionId;
             readonly label: string;
@@ -967,10 +1040,12 @@ export function commandPaletteResults(input: CommandPaletteInput): CommandPalett
             {
                 id: "actions",
                 label: "Actions",
-                rows: actionRows(input, updateRow(input)).flatMap((row) => {
-                    const rank = rowRank(query, row.title, row.meta);
-                    return rank === undefined ? [] : [{ rank, updatedAt: 0, row }];
-                }),
+                rows: actionRows(input, unread.next, unread.previous, updateRow(input)).flatMap(
+                    (row) => {
+                        const rank = rowRank(query, row.title, row.meta);
+                        return rank === undefined ? [] : [{ rank, updatedAt: 0, row }];
+                    },
+                ),
             },
             { id: "settings", label: "Settings", rows: settingsSectionRows(input) },
         ];

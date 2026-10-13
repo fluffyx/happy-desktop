@@ -15,5 +15,12 @@ export const APP_SHORTCUTS = {
     tabClose: commandShortcut("w"),
     /** Opens the new-task surface on the active Happy Agent, as its Tasks heading's + does. */
     taskCreate: commandShortcut("n"),
+    /** Opens the newest unread chat; one waiting on a question comes first. */
+    unreadNextOpen: commandShortcut("l", { alt: true }),
+    /**
+     * Opens the oldest unread chat. Shift reverses Next rather than reaching for
+     * a letter of its own: Option-Command-H is macOS's Hide Others.
+     */
+    unreadPreviousOpen: commandShortcut("l", { alt: true, shift: true }),
     workspaceCreate: commandShortcut("n", { shift: true }),
 } as const;
