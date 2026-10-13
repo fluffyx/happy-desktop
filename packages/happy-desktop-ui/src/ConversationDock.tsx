@@ -1,5 +1,5 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
-import type { ComposerSnapshot, MessageDelivery } from "happy-desktop-state";
+import type { ComposerSnapshot, MessageDelivery, SendKey } from "happy-desktop-state";
 import { Banner } from "./Banner";
 import { Button } from "./Button";
 import { commandPickerItems } from "./CommandPicker";
@@ -49,6 +49,8 @@ export type ConversationDockProps = {
     onComposerValueChange: (value: string) => void;
     /** What a plain send does while the agent is working; see `Composer.followUp`. */
     followUp?: MessageDelivery;
+    /** Which key sends; see `Composer.sendKey`. */
+    sendKey?: SendKey;
     running?: boolean;
     style?: CSSProperties;
 };
@@ -247,7 +249,8 @@ export function ConversationDock(props: ConversationDockProps) {
                     {...(props.composerFocusKey === undefined
                         ? {}
                         : { focusKey: props.composerFocusKey })}
-                    hint="Enter to send"
+                    hint={props.sendKey === "cmdEnter" ? "⌘ Enter to send" : "Enter to send"}
+                    {...(props.sendKey === undefined ? {} : { sendKey: props.sendKey })}
                     {...(composer.capabilities.mentions
                         ? {
                               mentions: mentionsOf(composer),

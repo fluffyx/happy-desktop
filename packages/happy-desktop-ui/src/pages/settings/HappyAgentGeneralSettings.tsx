@@ -1,4 +1,4 @@
-import type { MessageDelivery } from "happy-desktop-state";
+import { messageDeliveryOpposite, type MessageDelivery, type SendKey } from "happy-desktop-state";
 import { Banner } from "../../Banner";
 import { KeyCap } from "../../Badge";
 import { Box } from "../../Box";
@@ -46,6 +46,12 @@ export type HappyAgentGeneralSettingsProps = {
      */
     projectsHidden?: boolean;
     onProjectsHiddenChange?: (hidden: boolean) => void;
+    /**
+     * Which key sends a message: Enter, or ⌘ Enter to leave Enter for new lines.
+     * Absent where the host keeps no such choice, which offers no control.
+     */
+    sendKey?: SendKey;
+    onSendKeyChange?: (sendKey: SendKey) => void;
     /**
      * What a message sent while the agent works does. Absent where the host
      * keeps no such choice, which offers no control.
@@ -138,15 +144,15 @@ const scrollbarSegments = [
     { value: "always", label: "Always visible" },
 ];
 
+const sendKeySegments = [
+    { value: "enter", label: "Enter" },
+    { value: "cmdEnter", label: "⌘ Enter" },
+];
+
 const followUpSegments = [
     { value: "steer", label: "Steer" },
     { value: "queue", label: "Queue" },
 ];
-
-/** The other delivery, the one ⌘↵ sends with. */
-function followUpOpposite(followUp: MessageDelivery): MessageDelivery {
-    return followUp === "steer" ? "queue" : "steer";
-}
 
 const linkOpenSegments = [
     { value: "panel", label: "Side panel" },
@@ -278,33 +284,58 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                         : null}
                 </HappyAgentSettingsSection>
             ) : null}
-            {props.followUp !== undefined && props.onFollowUpChange ? (
+            {(props.sendKey !== undefined && props.onSendKeyChange) ||
+            (props.followUp !== undefined && props.onFollowUpChange) ? (
                 <HappyAgentSettingsSection
                     description="How messages are sent from the composer on this machine."
                     title="Conversations"
                 >
-                    <FormRow
-                        control={
-                            <SegmentedControl
-                                aria-label="Follow-up behavior"
-                                onChange={(value) =>
-                                    props.onFollowUpChange?.(value as MessageDelivery)
-                                }
-                                segments={followUpSegments}
-                                size="small"
-                                value={props.followUp}
-                            />
-                        }
-                        description="Steer the agent mid-turn, or queue messages to send after it finishes"
-                        detail={
-                            <>
-                                <span>Use</span>
-                                <KeyCap keys="⌘↵" />
-                                <span>to {followUpOpposite(props.followUp)}</span>
-                            </>
-                        }
-                        label="Follow-up behavior"
-                    />
+                    {props.sendKey !== undefined && props.onSendKeyChange ? (
+                        <FormRow
+                            control={
+                                <SegmentedControl
+                                    aria-label="Send messages with"
+                                    onChange={(value) => props.onSendKeyChange?.(value as SendKey)}
+                                    segments={sendKeySegments}
+                                    size="small"
+                                    value={props.sendKey}
+                                />
+                            }
+                            description="Choose ⌘ Enter to let Enter start new lines"
+                            detail={
+                                <>
+                                    <span>Use</span>
+                                    <KeyCap keys={props.sendKey === "enter" ? "⇧↵" : "↵"} />
+                                    <span>for a new line</span>
+                                </>
+                            }
+                            label="Send messages with"
+                        />
+                    ) : null}
+                    {props.followUp !== undefined && props.onFollowUpChange ? (
+                        <FormRow
+                            control={
+                                <SegmentedControl
+                                    aria-label="Follow-up behavior"
+                                    onChange={(value) =>
+                                        props.onFollowUpChange?.(value as MessageDelivery)
+                                    }
+                                    segments={followUpSegments}
+                                    size="small"
+                                    value={props.followUp}
+                                />
+                            }
+                            description="Steer the agent mid-turn, or queue messages to send after it finishes"
+                            detail={
+                                <>
+                                    <span>Use</span>
+                                    <KeyCap keys={props.sendKey === "cmdEnter" ? "⌥↵" : "⌘↵"} />
+                                    <span>to {messageDeliveryOpposite(props.followUp)}</span>
+                                </>
+                            }
+                            label="Follow-up behavior"
+                        />
+                    ) : null}
                 </HappyAgentSettingsSection>
             ) : null}
             <HappyAgentSettingsSection

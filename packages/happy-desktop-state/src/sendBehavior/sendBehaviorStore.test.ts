@@ -5,31 +5,52 @@ import {
     type SendBehaviorDocument,
 } from "./sendBehaviorStore.js";
 
-it("starts on steer, switches at once for every subscriber, and writes only the change", () => {
+it("starts on Return and steer, switches at once for every subscriber, and writes only the change", () => {
     const write = vi.fn<(document: SendBehaviorDocument) => void>();
     const store = sendBehaviorStoreCreate({ read: () => undefined, write });
     const listener = vi.fn();
     store.subscribe(listener);
-    expect(store.get().followUp).toBe("steer");
+    expect(store.get()).toEqual({ sendKey: "enter", followUp: "steer" });
 
     store.followUpUpdate("queue");
     expect(store.get().followUp).toBe("queue");
     expect(listener).toHaveBeenCalledTimes(1);
-    expect(write).toHaveBeenCalledWith({ followUp: "queue" });
+    expect(write).toHaveBeenLastCalledWith({ sendKey: "enter", followUp: "queue" });
+
+    // The send key is kept beside it, and each write carries both.
+    store.sendKeyUpdate("cmdEnter");
+    expect(store.get()).toEqual({ sendKey: "cmdEnter", followUp: "queue" });
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(write).toHaveBeenLastCalledWith({ sendKey: "cmdEnter", followUp: "queue" });
 
     // Saying the same thing again changes nothing.
     store.followUpUpdate("queue");
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(write).toHaveBeenCalledTimes(1);
+    store.sendKeyUpdate("cmdEnter");
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(write).toHaveBeenCalledTimes(2);
 });
 
-it("reads the stored choice back, and treats a malformed or refused record as steer", () => {
+it("reads the stored choice back, and treats a malformed or refused record as the defaults", () => {
     expect(
         sendBehaviorStoreCreate({
-            read: () => ({ followUp: "queue" }),
+            read: () => ({ sendKey: "cmdEnter", followUp: "queue" }),
             write: () => undefined,
-        }).get().followUp,
-    ).toBe("queue");
+        }).get(),
+    ).toEqual({ sendKey: "cmdEnter", followUp: "queue" });
+    // A record from before the send key existed keeps its follow-up and sends on Return.
+    expect(
+        sendBehaviorStoreCreate({
+            read: () => ({ followUp: "queue" }) as unknown as SendBehaviorDocument,
+            write: () => undefined,
+        }).get(),
+    ).toEqual({ sendKey: "enter", followUp: "queue" });
+    expect(
+        sendBehaviorStoreCreate({
+            read: () =>
+                ({ sendKey: "space", followUp: "queue" }) as unknown as SendBehaviorDocument,
+            write: () => undefined,
+        }).get().sendKey,
+    ).toBe("enter");
     expect(
         sendBehaviorStoreCreate({
             read: () => ({ followUp: "later" }) as unknown as SendBehaviorDocument,

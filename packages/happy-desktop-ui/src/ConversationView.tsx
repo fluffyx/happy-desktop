@@ -12,6 +12,7 @@ import {
     type ConversationRequestSubmission,
     type ConversationToolCall,
     type MessageDelivery,
+    type SendKey,
 } from "happy-desktop-state";
 import { type ActivityMotion, type ActivityTreatment } from "./AgentActivityRow";
 import { HAPPY_AGENT_ACTIVITY_CONTROL_TRANSCRIPT_HEIGHT } from "./HappyAgentActivityControl";
@@ -186,6 +187,8 @@ export type ConversationViewProps = {
     onComposerSend: (delivery: MessageDelivery) => void;
     /** What a plain send does while the agent is working; see `Composer.followUp`. */
     composerFollowUp?: MessageDelivery;
+    /** Which key sends; see `Composer.sendKey`. */
+    composerSendKey?: SendKey;
     /** Receives images picked through the composer's picker or pasted into it. */
     onComposerAttachmentsSelect?: (files: File[]) => void;
     /** Removes one attachment chip from the draft. */
@@ -929,6 +932,7 @@ export function ConversationView(props: ConversationViewProps) {
                 {...(props.composerFollowUp === undefined
                     ? {}
                     : { followUp: props.composerFollowUp })}
+                {...(props.composerSendKey === undefined ? {} : { sendKey: props.composerSendKey })}
                 running={props.running}
             />
 

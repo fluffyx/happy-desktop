@@ -7,6 +7,7 @@ import type {
     ProjectsVisibilityStore,
     SendBehaviorStore,
     MessageDelivery,
+    SendKey,
     GptLiveStore,
     HappyAgentInstructionsSnapshot,
     HappyAgentDebugLogSnapshot,
@@ -969,6 +970,9 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                         : {})}
                     {...(props.sendBehavior
                         ? {
+                              sendKey: sendBehavior.sendKey,
+                              onSendKeyChange: (sendKey: SendKey) =>
+                                  sendBehaviorStore.sendKeyUpdate(sendKey),
                               followUp: sendBehavior.followUp,
                               onFollowUpChange: (followUp: MessageDelivery) =>
                                   sendBehaviorStore.followUpUpdate(followUp),

@@ -25,7 +25,7 @@ import { EmojiPicker, type EmojiItem } from "./EmojiPicker";
 import { Icon, type IconName } from "./Icon";
 import { ScrollbarTracks, useScrollbarController } from "./Scrollbar";
 import { Tooltip } from "./Tooltip";
-import type { MessageDelivery } from "happy-desktop-state";
+import { messageDeliveryOpposite, type MessageDelivery, type SendKey } from "happy-desktop-state";
 /* ---- ContextChips ----------------------------------------------------- */
 export type ContextKind = "file" | "run";
 export type ContextItem = {
@@ -309,10 +309,17 @@ export type ComposerProps = {
     footerControl?: ReactNode;
     /**
      * The delivery a plain send uses while the agent is working: `steer` is read
-     * at the agent's next step, `queue` waits for its run to finish. ⌘↵ sends
-     * with the other one. Defaults to steer.
+     * at the agent's next step, `queue` waits for its run to finish. The other
+     * send key — ⌘↵, or ⌥↵ when ⌘↵ is what sends — uses the other one. Defaults
+     * to steer.
      */
     followUp?: MessageDelivery;
+    /**
+     * Which key sends. `enter` sends on ↵ and writes a new line on ⇧↵;
+     * `cmdEnter` sends on ⌘↵ and leaves ↵, ⇧↵ and ⌃↵ to write new lines.
+     * Defaults to `enter`.
+     */
+    sendKey?: SendKey;
     /** Receives the delivery the key or control that sent the draft stands for. */
     onSend: (delivery: MessageDelivery) => unknown;
     /**
@@ -470,6 +477,22 @@ function deliveryName(delivery: MessageDelivery): string {
 }
 
 /**
+ * What an unshifted ↵ sends, or `undefined` when it writes a new line. Sending
+ * on ↵ takes any modifier along and ⌘ turns the delivery over. Sending on ⌘↵
+ * needs ⌘ or ⌥ held, and ⌥ is the one that turns it over, so ↵ and ⌃↵ stay new
+ * lines. Either way, the key that turns the delivery over wins when both are held.
+ */
+function enterDelivery(
+    event: ReactKeyboardEvent<HTMLTextAreaElement>,
+    sendKey: SendKey,
+    followUp: MessageDelivery,
+): MessageDelivery | undefined {
+    if (sendKey === "enter") return event.metaKey ? messageDeliveryOpposite(followUp) : followUp;
+    if (event.altKey) return messageDeliveryOpposite(followUp);
+    return event.metaKey ? followUp : undefined;
+}
+
+/**
  * Message composer: focus-within surface card with a one-line resting textarea
  * that grows through eight lines, context chips, capability-driven file/mention/emoji actions,
  * a primary send control, and keyboard-accessible picker popovers.
@@ -509,15 +532,19 @@ export function Composer(props: ComposerProps) {
     const restoreFocusAfterSend = useRef(false);
     const [selection, setSelection] = useState({ start: 0, end: 0 });
     /*
-     * Whether ⌘ is being held on its own in the draft. While it is, the send
-     * control says what ⌘↵ would do. Tracked from the textarea's own key events:
-     * a chord such as ⌘V clears it at its second key, so only a deliberate hold
-     * ever shows the opposite delivery.
+     * Whether the key that turns the delivery over — ⌘, or ⌥ when ⌘↵ is what
+     * sends — is being held on its own in the draft. While it is, the send
+     * control says what that key with ↵ would do. Tracked from the textarea's
+     * own key events: a chord such as ⌘V clears it at its second key, so only
+     * a deliberate hold ever shows the opposite delivery.
      */
     const [oppositeHeld, setOppositeHeld] = useState(false);
     const busy = Boolean(props.disabled || props.pending);
     const followUp = props.followUp ?? "steer";
-    const opposite: MessageDelivery = followUp === "steer" ? "queue" : "steer";
+    const opposite = messageDeliveryOpposite(followUp);
+    const sendKey = props.sendKey ?? "enter";
+    const oppositeModifier = sendKey === "enter" ? "Meta" : "Alt";
+    const oppositeKeys = sendKey === "enter" ? "⌘↵" : "⌥↵";
     const mentionsSupported = () => props.mentions !== undefined;
     const mentions = () => props.mentions ?? [];
     const mentionQuery = () => props.mentionQuery ?? typedMentionQuery;
@@ -563,14 +590,15 @@ export function Composer(props: ComposerProps) {
      */
     /*
      * While the agent is working, sending is one of two acts, so the control
-     * names the one it will do — and, while ⌘ is held, the one ⌘↵ will. On an
-     * idle agent both are the same, and the control is just Send.
+     * names the one it will do — and, while ⌘ (or ⌥) is held, the one ⌘↵ (or
+     * ⌥↵) will. On an idle agent both are the same, and the control is just
+     * Send.
      */
     const sendDelivery = (): MessageDelivery => (oppositeHeld ? opposite : followUp);
     const followUpLabel = (): string | undefined => {
         if (!props.running) return undefined;
         if (oppositeHeld) return deliveryName(opposite);
-        return `${deliveryName(followUp)} · ⌘↵ to ${opposite}`;
+        return `${deliveryName(followUp)} · ${oppositeKeys} to ${opposite}`;
     };
     const stopShown = () =>
         Boolean(props.running && props.onStop) && (busy || props.value.trim().length === 0);
@@ -794,7 +822,12 @@ export function Composer(props: ComposerProps) {
         });
     };
     const onKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-        setOppositeHeld(event.key === "Meta" && !event.shiftKey && !event.altKey && !event.ctrlKey);
+        setOppositeHeld(
+            event.key === oppositeModifier &&
+                !event.shiftKey &&
+                !event.ctrlKey &&
+                (oppositeModifier === "Meta" ? !event.altKey : !event.metaKey),
+        );
         if (
             event.key === "Tab" &&
             event.shiftKey &&
@@ -887,17 +920,32 @@ export function Composer(props: ComposerProps) {
             return;
         }
         /*
-         * ↵ sends with the follow-up behavior and ⌘↵ with the other one. ⇧↵ is
-         * a new line. ⌃↵ and ⌥↵ keep sending as they always have. A composition
-         * in flight owns its Enter: it commits the candidate, never the draft.
+         * The send key sends with the follow-up behavior and its opposite
+         * modifier with the other one; see `enterDelivery`. ⇧↵ is always a new
+         * line, and so is every ↵ that sends nothing. The textarea writes those
+         * itself, except under ⌃, which not every engine treats as a new line,
+         * so that one is written here. A composition in flight owns its Enter:
+         * it commits the candidate, never the draft.
          */
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            const delivery = enterDelivery(event, sendKey, followUp);
+            if (delivery === undefined) {
+                if (!event.ctrlKey) return;
+                event.preventDefault();
+                const el = event.currentTarget;
+                const start = el.selectionStart;
+                props.onValueChange(
+                    `${el.value.slice(0, start)}\n${el.value.slice(el.selectionEnd)}`,
+                );
+                focusAt(start + 1);
+                return;
+            }
             event.preventDefault();
-            send(event.metaKey ? opposite : followUp);
+            send(delivery);
         }
     };
     const onKeyUp = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-        if (event.key === "Meta") setOppositeHeld(false);
+        if (event.key === oppositeModifier) setOppositeHeld(false);
     };
     const onInput = (event: FormEvent<HTMLTextAreaElement>) => {
         // A new query is a new list; start its highlight at the top.
