@@ -558,6 +558,8 @@ export interface GroupSession {
     parentSessionId?: string;
     /** Whether the agent's run is stopped on a question only the person can answer. */
     pendingQuestion: boolean;
+    /** The question this session's run is waiting on, as the host states it on the agent. */
+    pendingQuestionId?: string;
     permissionMode: string;
     scope:
         | { kind: "project"; projectId: string }

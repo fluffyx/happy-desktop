@@ -2518,8 +2518,10 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
         directory.happyAgents.find((happyAgent) => happyAgent.id === happyAgentId);
     // The pinned row carries a live count, so the window subscribes to the
     // addressed Happy Agent's inbox whether or not the inbox itself is open: the point of
-    // the count is to be seen while the reader is doing something else.
-    const inboxStore = active?.session?.inbox ?? happyAgentInboxStoreNoop;
+    // the count is to be seen while the reader is doing something else. Without
+    // experimental features there is no row to count for, so no feed is opened.
+    const inboxStore =
+        (experimental ? active?.session?.inbox : undefined) ?? happyAgentInboxStoreNoop;
     const inbox = useSyncExternalStore(inboxStore.subscribe, inboxStore.get, inboxStore.get);
     const daemonStore = props.daemon ?? sidebarDaemonStoreNoop;
     const daemon = useSyncExternalStore(daemonStore.subscribe, daemonStore.get, daemonStore.get);

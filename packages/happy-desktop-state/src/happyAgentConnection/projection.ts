@@ -833,6 +833,7 @@ function projectAgent(
         // up.
         ...(agent.parentAgentId === null ? {} : { parentSessionId: agent.parentAgentId }),
         pendingQuestion: agent.pendingQuestionId !== null,
+        ...(agent.pendingQuestionId === null ? {} : { pendingQuestionId: agent.pendingQuestionId }),
         permissionMode: mode.permissionMode,
         scope,
         providerId: mode.providerId,
