@@ -413,6 +413,28 @@ it("moves an open draft off a model switched off under it, keeping its access mo
     ).toEqual(["grok/grok-4.7"]);
 });
 
+it("keeps a draft's switched-off models when the catalog changes without naming them", () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const before = happyAgentModelCatalogProject(daemon.configGet());
+    const after = happyAgentModelCatalogProject(
+        configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+    );
+    const { store: draft, writer } = happyAgentSessionDraftStoreOwnedCreate({
+        catalog: before,
+        selection: { providerId: "grok", modelId: "grok-4.7", permissionMode: "auto" },
+        disabledModels: new Set([happyAgentModelKey("test-provider", "test-model")]),
+    });
+    const offered = () =>
+        draft.get().menus.modelOptions.map((option) => `${option.providerId}/${option.modelId}`);
+
+    writer.catalogChanged(after);
+    expect(offered()).toEqual(["grok/grok-4.7"]);
+
+    // An empty set is how a caller clears them.
+    writer.catalogChanged(after, new Set());
+    expect(offered()).toEqual(["test-provider/test-model", "grok/grok-4.7"]);
+});
+
 /** A real session state from the fake daemon, standing on a model the test names. */
 async function sessionStateRead(overrides: Partial<SessionState>): Promise<SessionState> {
     const daemon = fakeHappyAgentDaemonCreate();
