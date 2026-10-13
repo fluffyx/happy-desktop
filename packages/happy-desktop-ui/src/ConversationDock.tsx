@@ -163,6 +163,11 @@ export function ConversationDock(props: ConversationDockProps) {
         props.onComposerAttachmentRemove?.(attachmentId);
     };
     const followUp = props.followUp ?? "steer";
+    // A retry sends the failed message the way it was sent, not the way the
+    // setting would send a new one.
+    const retryDelivery =
+        (composer.submission.status === "failed" ? composer.submission.delivery : undefined) ??
+        followUp;
     const composerSend = (delivery: MessageDelivery) => {
         setPreviewAttachmentId(null);
         props.onComposerSend(delivery);
@@ -228,7 +233,10 @@ export function ConversationDock(props: ConversationDockProps) {
                     action={
                         props.disabled || props.submitDisabled
                             ? undefined
-                            : { label: "Retry", onClick: () => composerSend(followUp) }
+                            : {
+                                  label: "Retry",
+                                  onClick: () => composerSend(retryDelivery),
+                              }
                     }
                     data-testid="conversation-submission-error"
                     tone="danger"

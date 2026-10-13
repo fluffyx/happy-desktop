@@ -828,6 +828,17 @@ export function Composer(props: ComposerProps) {
                 !event.ctrlKey &&
                 (oppositeModifier === "Meta" ? !event.altKey : !event.metaKey),
         );
+        /*
+         * A composition in flight owns its Enter: it commits the candidate, and
+         * never picks a command or a mention or sends the draft. 229 is the
+         * legacy IME "processing" keyCode some engines still report when
+         * `isComposing` is already false.
+         */
+        if (
+            event.key === "Enter" &&
+            (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
+        )
+            return;
         if (
             event.key === "Tab" &&
             event.shiftKey &&
@@ -924,18 +935,20 @@ export function Composer(props: ComposerProps) {
          * modifier with the other one; see `enterDelivery`. ⇧↵ is always a new
          * line, and so is every ↵ that sends nothing. The textarea writes those
          * itself, except under ⌃, which not every engine treats as a new line,
-         * so that one is written here. A composition in flight owns its Enter:
-         * it commits the candidate, never the draft.
+         * so that one is written here — never while a send is in flight, when
+         * the draft is read-only and must stay the text being sent.
          */
-        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+        if (event.key === "Enter" && !event.shiftKey) {
             const delivery = enterDelivery(event, sendKey, followUp);
             if (delivery === undefined) {
                 if (!event.ctrlKey) return;
                 event.preventDefault();
+                if (busy) return;
                 const el = event.currentTarget;
                 const start = el.selectionStart;
                 props.onValueChange(
-                    `${el.value.slice(0, start)}\n${el.value.slice(el.selectionEnd)}`,
+                    `${el.value.slice(0, start)}
+${el.value.slice(el.selectionEnd)}`,
                 );
                 focusAt(start + 1);
                 return;
