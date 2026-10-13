@@ -36,9 +36,16 @@ export const desktopConfigEmpty: DesktopConfig = {
     version: CONFIG_VERSION,
 };
 
-/** The one desktop config path shared by packaged Electron and browser development. */
+/**
+ * The one desktop config path shared by packaged Electron and browser development.
+ *
+ * Fluffy keeps its preferences apart from the official Happy app's
+ * `~/.happy/desktop/config.json`: the validator resets every preference when it
+ * meets a key it does not know, so two builds sharing one file could each wipe
+ * the other's. Happy Agent's shared home under `~/.happy` is untouched.
+ */
 export function desktopConfigPath(homeDirectory = homedir()): string {
-    return join(homeDirectory, ".happy", "desktop", "config.json");
+    return join(homeDirectory, ".fluffy", "desktop", "config.json");
 }
 
 /**
