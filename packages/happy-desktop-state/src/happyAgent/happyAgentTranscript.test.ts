@@ -566,7 +566,9 @@ it("shows what a background terminal runs above what was typed into it", () => {
             ]),
         ]),
     ];
-    expect(format(chat, "full")).toBe("## Assistant\n\n    write_stdin:\n        pnpm dev\n        q");
+    expect(format(chat, "full")).toBe(
+        "## Assistant\n\n    write_stdin:\n        pnpm dev\n        q",
+    );
 });
 
 it("lists the other agents a history names, for naming them before it is written", () => {
