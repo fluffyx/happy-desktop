@@ -120,6 +120,8 @@ function workspace(): HappyAgentWorkspaceStore {
         get: () => snapshot,
         panel: panel(),
         subscribe: () => () => undefined,
+        // No local bridges here, so the workspace offers no Devices view.
+        deviceBridgeSupport: () => undefined,
         conversationOpen: () => undefined,
         conversationClose: () => undefined,
         conversationListRetry: () => undefined,

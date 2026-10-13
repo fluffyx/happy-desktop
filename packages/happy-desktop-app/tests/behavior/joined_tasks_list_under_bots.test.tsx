@@ -170,6 +170,8 @@ function workspace(actions: TaskActions, listing: Listing): HappyAgentWorkspaceS
             [Symbol.dispose]: () => undefined,
         } as unknown as HappyAgentPanelStore,
         subscribe: () => () => undefined,
+        // No local bridges here, so the workspace offers no Devices view.
+        deviceBridgeSupport: () => undefined,
         ...actions,
         [Symbol.dispose]: () => undefined,
     } as unknown as HappyAgentWorkspaceStore;
