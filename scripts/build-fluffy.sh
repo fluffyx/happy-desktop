@@ -49,12 +49,12 @@ if [ "$UNSIGNED" -eq 1 ]; then
   echo "==> Building ad-hoc signed Fluffy ($ARCH), not notarized…"
   node scripts/build-mac-apps.mjs --flavor standard --arch "$ARCH" --unsigned
 else
-  echo "==> Checking the Developer ID identity for team $TEAM_ID…"
+  echo "==> Checking the Developer ID identity for team ${TEAM_ID}…"
   if ! security find-identity -v -p codesigning | grep "Developer ID Application:" | grep -q "($TEAM_ID)"; then
     echo "error: no Developer ID Application identity for team $TEAM_ID in Keychain." >&2
     exit 1
   fi
-  echo "==> Checking notary keychain profile $NOTARY_PROFILE…"
+  echo "==> Checking notary keychain profile ${NOTARY_PROFILE}…"
   if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null; then
     echo "error: notary keychain profile $NOTARY_PROFILE is missing or rejected." >&2
     echo "       Create it once with: xcrun notarytool store-credentials $NOTARY_PROFILE --help" >&2
