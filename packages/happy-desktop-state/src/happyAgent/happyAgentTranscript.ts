@@ -347,6 +347,10 @@ function toolKept(block: ToolCallBlock): boolean {
  */
 function toolConcise(block: ToolCallBlock, input: HappyAgentTranscriptInput): string {
     const presented = presentedLines(block);
+    // TODO: A `request_user_input` call is copied raw — its arguments and result
+    // as JSON. It should read as text instead: the question, its options, and
+    // the reader's answer. That needs Happy Agent to give questions a typed
+    // presentation, so this can render that rather than parse the raw call.
     return presented === undefined ? toolFull(block, input) : presented;
 }
 
