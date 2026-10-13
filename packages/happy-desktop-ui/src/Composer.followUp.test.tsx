@@ -158,7 +158,9 @@ it("never sends or picks a command from an Enter that commits an IME composition
     // The open picker kept its highlight and picked nothing.
     expect(commands).toEqual([]);
     expect(
-        view.container.querySelector('[data-testid="ime-command"] [data-happy-desktop-ui="composer-popover"]'),
+        view.container.querySelector(
+            '[data-testid="ime-command"] [data-happy-desktop-ui="composer-popover"]',
+        ),
     ).not.toBeNull();
 });
 
