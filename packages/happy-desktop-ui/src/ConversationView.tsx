@@ -756,14 +756,37 @@ export function ConversationView(props: ConversationViewProps) {
                                                     label={group.caption.label}
                                                 />
                                             ) : null}
-                                            {group.entries.map((entry) => (
+                                            {group.entries.map((entry, index) => (
                                                 <ConversationEntryView
-                                                    entry={entry}
                                                     key={
                                                         entry.kind === "message"
                                                             ? entry.message.id
                                                             : entry.id
                                                     }
+                                                    entry={entry}
+                                                    // Grouped exactly as `footerHeight` measures it.
+                                                    grouped={
+                                                        entry.kind === "message"
+                                                            ? conversationMessageGrouped(
+                                                                  group.entries,
+                                                                  index,
+                                                              )
+                                                            : undefined
+                                                    }
+                                                    onImageOpen={props.onImageOpen}
+                                                    onAttachmentOpen={props.onAttachmentOpen}
+                                                    {...(props.onFileOpen
+                                                        ? { onFileOpen: props.onFileOpen }
+                                                        : {})}
+                                                    {...(props.onFileLinkOpen
+                                                        ? { onFileLinkOpen: props.onFileLinkOpen }
+                                                        : {})}
+                                                    {...(props.onLinkOpen
+                                                        ? { onLinkOpen: props.onLinkOpen }
+                                                        : {})}
+                                                    {...(props.linkOpenDefault
+                                                        ? { linkOpenDefault: props.linkOpenDefault }
+                                                        : {})}
                                                     {...(props.references
                                                         ? { references: props.references }
                                                         : {})}

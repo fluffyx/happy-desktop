@@ -115,29 +115,51 @@ it("sends with the follow-up behavior on ↵ and the other one on ⌘↵", async
     expect(commandSends).toEqual([]);
 });
 
-it("never sends from an Enter that commits an IME composition", async () => {
+it("never sends or picks a command from an Enter that commits an IME composition", async () => {
     const sends: MessageDelivery[] = [];
+    const commands: string[] = [];
     const view = createRenderer();
     view.render(() => <Harness initial="にほん" sends={sends} testid="ime" />, {
         width: 600,
         height: 200,
         padding: 20,
-    });
+    }).render(
+        () => <Harness commands={commands} initial="/ag" sends={sends} testid="ime-command" />,
+        { width: 600, height: 320, padding: 20 },
+    );
     await view.ready();
-    const textarea = view.$('[data-happy-desktop-ui="composer-textarea"]')
-        .element as HTMLTextAreaElement;
-    textarea.focus();
-    for (const metaKey of [false, true])
-        textarea.dispatchEvent(
-            new KeyboardEvent("keydown", {
-                bubbles: true,
-                cancelable: true,
-                isComposing: true,
-                key: "Enter",
-                metaKey,
-            }),
-        );
+    /*
+     * Either signal marks the Enter as the composition's: `isComposing`, or the
+     * legacy 229 keyCode some engines report once it is already false. The
+     * constructor does not take a keyCode in every engine, so it is set on the
+     * event itself.
+     */
+    const composingEnter = (metaKey: boolean, signal: "isComposing" | "keyCode") => {
+        const event = new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            isComposing: signal === "isComposing",
+            key: "Enter",
+            metaKey,
+        });
+        if (signal === "keyCode") Object.defineProperty(event, "keyCode", { value: 229 });
+        return event;
+    };
+    for (const testid of ["ime", "ime-command"]) {
+        const textarea = view.$(
+            `[data-testid="${testid}"] [data-happy-desktop-ui="composer-textarea"]`,
+        ).element as HTMLTextAreaElement;
+        textarea.focus();
+        for (const metaKey of [false, true])
+            for (const signal of ["isComposing", "keyCode"] as const)
+                textarea.dispatchEvent(composingEnter(metaKey, signal));
+    }
     expect(sends).toEqual([]);
+    // The open picker kept its highlight and picked nothing.
+    expect(commands).toEqual([]);
+    expect(
+        view.container.querySelector('[data-testid="ime-command"] [data-happy-desktop-ui="composer-popover"]'),
+    ).not.toBeNull();
 });
 
 it("names the follow-up on the send control while the agent works, and ⌘ held shows the other", async () => {

@@ -114,10 +114,23 @@ export type ComposerAttachment =
           readonly comments: readonly ComposerReviewComment[];
       };
 
+/**
+ * A send in flight or refused. `delivery` is the one the sender chose, kept so a
+ * retry sends the same way; a shell command has none.
+ */
 export type ComposerSubmission =
     | { readonly status: "idle" }
-    | { readonly status: "pending"; readonly revision: number }
-    | { readonly status: "failed"; readonly revision: number; readonly error: UserError };
+    | {
+          readonly status: "pending";
+          readonly revision: number;
+          readonly delivery?: MessageDelivery;
+      }
+    | {
+          readonly status: "failed";
+          readonly revision: number;
+          readonly error: UserError;
+          readonly delivery?: MessageDelivery;
+      };
 
 export interface ComposerSnapshot {
     /** Locally staged generated text; never eligible for draft autosave or question answering. */
@@ -490,7 +503,7 @@ export function composerStoreCreate(
                     ? commandInvocationOf(previous.text, previous.capabilities.commands)
                     : undefined;
             if (commandInvocation !== undefined) {
-                set({ submission: { status: "pending", revision: previous.revision } });
+                set({ submission: { status: "pending", revision: previous.revision, delivery } });
                 output({
                     type: "commandInvoked",
                     scopeId,
@@ -517,7 +530,7 @@ export function composerStoreCreate(
                 });
                 return;
             }
-            set({ submission: { status: "pending", revision: previous.revision } });
+            set({ submission: { status: "pending", revision: previous.revision, delivery } });
             output({
                 type: "textSubmitted",
                 scopeId,
@@ -626,6 +639,9 @@ export function composerStoreCreate(
                                 status: "failed",
                                 revision: event.revision,
                                 error: event.error,
+                                ...(snapshot.submission.delivery === undefined
+                                    ? {}
+                                    : { delivery: snapshot.submission.delivery }),
                             },
                         });
             }

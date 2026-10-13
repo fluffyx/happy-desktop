@@ -795,6 +795,17 @@ export function Composer(props: ComposerProps) {
     };
     const onKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
         setOppositeHeld(event.key === "Meta" && !event.shiftKey && !event.altKey && !event.ctrlKey);
+        /*
+         * A composition in flight owns its Enter: it commits the candidate, and
+         * never picks a command or a mention or sends the draft. 229 is the
+         * legacy IME "processing" keyCode some engines still report when
+         * `isComposing` is already false.
+         */
+        if (
+            event.key === "Enter" &&
+            (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
+        )
+            return;
         if (
             event.key === "Tab" &&
             event.shiftKey &&
@@ -888,10 +899,9 @@ export function Composer(props: ComposerProps) {
         }
         /*
          * ↵ sends with the follow-up behavior and ⌘↵ with the other one. ⇧↵ is
-         * a new line. ⌃↵ and ⌥↵ keep sending as they always have. A composition
-         * in flight owns its Enter: it commits the candidate, never the draft.
+         * a new line. ⌃↵ and ⌥↵ keep sending as they always have.
          */
-        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+        if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             send(event.metaKey ? opposite : followUp);
         }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { UserError } from "../../types.js";
 import { composerStoreCreate, type ComposerOutput } from "./composerState.js";
 
 describe("composerState slash commands", () => {
@@ -73,5 +74,24 @@ describe("composerState delivery", () => {
             arguments: "the diff",
             delivery: "queue",
         });
+    });
+
+    it("keeps the chosen delivery on a refused send, so a retry sends it the same way", () => {
+        const store = composerStoreCreate("session-a", {
+            capabilities: { shellMode: false, commands: [], mentions: false },
+        });
+
+        store.getState().textUpdate("after this, run the tests");
+        store.getState().textSubmit("queue");
+        const pending = store.getState().submission;
+        expect(pending).toMatchObject({ status: "pending", delivery: "queue" });
+        if (pending.status !== "pending") return;
+
+        store.getState().composerInput({
+            type: "submissionFailed",
+            revision: pending.revision,
+            error: new UserError("Happy Agent refused the message."),
+        });
+        expect(store.getState().submission).toMatchObject({ status: "failed", delivery: "queue" });
     });
 });

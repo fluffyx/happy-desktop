@@ -8288,10 +8288,6 @@ export function happyAgentWorkspaceStoreCreate(
 }
 
 /**
- * Whether a freshly projected conversation is indistinguishable from the current
- * one, so the existing object — and every React subtree bound to it — is kept.
- */
-/**
  * How text the reader did not type into a composer is sent: a slot's message,
  * or the first words of a conversation just made. It keeps the delivery every
  * send had before the reader could choose one; a new agent is idle, where steer
@@ -8353,6 +8349,10 @@ function conversationAcquiring(
     };
 }
 
+/**
+ * Whether a freshly projected conversation is indistinguishable from the current
+ * one, so the existing object — and every React subtree bound to it — is kept.
+ */
 function conversationEqual(
     left: HappyAgentConversationSnapshot,
     right: HappyAgentConversationSnapshot,
