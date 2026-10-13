@@ -2,6 +2,7 @@ import type { HappyAgentSync } from "../happyAgentConnection/happyAgentSync.js";
 import { UserError } from "../types.js";
 import { happyAgentMenusDerive } from "./happyAgentMenusStore.js";
 import { happyAgentModelCatalogProject } from "./happyAgentProject.js";
+import { happyAgentModelKey, type HappyAgentModelKey } from "./happyAgentSettingsStore.js";
 import { deepEqual } from "./happyAgentSupport.js";
 import {
     happyAgentSelectionModelUpdate,
@@ -43,13 +44,30 @@ export interface HappyAgentModelPreferenceDefault extends HappyAgentModelPrefere
 
 /** Complete machine-local model choices supplied by the desktop host. */
 export interface HappyAgentModelPreferenceDocument {
+    /**
+     * The model chosen in Settings. While set, every new session starts on it
+     * and a model picked in a chat box changes only that session. Absent means
+     * "Last used model": new sessions start on `lastPickedModel`.
+     */
     readonly defaultSelection?: HappyAgentModelPreferenceDefault;
     /** Reasoning level configured for new sessions before a model-specific fallback. */
     readonly defaultEffort?: HappyAgentThinkingLevel;
     /** Access mode configured for a new session, independent of its model. */
     readonly defaultPermissionMode?: HappyAgentPermissionMode;
+    /** The model last picked in a chat box, kept only while Settings names none. */
     readonly lastPickedModel?: HappyAgentModelPreferenceIdentity;
+    /**
+     * Where Last used model starts when the last pick is unavailable: the
+     * Settings model an earlier version kept beside the pick, which it fell
+     * back to the same way.
+     */
+    readonly lastPickedFallback?: HappyAgentModelPreferenceDefault;
     readonly preferences: HappyAgentModelPreferences;
+    /**
+     * Models switched off in Settings, which the pickers leave out and a new
+     * session does not start on. Hosts hold this in memory; it is not saved.
+     */
+    readonly disabledModels?: readonly HappyAgentModelKey[];
 }
 
 export interface HappyAgentModelPreferencePersistence {
@@ -66,8 +84,11 @@ export type HappyAgentModelStoreSnapshot =
           readonly type: "ready";
           readonly catalog: HappyAgentModelCatalog;
           readonly defaultSelection: HappyAgentSelection;
+          /** What a new session starts with: the Settings model, else the last pick. */
           readonly lastUsedSelection: HappyAgentSelection;
           readonly menus: HappyAgentMenusSnapshot;
+          /** Models switched off in Settings; the same set until its contents change. */
+          readonly disabledModels: ReadonlySet<HappyAgentModelKey>;
       };
 
 export type HappyAgentModelStoreReadySnapshot = Extract<
@@ -96,7 +117,10 @@ export interface HappyAgentModelStore {
      * and re-derives the defaults from it without touching what was last used.
      */
     catalogChanged(catalog: HappyAgentModelCatalog): void;
-    /** Records a user-selected model/effort/access/tier as the next-session default. */
+    /**
+     * Records a user-selected model/effort/access/tier as the next-session
+     * default. Does nothing while Settings names the model new sessions start on.
+     */
     selectionUsed(selection: HappyAgentSelection): void;
     /** Selects a model with that model's last locally remembered effort and speed. */
     modelSelect(current: HappyAgentSelection, input: HappyAgentModelSelection): HappyAgentSelection;
@@ -150,6 +174,7 @@ export function happyAgentModelStoreCreate(
     let loadPromise: Promise<HappyAgentModelStoreReadySnapshot> | undefined;
     let document: HappyAgentModelPreferenceDocument = { preferences: {} };
     let preferences = document.preferences;
+    let disabledModels: ReadonlySet<HappyAgentModelKey> = new Set();
     let preferenceUnsubscribe: (() => void) | undefined;
     let writingPreferences = false;
     const effortRemembered = (providerId: string, modelId: string) =>
@@ -160,12 +185,29 @@ export function happyAgentModelStoreCreate(
         for (const listener of listeners) listener();
     };
 
+    /**
+     * Takes the host's current document. The switched-off set keeps its
+     * reference while its contents stand still, so the many writes that change
+     * nothing about it (every pick in a chat box) leave every picker alone.
+     */
+    const documentAdopt = (next: HappyAgentModelPreferenceDocument): void => {
+        document = next;
+        preferences = next.preferences;
+        const listed = next.disabledModels ?? [];
+        if (listed.length !== disabledModels.size || listed.some((key) => !disabledModels.has(key)))
+            disabledModels = new Set(listed);
+    };
+
     const preferencesReconcile = (): void => {
         if (writingPreferences) return;
-        document = options.preferencePersistence?.read() ?? { preferences: {} };
-        preferences = document.preferences;
+        documentAdopt(options.preferencePersistence?.read() ?? { preferences: {} });
         if (snapshot.type !== "ready") return;
-        const selections = selectionsFromDocument(snapshot.catalog, document, snapshot);
+        const selections = selectionsFromDocument(
+            snapshot.catalog,
+            document,
+            disabledModels,
+            snapshot,
+        );
         publish({
             ...snapshot,
             ...selections,
@@ -173,7 +215,9 @@ export function happyAgentModelStoreCreate(
                 snapshot.catalog,
                 selections.lastUsedSelection,
                 effortRemembered,
+                disabledModels,
             ),
+            disabledModels,
         });
     };
 
@@ -187,13 +231,20 @@ export function happyAgentModelStoreCreate(
         const selections = selectionsFromDocument(
             catalog,
             document,
+            disabledModels,
             snapshot.type === "ready" ? snapshot : undefined,
         );
         publish({
             type: "ready",
             catalog,
             ...selections,
-            menus: happyAgentMenusDerive(catalog, selections.lastUsedSelection, effortRemembered),
+            menus: happyAgentMenusDerive(
+                catalog,
+                selections.lastUsedSelection,
+                effortRemembered,
+                disabledModels,
+            ),
+            disabledModels,
         });
     };
 
@@ -277,8 +328,7 @@ export function happyAgentModelStoreCreate(
             return () => listeners.delete(listener);
         },
         load() {
-            document = options.preferencePersistence?.read() ?? document;
-            preferences = document.preferences;
+            documentAdopt(options.preferencePersistence?.read() ?? document);
             preferenceUnsubscribe ??=
                 options.preferencePersistence?.subscribe?.(preferencesReconcile);
             if (snapshot.type === "ready") return Promise.resolve(snapshot);
@@ -294,8 +344,7 @@ export function happyAgentModelStoreCreate(
                     // A newer catalog already arrived while this read was out.
                     if (generation !== catalogGeneration && snapshot.type === "ready")
                         return snapshot;
-                    document = options.preferencePersistence?.read() ?? document;
-                    preferences = document.preferences;
+                    documentAdopt(options.preferencePersistence?.read() ?? document);
                     catalogAdopt(catalog);
                     return snapshot as HappyAgentModelStoreReadySnapshot;
                 },
@@ -318,6 +367,9 @@ export function happyAgentModelStoreCreate(
         },
         selectionUsed(selection) {
             if (snapshot.type !== "ready") return;
+            // A model chosen in Settings is where every new session starts, so
+            // a pick in a chat box belongs to its own session and is not kept.
+            if (document.defaultSelection) return;
             const provider = preferences[selection.providerId] ?? {};
             preferences = {
                 ...preferences,
@@ -343,10 +395,24 @@ export function happyAgentModelStoreCreate(
             } finally {
                 writingPreferences = false;
             }
+            // A conversation kept on a switched-off model may still be used,
+            // but the next session falls back as it would from any unavailable
+            // pick; the pick itself is kept for when the model is switched on.
+            const lastUsedSelection = disabledModels.has(
+                happyAgentModelKey(selection.providerId, selection.modelId),
+            )
+                ? selectionsFromDocument(snapshot.catalog, document, disabledModels, snapshot)
+                      .lastUsedSelection
+                : selection;
             publish({
                 ...snapshot,
-                lastUsedSelection: selection,
-                menus: happyAgentMenusDerive(snapshot.catalog, selection, effortRemembered),
+                lastUsedSelection,
+                menus: happyAgentMenusDerive(
+                    snapshot.catalog,
+                    lastUsedSelection,
+                    effortRemembered,
+                    disabledModels,
+                ),
             });
         },
         modelSelect(current, input) {
@@ -402,9 +468,10 @@ export function happyAgentModelStoreCreate(
 function selectionsFromDocument(
     catalog: HappyAgentModelCatalog,
     document: HappyAgentModelPreferenceDocument,
+    disabledModels: ReadonlySet<HappyAgentModelKey>,
     current?: HappyAgentModelStoreReadySnapshot,
 ): Pick<HappyAgentModelStoreReadySnapshot, "defaultSelection" | "lastUsedSelection"> {
-    const catalogDefault = happyAgentSessionSelectionDefault(catalog);
+    const catalogDefault = happyAgentSessionSelectionDefault(catalog, disabledModels);
     const catalogDefaultModel = catalog.providers
         .find((provider) => provider.id === catalogDefault.providerId)
         ?.models.find((model) => model.id === catalogDefault.modelId);
@@ -427,18 +494,34 @@ function selectionsFromDocument(
             catalog,
             document.defaultSelection,
             document.preferences,
+            disabledModels,
             defaultPermissionMode,
             document.defaultEffort,
         ) ?? catalogSelection;
-    const lastUsedSelection =
-        preferenceSelection(
-            catalog,
-            document.lastPickedModel,
-            document.preferences,
-            document.defaultPermissionMode ??
-                current?.lastUsedSelection.permissionMode ??
-                defaultSelection.permissionMode,
-        ) ?? defaultSelection;
+    // A model chosen in Settings pins every new session; without one, the last
+    // pick in a chat box carries over.
+    const lastUsedPermissionMode =
+        document.defaultPermissionMode ??
+        current?.lastUsedSelection.permissionMode ??
+        defaultSelection.permissionMode;
+    const lastUsedSelection = document.defaultSelection
+        ? defaultSelection
+        : (preferenceSelection(
+              catalog,
+              document.lastPickedModel,
+              document.preferences,
+              disabledModels,
+              lastUsedPermissionMode,
+          ) ??
+          preferenceSelection(
+              catalog,
+              document.lastPickedFallback,
+              document.preferences,
+              disabledModels,
+              lastUsedPermissionMode,
+              document.defaultEffort,
+          ) ??
+          defaultSelection);
     return { defaultSelection, lastUsedSelection };
 }
 
@@ -446,13 +529,20 @@ function preferenceSelection(
     catalog: HappyAgentModelCatalog,
     identity: HappyAgentModelPreferenceIdentity | undefined,
     preferences: HappyAgentModelPreferences,
+    disabledModels: ReadonlySet<HappyAgentModelKey>,
     permissionMode: HappyAgentSelection["permissionMode"],
     defaultEffort?: HappyAgentThinkingLevel,
 ): HappyAgentSelection | undefined {
     if (!identity) return undefined;
     const provider = catalog.providers.find((candidate) => candidate.id === identity.providerId);
     const model = provider?.models.find((candidate) => candidate.id === identity.modelId);
-    if (!provider || provider.disabledReason !== undefined || provider.hidden || !model)
+    if (
+        !provider ||
+        provider.disabledReason !== undefined ||
+        provider.hidden ||
+        !model ||
+        disabledModels.has(happyAgentModelKey(identity.providerId, identity.modelId))
+    )
         return undefined;
     const candidateEffort =
         "effort" in identity ? (identity as HappyAgentModelPreferenceDefault).effort : undefined;

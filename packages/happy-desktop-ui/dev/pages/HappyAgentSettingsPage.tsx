@@ -267,6 +267,7 @@ Ask before touching anything outside the working directory.
 `;
 
 const modelOptions = [
+    { label: "Last used model", value: "last-used" },
     { label: "Codex · GPT-5.6 Sol", value: "codex:openai/gpt-5.6-sol" },
     { label: "Codex · GPT-5.6 Terra", value: "codex:openai/gpt-5.6-terra" },
     { label: "Claude · Opus 5 1M", value: "claude:anthropic/opus-5" },
@@ -616,6 +617,43 @@ export function HappyAgentSettingsBlueprintPage() {
                         permissionMode="auto"
                         permissionModeOptions={permissionModeOptions}
                         projectsHidden
+                        scrollbarVisibility="automatic"
+                        titleShimmerEnabled={false}
+                    />
+                </HappyAgentSettingsShell>
+            </FullScreenSpecimen>
+            <FullScreenSpecimen
+                detail="No model chosen: new sessions start on the last chat-box pick, so effort follows it"
+                label="Happy Agent settings — general, Last used model"
+                number="01-last-used"
+            >
+                <HappyAgentSettingsShell
+                    activeCategoryId="general"
+                    categories={categories}
+                    description="How this window looks and what a new session starts with"
+                    onCategorySelect={noop}
+                    onClose={noop}
+                    title="General"
+                >
+                    <HappyAgentGeneralSettings
+                        appearance="system"
+                        defaultModelKey="last-used"
+                        effort="medium"
+                        effortFollowsLastPick
+                        effortOptions={effortOptions}
+                        experimentalFeaturesEnabled={false}
+                        modelOptions={modelOptions}
+                        onAppearanceChange={noop}
+                        onExperimentalFeaturesChange={noop}
+                        onDefaultModelChange={noop}
+                        onEffortChange={noop}
+                        onPermissionModeChange={noop}
+                        onScrollbarVisibilityChange={noop}
+                        onLinkOpenPlacementChange={noop}
+                        linkOpenPlacement="panel"
+                        onTitleShimmerChange={noop}
+                        permissionMode="auto"
+                        permissionModeOptions={permissionModeOptions}
                         scrollbarVisibility="automatic"
                         titleShimmerEnabled={false}
                     />

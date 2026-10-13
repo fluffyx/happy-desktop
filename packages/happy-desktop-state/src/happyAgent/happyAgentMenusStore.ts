@@ -5,6 +5,7 @@ import {
     happyAgentPermissionLabel,
     happyAgentThinkingLabel,
 } from "./happyAgentSupport.js";
+import { happyAgentModelKey, type HappyAgentModelKey } from "./happyAgentSettingsStore.js";
 import type {
     HappyAgentCurrentAccount,
     HappyAgentEffortOption,
@@ -32,12 +33,14 @@ const PERMISSION_MODES: readonly HappyAgentPermissionMode[] = [
  * Pure derivation of picker options from the model catalog and the current
  * session selection. Kept side-effect free so both the standalone menus store
  * and the chat store can compute the same option lists from their own inputs.
- * `remembered` reports the effort last chosen per model, when the caller keeps one.
+ * `remembered` reports the effort last chosen per model, when the caller keeps one;
+ * `disabledModels` names the models the reader switched off in Settings.
  */
 export function happyAgentMenusDerive(
     catalog: HappyAgentModelCatalog,
     selection: HappyAgentSelection,
     remembered?: HappyAgentModelEffortRemembered,
+    disabledModels?: ReadonlySet<HappyAgentModelKey>,
 ): HappyAgentMenusSnapshot {
     const modelOptions: HappyAgentModelOption[] = [];
     const selectedProvider = catalog.providers.find(
@@ -71,8 +74,10 @@ export function happyAgentMenusDerive(
         for (const model of provider.models) {
             const option = optionOf(provider, model, provider.disabledReason !== undefined);
             if (option.current) currentOption = option;
-            // A hidden account is not offered, though the selection on it stays.
-            if (!provider.hidden) modelOptions.push(option);
+            // A hidden account, or a model switched off in Settings, is not
+            // offered, though the selection on it stays.
+            if (!provider.hidden && !disabledModels?.has(happyAgentModelKey(provider.id, model.id)))
+                modelOptions.push(option);
         }
     }
     const currentAccount: HappyAgentCurrentAccount =
@@ -206,6 +211,7 @@ export function happyAgentMenusSelectionProject(
     previous: HappyAgentMenusSnapshot,
     selection: HappyAgentSelection,
     remembered?: HappyAgentModelEffortRemembered,
+    disabledModels?: ReadonlySet<HappyAgentModelKey>,
 ): HappyAgentMenusSnapshot {
     if (
         previous.currentProviderId === selection.providerId &&
@@ -222,7 +228,7 @@ export function happyAgentMenusSelectionProject(
     )
         return happyAgentMenusReferencesPreserve(
             previous,
-            happyAgentMenusDerive(catalog, selection, remembered),
+            happyAgentMenusDerive(catalog, selection, remembered, disabledModels),
         );
 
     return {

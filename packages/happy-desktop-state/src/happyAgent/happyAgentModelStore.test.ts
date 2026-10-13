@@ -15,6 +15,7 @@ import {
 } from "./happyAgentModelStore.js";
 import { happyAgentModelCatalogProject } from "./happyAgentProject.js";
 import { happyAgentSessionDraftStoreOwnedCreate } from "./happyAgentSessionDraftStore.js";
+import { happyAgentModelKey } from "./happyAgentSettingsStore.js";
 import type { HappyAgentModelCatalog, HappyAgentSessionId } from "./happyAgentTypes.js";
 
 /** The same model on two accounts, with tiers declared by each provider reference. */
@@ -179,6 +180,89 @@ it("restores a remembered Ultrafast selection only when the current account stil
         reopened.modelSelect(snapshot.lastUsedSelection, { providerId: "codex", modelId: "astra" })
             .serviceTier,
     ).toBeUndefined();
+});
+
+it("starts every new session on the Settings model and keeps a chat-box pick to its own session", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const catalog = happyAgentModelCatalogProject(tierConfig(daemon));
+    const document: HappyAgentModelPreferenceDocument = {
+        preferences: {},
+        defaultPermissionMode: "read_only",
+        defaultSelection: { providerId: "codex", modelId: "sol" },
+        // Hosts never hand over both; if one did, the Settings model still wins.
+        lastPickedModel: { providerId: "codex_other", modelId: "astra" },
+    };
+    const write = vi.fn();
+    const models = happyAgentModelStoreCreate({
+        catalogRead: async () => catalog,
+        preferencePersistence: { read: () => document, write },
+    });
+    disposables.push(models);
+    const ready = await models.load();
+    expect(ready.lastUsedSelection).toMatchObject({
+        providerId: "codex",
+        modelId: "sol",
+        permissionMode: "read_only",
+    });
+
+    models.selectionUsed({
+        providerId: "codex_other",
+        modelId: "astra",
+        permissionMode: "full_access",
+        effort: "high",
+    });
+
+    // Nothing is written or remembered, not even the pick's effort, and the
+    // next session still starts on the Settings model with Settings' access.
+    expect(write).not.toHaveBeenCalled();
+    expect(models.get()).toBe(ready);
+    expect(models.effortRemembered("codex_other", "astra")).toBeUndefined();
+});
+
+it("starts from the last pick again once Settings names no model", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const catalog = happyAgentModelCatalogProject(tierConfig(daemon));
+    let document: HappyAgentModelPreferenceDocument = {
+        preferences: {},
+        defaultSelection: { providerId: "codex", modelId: "sol" },
+    };
+    const listeners = new Set<() => void>();
+    const models = happyAgentModelStoreCreate({
+        catalogRead: async () => catalog,
+        preferencePersistence: {
+            read: () => document,
+            write: (next) => {
+                document = next;
+            },
+            subscribe(listener) {
+                listeners.add(listener);
+                return () => listeners.delete(listener);
+            },
+        },
+    });
+    disposables.push(models);
+    await models.load();
+
+    // The host's document after "Last used model" is chosen in Settings: the
+    // model that was chosen becomes the pick new sessions start from.
+    document = { preferences: {}, lastPickedModel: { providerId: "codex", modelId: "sol" } };
+    for (const listener of listeners) listener();
+    expect(models.get()).toMatchObject({
+        type: "ready",
+        lastUsedSelection: { providerId: "codex", modelId: "sol" },
+    });
+
+    models.selectionUsed({
+        providerId: "codex_other",
+        modelId: "astra",
+        permissionMode: "auto",
+        effort: "high",
+    });
+    expect(document.lastPickedModel).toEqual({ providerId: "codex_other", modelId: "astra" });
+    expect(models.get()).toMatchObject({
+        type: "ready",
+        lastUsedSelection: { providerId: "codex_other", modelId: "astra", effort: "high" },
+    });
 });
 
 const disposables: { [Symbol.dispose](): void }[] = [];
@@ -351,6 +435,87 @@ it("re-derives a session draft's pickers from a changed catalog and keeps its se
     ).toEqual(["test-provider/test-model", "grok/grok-4.7"]);
     // The reader's choice is theirs: a model the daemon stopped offering stays chosen.
     expect(draft.get().selection).toBe(selection);
+});
+
+it("starts new sessions on a switched-on model when the catalog default is switched off", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const catalog = happyAgentModelCatalogProject(
+        configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+    );
+    const models = happyAgentModelStoreCreate({
+        catalogRead: async () => catalog,
+        preferencePersistence: {
+            // The Settings default is on an account that is gone, so the
+            // catalog's own default would stand in for it.
+            read: () => ({
+                preferences: {},
+                defaultSelection: { providerId: "retired", modelId: "retired-model" },
+                disabledModels: [happyAgentModelKey("test-provider", "test-model")],
+            }),
+            write: () => undefined,
+        },
+    });
+    disposables.push(models);
+    const ready = await models.load();
+    expect(ready.defaultSelection).toMatchObject({ providerId: "grok", modelId: "grok-4.7" });
+    expect(ready.lastUsedSelection).toMatchObject({ providerId: "grok", modelId: "grok-4.7" });
+    expect(ready.menus.currentModelId).toBe("grok-4.7");
+});
+
+it("moves an open draft off a model switched off under it, keeping its access mode", () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const catalog = happyAgentModelCatalogProject(
+        configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+    );
+    const { store: draft, writer } = happyAgentSessionDraftStoreOwnedCreate({
+        catalog,
+        selection: {
+            providerId: "test-provider",
+            modelId: "test-model",
+            permissionMode: "read_only",
+        },
+    });
+    const fallback = {
+        providerId: "grok",
+        modelId: "grok-4.7",
+        effort: "high",
+        permissionMode: "auto",
+    } as const;
+
+    writer.catalogChanged(catalog, new Set(), fallback);
+    expect(draft.get().selection.modelId).toBe("test-model");
+
+    writer.catalogChanged(
+        catalog,
+        new Set([happyAgentModelKey("test-provider", "test-model")]),
+        fallback,
+    );
+    expect(draft.get().selection).toEqual({ ...fallback, permissionMode: "read_only" });
+    expect(
+        draft.get().menus.modelOptions.map((option) => `${option.providerId}/${option.modelId}`),
+    ).toEqual(["grok/grok-4.7"]);
+});
+
+it("keeps a draft's switched-off models when the catalog changes without naming them", () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const before = happyAgentModelCatalogProject(daemon.configGet());
+    const after = happyAgentModelCatalogProject(
+        configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+    );
+    const { store: draft, writer } = happyAgentSessionDraftStoreOwnedCreate({
+        catalog: before,
+        selection: { providerId: "grok", modelId: "grok-4.7", permissionMode: "auto" },
+        disabledModels: new Set([happyAgentModelKey("test-provider", "test-model")]),
+    });
+    const offered = () =>
+        draft.get().menus.modelOptions.map((option) => `${option.providerId}/${option.modelId}`);
+
+    writer.catalogChanged(after);
+    expect(offered()).toEqual(["grok/grok-4.7"]);
+
+    // An empty set is how a caller clears them.
+    writer.catalogChanged(after, new Set());
+    expect(offered()).toEqual(["test-provider/test-model", "grok/grok-4.7"]);
 });
 
 /** A real session state from the fake daemon, standing on a model the test names. */
