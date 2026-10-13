@@ -944,8 +944,12 @@ function SidebarRow({
 }) {
     const item = () => props.item;
     const unread = () => item().unread === true;
-    const unreadOnLeading = () =>
+    const unreadOnPlace = () =>
         unread() && (item().kind === "project" || item().kind === "workspace");
+    // A nested place with no mark of its own wears the dot where its branch
+    // meets it: the branch line stands in for the glyph the dot would sit on.
+    const unreadOnBranch = () => unreadOnPlace() && !showsLeadingSlot(item());
+    const unreadOnLeading = () => unreadOnPlace() && !unreadOnBranch();
     const mentioned = () => (item().badge ?? 0) > 0;
     const hasChangeStats = () =>
         (item().changeStats?.added ?? 0) > 0 || (item().changeStats?.deleted ?? 0) > 0;
@@ -1216,6 +1220,12 @@ function SidebarRow({
                     data-happy-desktop-ui="sidebar-item-branch"
                 >
                     {foldInBranch() ? foldControl() : null}
+                    {unreadOnBranch() ? (
+                        <span
+                            className="happy-sidebar__item-branch-unread"
+                            data-happy-desktop-ui="sidebar-item-branch-unread"
+                        />
+                    ) : null}
                 </span>
             ) : null}
             {showsLeadingSlot(item()) || activityLeading() ? (
@@ -1322,6 +1332,12 @@ function SidebarRow({
                 ) : (
                     item().label
                 )}
+                {/* The branch is hidden from assistive technology, so the dot
+                    drawn in it is said here instead — inside the label, which
+                    is the one part of the row the ⌘-number hints never hide. */}
+                {unreadOnBranch() ? (
+                    <span className="happy-visually-hidden">Unread activity</span>
+                ) : null}
             </span>
             {props.shortcut ? (
                 <KeyCap
@@ -1330,7 +1346,7 @@ function SidebarRow({
                     keys={props.shortcut.caps}
                 />
             ) : null}
-            {unread() && !unreadOnLeading() && !mentioned() ? (
+            {unread() && !unreadOnPlace() && !mentioned() ? (
                 <span
                     aria-label="Unread"
                     className="happy-sidebar__item-unread"
