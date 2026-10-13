@@ -20,8 +20,10 @@ export function desktopConnectionPreferencesCreate(
         read: () => current,
         write(next) {
             current = next;
+            // Models switched off in Settings are held for this run only.
+            const { disabledModels: _disabledModels, ...stored } = next;
             try {
-                localStorage.setItem(key, JSON.stringify(next));
+                localStorage.setItem(key, JSON.stringify(stored));
             } catch {
                 /* Memory remains authoritative for this window. */
             }

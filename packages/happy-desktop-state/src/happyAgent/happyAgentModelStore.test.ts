@@ -15,6 +15,7 @@ import {
 } from "./happyAgentModelStore.js";
 import { happyAgentModelCatalogProject } from "./happyAgentProject.js";
 import { happyAgentSessionDraftStoreOwnedCreate } from "./happyAgentSessionDraftStore.js";
+import { happyAgentModelKey } from "./happyAgentSettingsStore.js";
 import type { HappyAgentModelCatalog, HappyAgentSessionId } from "./happyAgentTypes.js";
 
 /** The same model on two accounts, with tiers declared by each provider reference. */
@@ -351,6 +352,65 @@ it("re-derives a session draft's pickers from a changed catalog and keeps its se
     ).toEqual(["test-provider/test-model", "grok/grok-4.7"]);
     // The reader's choice is theirs: a model the daemon stopped offering stays chosen.
     expect(draft.get().selection).toBe(selection);
+});
+
+it("starts new sessions on a switched-on model when the catalog default is switched off", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const catalog = happyAgentModelCatalogProject(
+        configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+    );
+    const models = happyAgentModelStoreCreate({
+        catalogRead: async () => catalog,
+        preferencePersistence: {
+            // The Settings default is on an account that is gone, so the
+            // catalog's own default would stand in for it.
+            read: () => ({
+                preferences: {},
+                defaultSelection: { providerId: "retired", modelId: "retired-model" },
+                disabledModels: [happyAgentModelKey("test-provider", "test-model")],
+            }),
+            write: () => undefined,
+        },
+    });
+    disposables.push(models);
+    const ready = await models.load();
+    expect(ready.defaultSelection).toMatchObject({ providerId: "grok", modelId: "grok-4.7" });
+    expect(ready.lastUsedSelection).toMatchObject({ providerId: "grok", modelId: "grok-4.7" });
+    expect(ready.menus.currentModelId).toBe("grok-4.7");
+});
+
+it("moves an open draft off a model switched off under it, keeping its access mode", () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const catalog = happyAgentModelCatalogProject(
+        configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+    );
+    const { store: draft, writer } = happyAgentSessionDraftStoreOwnedCreate({
+        catalog,
+        selection: {
+            providerId: "test-provider",
+            modelId: "test-model",
+            permissionMode: "read_only",
+        },
+    });
+    const fallback = {
+        providerId: "grok",
+        modelId: "grok-4.7",
+        effort: "high",
+        permissionMode: "auto",
+    } as const;
+
+    writer.catalogChanged(catalog, new Set(), fallback);
+    expect(draft.get().selection.modelId).toBe("test-model");
+
+    writer.catalogChanged(
+        catalog,
+        new Set([happyAgentModelKey("test-provider", "test-model")]),
+        fallback,
+    );
+    expect(draft.get().selection).toEqual({ ...fallback, permissionMode: "read_only" });
+    expect(
+        draft.get().menus.modelOptions.map((option) => `${option.providerId}/${option.modelId}`),
+    ).toEqual(["grok/grok-4.7"]);
 });
 
 /** A real session state from the fake daemon, standing on a model the test names. */
