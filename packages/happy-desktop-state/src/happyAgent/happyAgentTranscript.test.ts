@@ -15,6 +15,7 @@ import {
     HAPPY_AGENT_TRANSCRIPT_MESSAGE_LIMIT,
     HAPPY_AGENT_TRANSCRIPT_PAGE_LIMIT,
     happyAgentTranscriptFormat,
+    happyAgentTranscriptAgentIds,
     happyAgentTranscriptRunsRead,
     type HappyAgentTranscriptMode,
 } from "./happyAgentTranscript.js";
@@ -500,6 +501,7 @@ it("reads every page, oldest first, asking for tool data only for a full copy", 
 
     queries.length = 0;
     await happyAgentTranscriptRunsRead(client, SELF, "concise");
+    expect(queries).toHaveLength(3);
     expect(queries.every((query) => query.omitToolData === true)).toBe(true);
 });
 
@@ -513,4 +515,76 @@ it("stops at an empty page even if the host says there is more", async () => {
     };
     expect(await happyAgentTranscriptRunsRead(client, SELF, "full")).toEqual([]);
     expect(reads).toBe(1);
+});
+
+it("fails rather than asking forever when a page reaches no further back", async () => {
+    const stuck = run([user("Again.")]);
+    let reads = 0;
+    const client = {
+        getMessages: () => {
+            reads += 1;
+            return Promise.resolve({ cursor: "c", hasMore: true, runs: [stuck] });
+        },
+    };
+    await expect(happyAgentTranscriptRunsRead(client, SELF, "full")).rejects.toThrow(
+        "did not reach further back",
+    );
+    expect(reads).toBe(2);
+});
+
+it("stops reading once the copy is abandoned", async () => {
+    const controller = new AbortController();
+    const signals: AbortSignal[] = [];
+    const client = {
+        getMessages: (_agentId: string, _query: MessageHistoryQuery = {}, options = {}) => {
+            signals.push((options as { signal: AbortSignal }).signal);
+            // The reader moves on while the first page is still arriving.
+            controller.abort();
+            return Promise.resolve({ cursor: "c", hasMore: true, runs: [run([user("One.")])] });
+        },
+    };
+    await expect(
+        happyAgentTranscriptRunsRead(client, SELF, "full", controller.signal),
+    ).rejects.toThrow();
+    expect(signals).toHaveLength(1);
+    // The page in flight was asked with a signal the abandonment cancels.
+    expect(signals[0]!.aborted).toBe(true);
+});
+
+it("shows what a background terminal runs above what was typed into it", () => {
+    const chat = [
+        run([
+            agent([
+                tool("write_stdin", {
+                    presentation: {
+                        type: "background_terminal_interaction",
+                        command: "pnpm dev",
+                        input: "q",
+                        terminalId: "term_1",
+                    },
+                }),
+            ]),
+        ]),
+    ];
+    expect(format(chat, "full")).toBe("## Assistant\n\n    write_stdin:\n        pnpm dev\n        q");
+});
+
+it("lists the other agents a history names, for naming them before it is written", () => {
+    const chat = [
+        run([
+            user("From the coordinator.", { senderAgentId: "agent_coordinator" }),
+            agent([text("Mine.")], { senderAgentId: SELF }),
+            agent([
+                tool("create_agent", {
+                    presentation: { type: "agent_spawn", agentId: "agent_child" },
+                }),
+                // Not yet created: nothing to name.
+                tool("create_agent", { presentation: { type: "agent_spawn" } }),
+            ]),
+        ]),
+    ];
+    expect([...happyAgentTranscriptAgentIds(chat, SELF)]).toEqual([
+        "agent_coordinator",
+        "agent_child",
+    ]);
 });

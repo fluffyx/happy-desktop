@@ -38,11 +38,15 @@ const PAGE_TIMEOUT_MS = 60_000;
  * concise read leaves out the raw data of presented calls: the host drops it
  * only where a presentation stands in, and the presentation is all a concise
  * transcript shows of such a call.
+ *
+ * Aborting `signal` stops the read between pages and cancels the one in
+ * flight, for a copy that a newer one has replaced.
  */
 export async function happyAgentTranscriptRunsRead(
     client: Pick<HappyAgentClient, "getMessages">,
     agentId: string,
     mode: HappyAgentTranscriptMode,
+    signal?: AbortSignal,
 ): Promise<HistoryRun[]> {
     // Newest page first, each reaching further back, until the host says there
     // is nothing older. A page is whole runs, oldest first, so prepending each
@@ -50,6 +54,8 @@ export async function happyAgentTranscriptRunsRead(
     const pages: (readonly HistoryRun[])[] = [];
     let before: string | undefined;
     for (;;) {
+        signal?.throwIfAborted();
+        const timeout = AbortSignal.timeout(PAGE_TIMEOUT_MS);
         const page = await client.getMessages(
             agentId,
             {
@@ -57,14 +63,41 @@ export async function happyAgentTranscriptRunsRead(
                 limit: HAPPY_AGENT_TRANSCRIPT_PAGE_LIMIT,
                 omitToolData: mode === "concise",
             },
-            { signal: AbortSignal.timeout(PAGE_TIMEOUT_MS) },
+            { signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]) },
         );
         pages.unshift(page.runs);
         const oldest = page.runs[0];
         if (!page.hasMore || oldest === undefined) break;
+        // A page that reaches no further back would be asked for again forever.
+        if (oldest.id === before) throw new Error("The host's history did not reach further back.");
         before = oldest.id;
     }
     return pages.flat();
+}
+
+/**
+ * Every other agent a history names — a sender of a message, or an agent a
+ * call created — so the reader can name them before the transcript is
+ * written, rather than leave an id where the chat shows a name.
+ */
+export function happyAgentTranscriptAgentIds(
+    runs: readonly HistoryRun[],
+    agentId: string,
+): ReadonlySet<string> {
+    const ids = new Set<string>();
+    for (const run of runs)
+        for (const message of run.messages) {
+            const sender = message.metadata.senderAgentId;
+            if (sender !== undefined && sender !== agentId) ids.add(sender);
+            for (const block of message.content)
+                if (
+                    block.type === "tool_call" &&
+                    block.presentation?.type === "agent_spawn" &&
+                    block.presentation.agentId !== undefined
+                )
+                    ids.add(block.presentation.agentId);
+        }
+    return ids;
 }
 
 /** A kept message longer than this is cut, so one pasted log cannot swamp a concise copy. */
@@ -408,7 +441,8 @@ function toolSubject(block: ToolCallBlock): string {
             subject = presentation.command;
             break;
         case "background_terminal_interaction":
-            subject = presentation.input;
+            // What was typed means little without what it was typed into.
+            subject = `${presentation.command}\n${presentation.input}`;
             break;
         case "exploration":
             subject = presentation.operations

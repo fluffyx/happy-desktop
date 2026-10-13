@@ -29,6 +29,7 @@ function inert(): unknown {
 interface Read {
     readonly sessionId: HappyAgentSessionId;
     readonly mode: HappyAgentTranscriptMode;
+    readonly signal: AbortSignal | undefined;
     resolve(text: string): void;
     reject(error: Error): void;
 }
@@ -69,9 +70,13 @@ function store(clipboard?: (text: string) => Promise<void>) {
             chat: () => new Promise(() => undefined),
             openInTargetsRead: () => new Promise(() => undefined),
             workspaceFilesSubscribe: () => () => undefined,
-            transcriptRead: (sessionId: HappyAgentSessionId, mode: HappyAgentTranscriptMode) =>
+            transcriptRead: (
+                sessionId: HappyAgentSessionId,
+                mode: HappyAgentTranscriptMode,
+                signal?: AbortSignal,
+            ) =>
                 new Promise<string>((resolve, reject) =>
-                    reads.push({ sessionId, mode, resolve, reject }),
+                    reads.push({ sessionId, mode, signal, resolve, reject }),
                 ),
         } as Record<PropertyKey, unknown>,
         { get: (target, property) => (property in target ? target[property] : inert()) },
@@ -186,5 +191,43 @@ it("keeps a new copy's report when an older one's moment runs out", async () => 
     workspace.transcriptCopy(OTHER, "full");
     await vi.advanceTimersByTimeAsync(1_000);
     expect(workspace.get().transcriptCopy).toEqual({ sessionId: OTHER, status: "copying" });
+    unsubscribe();
+});
+
+it("stops downloading a replaced copy's history, and the last one's when the workspace goes", () => {
+    const { workspace, reads, unsubscribe } = store(() => Promise.resolve());
+
+    workspace.transcriptCopy(SESSION, "full");
+    workspace.transcriptCopy(OTHER, "full");
+    expect(reads.map((read) => read.signal?.aborted)).toEqual([true, false]);
+
+    unsubscribe();
+    workspace[Symbol.dispose]();
+    expect(reads[1]!.signal?.aborted).toBe(true);
+});
+
+it("writes a newer copy only after an older write still in flight has landed", async () => {
+    const writes: { text: string; done(): void }[] = [];
+    const { workspace, reads, unsubscribe } = store(
+        (text) => new Promise<void>((done) => writes.push({ text, done })),
+    );
+
+    workspace.transcriptCopy(SESSION, "full");
+    reads[0]!.resolve("first");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writes.map((write) => write.text)).toEqual(["first"]);
+
+    // The newer copy's text is ready while the older write is still going.
+    workspace.transcriptCopy(OTHER, "full");
+    reads[1]!.resolve("second");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writes.map((write) => write.text)).toEqual(["first"]);
+
+    writes[0]!.done();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(writes.map((write) => write.text)).toEqual(["first", "second"]);
+    writes[1]!.done();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(workspace.get().transcriptCopy).toEqual({ sessionId: OTHER, status: "copied" });
     unsubscribe();
 });

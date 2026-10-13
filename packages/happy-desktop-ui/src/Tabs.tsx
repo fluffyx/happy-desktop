@@ -150,8 +150,14 @@ function tabLeadingMark(tab: TabItem, iconSize: 14 | 16 | 18) {
  * mark leaves the lane to whichever of those applies.
  */
 function tabActivityMark(tab: TabItem) {
+    // The notice's own words are what is announced; a spinner saying them
+    // again would be a second status region reading the same line.
     if (tab.notice?.tone === "pending")
-        return <Spinner label={tab.notice.label} size={12} tone="muted" />;
+        return (
+            <span aria-hidden="true" className="happy-tabs__tab-notice-mark">
+                <Spinner size={12} tone="muted" />
+            </span>
+        );
     if (tab.notice?.tone === "success" || tab.notice?.tone === "danger")
         return (
             <span

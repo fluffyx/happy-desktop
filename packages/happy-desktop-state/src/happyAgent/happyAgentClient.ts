@@ -14,6 +14,7 @@ import {
     type HappyAgentAgentIdentitySource,
 } from "./happyAgentAgentIdentities.js";
 import {
+    happyAgentTranscriptAgentIds,
     happyAgentTranscriptFormat,
     happyAgentTranscriptRunsRead,
     type HappyAgentTranscriptMode,
@@ -328,9 +329,13 @@ export interface HappyAgentWorkspaceClient {
     /**
      * One session's whole history as Markdown, read page by page from the host
      * rather than from whatever an open chat has loaded so far. Empty when the
-     * session has nothing to copy.
+     * session has nothing to copy. Aborting `signal` abandons the read.
      */
-    transcriptRead(sessionId: HappyAgentSessionId, mode: HappyAgentTranscriptMode): Promise<string>;
+    transcriptRead(
+        sessionId: HappyAgentSessionId,
+        mode: HappyAgentTranscriptMode,
+        signal?: AbortSignal,
+    ): Promise<string>;
     /** Stops background synchronization for an archived chat; its store remains subject to the bounded cache. */
     chatArchive(sessionId: HappyAgentSessionId): void;
     /** Lets a restored chat resume background synchronization when it is acquired again. */
@@ -904,18 +909,33 @@ export function happyAgentWorkspaceClientCreate(
                 },
             };
         },
-        async transcriptRead(sessionId, mode) {
+        async transcriptRead(sessionId, mode, signal) {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
-            const runs = await happyAgentTranscriptRunsRead(deps.client, sessionId, mode);
-            // Named from the list as it stands once the history is in, the
-            // same names the chat itself gives the agents that wrote into it.
+            const runs = await happyAgentTranscriptRunsRead(deps.client, sessionId, mode, signal);
+            // Named the way the chat names them: from the list as it stands
+            // once the history is in, and by asking the host about an agent the
+            // list does not name. One the host will not describe keeps its id.
             const identities = happyAgentAgentIdentitiesIndex(workspace.sessionList().get());
+            const names = new Map<string, string>();
+            await Promise.all(
+                [...happyAgentTranscriptAgentIds(runs, sessionId)].map(async (agentId) => {
+                    const listed = identities.get(agentId)?.name;
+                    if (listed !== undefined) {
+                        names.set(agentId, listed);
+                        return;
+                    }
+                    const title = await deps.client
+                        .getAgent(agentId, signal === undefined ? {} : { signal })
+                        .then(
+                            ({ agent }) => agent.title?.trim(),
+                            () => undefined,
+                        );
+                    if (title) names.set(agentId, title);
+                }),
+            );
+            signal?.throwIfAborted();
             return happyAgentTranscriptFormat(
-                {
-                    agentId: sessionId,
-                    runs,
-                    agentName: (agentId) => identities.get(agentId)?.name,
-                },
+                { agentId: sessionId, runs, agentName: (agentId) => names.get(agentId) },
                 mode,
             );
         },

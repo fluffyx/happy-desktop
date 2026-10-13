@@ -2437,6 +2437,9 @@ export function happyAgentWorkspaceStoreCreate(
     /** Which copy is current, so a copy that was replaced neither writes nor reports. */
     let transcriptCopyGeneration = 0;
     let transcriptCopyTimer: ReturnType<typeof setTimeout> | undefined;
+    let transcriptCopyController: AbortController | undefined;
+    /** The clipboard writes in order; each settles before the next begins. */
+    let transcriptCopyWrites: Promise<void> = Promise.resolve();
     const transcriptCopyReport = (generation: number, next: HappyAgentTranscriptCopy): void => {
         if (disposed || generation !== transcriptCopyGeneration) return;
         transcriptCopyState = next;
@@ -8314,6 +8317,7 @@ export function happyAgentWorkspaceStoreCreate(
             disposed = true;
             stop();
             clearTimeout(transcriptCopyTimer);
+            transcriptCopyController?.abort();
             botCreateRelease(true);
             const released = new Set<string>();
             for (const attachments of [

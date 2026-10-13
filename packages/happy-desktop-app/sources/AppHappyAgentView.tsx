@@ -5593,6 +5593,10 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                                     actionId === TAB_MENU_TRANSCRIPT_CONCISE ||
                                     actionId === TAB_MENU_TRANSCRIPT_FULL
                                 ) {
+                                    // The menu was drawn while the host was in
+                                    // reach; it may not be by the time a row
+                                    // is picked.
+                                    if (!happyAgentOnline()) return;
                                     props.workspace.transcriptCopy(
                                         tab.id as HappyAgentSessionId,
                                         actionId === TAB_MENU_TRANSCRIPT_CONCISE
