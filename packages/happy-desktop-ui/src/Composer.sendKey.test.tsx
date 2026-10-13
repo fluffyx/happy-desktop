@@ -32,6 +32,7 @@ function Harness(props: {
     sendKey: SendKey;
     followUp?: MessageDelivery;
     running?: boolean;
+    pending?: boolean;
     initial?: string;
     sends: MessageDelivery[];
     commands?: string[];
@@ -52,6 +53,7 @@ function Harness(props: {
                 }}
                 onStop={() => undefined}
                 onValueChange={setValue}
+                pending={props.pending}
                 running={props.running}
                 sendKey={props.sendKey}
                 value={value}
@@ -115,6 +117,37 @@ it("writes new lines on ↵, ⇧↵ and ⌃↵, and sends on ⌘↵ and ⌥↵ w
     await userEvent.keyboard("{Enter}");
     expect(commands).toEqual(["agents"]);
     expect(command.value).toBe("");
+});
+
+it("writes no ⌃↵ new line into a draft whose send is in flight", async () => {
+    const values: string[] = [];
+    const view = createRenderer();
+    view.render(
+        () => (
+            <Composer
+                onSend={() => undefined}
+                onValueChange={(value) => values.push(value)}
+                pending
+                sendKey="cmdEnter"
+                value="Being sent"
+            />
+        ),
+        { width: 600, height: 200, padding: 20 },
+    );
+    await view.ready();
+    const textarea = view.$('[data-happy-desktop-ui="composer-textarea"]')
+        .element as HTMLTextAreaElement;
+    textarea.focus();
+    textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            ctrlKey: true,
+            key: "Enter",
+        }),
+    );
+    expect(values).toEqual([]);
+    expect(textarea.value).toBe("Being sent");
 });
 
 it("names ⌥↵ as the other key while the agent works, and ⌥ held shows what it does", async () => {

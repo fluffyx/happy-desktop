@@ -842,7 +842,7 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
 const SETTINGS_INLINE_SECTIONS: Record<CommandPaletteSettingRow["setting"], string> = {
     experimentalFeatures: "Settings General Experimental features",
     followUp: "Settings General Conversations steer queue",
-    sendKey: "Settings General Conversations enter return newline",
+    sendKey: "Settings General Conversations enter return newline cmd command ⌘",
     linkOpenPlacement: "Settings General Links",
     scrollbarVisibility: "Settings General Appearance",
     themeMode: "Settings General Appearance",

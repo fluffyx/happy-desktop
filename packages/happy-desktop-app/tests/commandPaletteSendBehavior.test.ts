@@ -42,6 +42,10 @@ it("offers the send key and the follow-up behavior where the host keeps them", (
         control: { kind: "segmented", value: "steer", next: "queue" },
     });
 
+    // The ⌘ Enter choice is found by what its key is called, too.
+    for (const query of ["cmd", "command", "⌘"])
+        expect(settingOf({ ...input, query }, "setting:send-key")).toBeDefined();
+
     // A host that keeps neither offers neither row.
     expect(settingOf({ ...INPUT, query: "enter" }, "setting:send-key")).toBeUndefined();
     expect(settingOf({ ...INPUT, query: "queue" }, "setting:follow-up")).toBeUndefined();
