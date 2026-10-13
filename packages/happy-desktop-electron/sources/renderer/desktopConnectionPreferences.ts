@@ -13,7 +13,7 @@ export function desktopConnectionPreferencesCreate(
     try {
         const value = localStorage.getItem(key);
         current = value
-            ? documentDefaultNormalize(JSON.parse(value) as HappyAgentModelPreferenceDocument)
+            ? documentFromStored(JSON.parse(value) as HappyAgentModelPreferenceDocument)
             : undefined;
     } catch {
         /* Storage-denied windows retain in-memory choices. */
@@ -22,10 +22,8 @@ export function desktopConnectionPreferencesCreate(
         read: () => current,
         write(next) {
             current = next;
-            // Models switched off in Settings are held for this run only.
-            const { disabledModels: _disabledModels, ...stored } = next;
             try {
-                localStorage.setItem(key, JSON.stringify(stored));
+                localStorage.setItem(key, JSON.stringify(documentToStored(next)));
             } catch {
                 /* Memory remains authoritative for this window. */
             }
@@ -39,14 +37,27 @@ export function desktopConnectionPreferencesCreate(
 }
 
 /**
- * Reads a document naming both a Settings model and a chat-box pick as "Last
- * used model", as the desktop document is read: versions that wrote both let
- * the pick win, and this one never writes both.
+ * Reads a stored document naming both a Settings model and a chat-box pick as
+ * "Last used model", with the Settings model as the pick's fallback: versions
+ * before that choice existed wrote both and read them that way. Models switched
+ * off in Settings are held for one run only, so none are taken from storage.
  */
-function documentDefaultNormalize(
+function documentFromStored(
+    stored: HappyAgentModelPreferenceDocument,
+): HappyAgentModelPreferenceDocument {
+    const { disabledModels: _disabledModels, defaultSelection, ...rest } = stored;
+    if (!defaultSelection) return rest;
+    return rest.lastPickedModel
+        ? { ...rest, lastPickedFallback: defaultSelection }
+        : { ...rest, defaultSelection };
+}
+
+/** Stores a pick's fallback where earlier versions look for it, and no switches. */
+function documentToStored(
     document: HappyAgentModelPreferenceDocument,
 ): HappyAgentModelPreferenceDocument {
-    if (!document.defaultSelection || !document.lastPickedModel) return document;
-    const { defaultSelection: _defaultSelection, ...rest } = document;
-    return rest;
+    const { disabledModels: _disabledModels, lastPickedFallback, ...rest } = document;
+    return lastPickedFallback && rest.lastPickedModel && !rest.defaultSelection
+        ? { ...rest, defaultSelection: lastPickedFallback }
+        : rest;
 }

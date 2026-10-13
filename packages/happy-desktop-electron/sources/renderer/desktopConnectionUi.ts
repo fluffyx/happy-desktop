@@ -105,6 +105,7 @@ export function desktopConnectionUiCreate(input: {
               const {
                   defaultSelection: currentDefault,
                   lastPickedModel: currentPick,
+                  lastPickedFallback: currentFallback,
                   ...current
               } = input.preferences.read() ?? { preferences: {} };
               const defaultSelection =
@@ -112,20 +113,41 @@ export function desktopConnectionUiCreate(input: {
                       ? { providerId: value.defaultProviderId, modelId: value.defaultModelId }
                       : undefined;
               // As on this machine: a chosen model leaves no pick to remember,
-              // and Last used model starts from the model that was chosen.
+              // and Last used model keeps the pick and its fallback, or starts
+              // from the model that was chosen.
               const lastPickedModel = defaultSelection
                   ? undefined
                   : (currentPick ??
                     (currentDefault
                         ? { providerId: currentDefault.providerId, modelId: currentDefault.modelId }
                         : undefined));
+              const lastPickedFallback = currentPick ? currentFallback : undefined;
+              // A chosen model's effort is also its remembered one, so going
+              // back to Last used model starts on the effort it was chosen with.
+              const preferences = defaultSelection
+                  ? {
+                        ...current.preferences,
+                        [defaultSelection.providerId]: {
+                            ...current.preferences[defaultSelection.providerId],
+                            [defaultSelection.modelId]: {
+                                effort: value.defaultEffort,
+                                serviceTier:
+                                    current.preferences[defaultSelection.providerId]?.[
+                                        defaultSelection.modelId
+                                    ]?.serviceTier ?? null,
+                            },
+                        },
+                    }
+                  : current.preferences;
               input.preferences.write({
                   ...current,
+                  preferences,
                   defaultEffort: value.defaultEffort,
                   defaultPermissionMode: value.defaultPermissionMode,
                   disabledModels: [...value.disabledModels],
                   ...(defaultSelection ? { defaultSelection } : {}),
                   ...(lastPickedModel ? { lastPickedModel } : {}),
+                  ...(lastPickedFallback ? { lastPickedFallback } : {}),
               });
           });
     return {

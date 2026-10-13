@@ -1,5 +1,6 @@
 import { expect, it, vi } from "vitest";
 import {
+    happyAgentModelKey,
     happyAgentModelStoreCreate,
     happyAgentSettingsStoreCreate,
     type HappyAgentModel,
@@ -46,6 +47,8 @@ it("retains Ultrafast in the desktop document and restores it without losing unr
 const ALPHA = { providerId: "codex", modelId: "alpha" } as const;
 const BETA = { providerId: "codex", modelId: "beta" } as const;
 const GAMMA = { providerId: "codex", modelId: "gamma" } as const;
+/** A pick on an account this machine no longer has. */
+const GONE = { providerId: "retired", modelId: "gone" } as const;
 
 function model(id: string): HappyAgentModel {
     return {
@@ -100,10 +103,14 @@ async function desktopOpen(initial: DesktopConfig) {
     return { desktopConfigWrite, preferences, saved, settings, models };
 }
 
-function startsOn(models: HappyAgentModelStore) {
+function startsWith(models: HappyAgentModelStore) {
     const snapshot = models.get();
     if (snapshot.type !== "ready") throw new Error("Model store not ready");
-    const { providerId, modelId } = snapshot.lastUsedSelection;
+    return snapshot.lastUsedSelection;
+}
+
+function startsOn(models: HappyAgentModelStore) {
+    const { providerId, modelId } = startsWith(models);
     return { providerId, modelId };
 }
 
@@ -126,8 +133,16 @@ it("reads an existing desktop document the way the version that wrote it behaved
     expect(both.preferences.preferencePersistence.read()?.defaultSelection).toBeUndefined();
     expect(startsOn(both.models)).toEqual(BETA);
 
+    // Both, with the pick unavailable: the Settings model stood in, and still does.
+    const gone = await desktopOpen(
+        configCreate({ defaultModel: { ...GAMMA, effort: "high" }, lastPickedModel: GONE }),
+    );
+    expect(gone.settings.get().defaultModelId).toBeUndefined();
+    expect(startsWith(gone.models)).toMatchObject({ ...GAMMA, effort: "high" });
+
     // Reading changes nothing on disk until something is saved.
-    for (const opened of [unset, pinned, both]) expect(opened.desktopConfigWrite).not.toBeCalled();
+    for (const opened of [unset, pinned, both, gone])
+        expect(opened.desktopConfigWrite).not.toBeCalled();
 });
 
 it("pins new sessions to a Settings model and returns to the last pick from it", async () => {
@@ -135,9 +150,10 @@ it("pins new sessions to a Settings model and returns to the last pick from it",
         configCreate({ defaultModel: { ...ALPHA, effort: "high" }, lastPickedModel: BETA }),
     );
 
-    // Saving another setting persists the reading: Last used model, still on the pick.
+    // Saving another setting keeps the reading: Last used model on the pick,
+    // with the Settings model still beside it as the fallback.
     settings.defaultPermissionModeUpdate("read_only");
-    expect(saved()?.defaultModel).toBeUndefined();
+    expect(saved()?.defaultModel).toMatchObject(ALPHA);
     expect(saved()?.lastPickedModel).toEqual(BETA);
 
     // Choosing a model pins it, and no pick is kept beside it.
@@ -158,26 +174,47 @@ it("pins new sessions to a Settings model and returns to the last pick from it",
     expect(saved()?.defaultModel).toMatchObject(GAMMA);
     expect(saved()?.lastPickedModel).toBeUndefined();
 
-    // Last used model starts from the model that was pinned, until the next pick.
+    // Last used model starts from the model that was pinned, with the effort
+    // it was pinned with, until the next pick.
+    settings.defaultEffortUpdate("high");
     settings.defaultModelClear();
     expect(saved()?.defaultModel).toBeUndefined();
     expect(saved()?.lastPickedModel).toEqual(GAMMA);
-    expect(startsOn(models)).toEqual(GAMMA);
+    expect(startsWith(models)).toMatchObject({ ...GAMMA, effort: "high" });
     models.selectionUsed({ ...BETA, permissionMode: "auto", effort: "low" });
     expect(saved()?.lastPickedModel).toEqual(BETA);
     expect(startsOn(models)).toEqual(BETA);
 
-    // Every save is a document the main process accepts as it is, never with
-    // both keys, so reading it again changes nothing.
-    for (const [config] of desktopConfigWrite.mock.calls) {
+    // Every save is a document the main process accepts as it is.
+    for (const [config] of desktopConfigWrite.mock.calls)
         expect(desktopConfigValidate(config)).toEqual(config);
-        expect(config.defaultModel !== undefined && config.lastPickedModel !== undefined).toBe(
-            false,
-        );
-    }
     const reopenedPinned = await desktopOpen(pinnedConfig!);
     expect(reopenedPinned.settings.get()).toMatchObject({ defaultModelId: "gamma" });
     expect(startsOn(reopenedPinned.models)).toEqual(GAMMA);
+    const reopened = await desktopOpen(saved()!);
+    expect(reopened.settings.get().defaultModelId).toBeUndefined();
+    expect(startsOn(reopened.models)).toEqual(BETA);
+});
+
+it("falls back to the Settings model an earlier version kept beside an unavailable pick", async () => {
+    const { desktopConfigWrite, saved, settings, models } = await desktopOpen(
+        configCreate({ defaultModel: { ...GAMMA, effort: "high" }, lastPickedModel: GONE }),
+    );
+    expect(startsWith(models)).toMatchObject({ ...GAMMA, effort: "high" });
+
+    // Other settings keep the fallback on disk, as earlier versions wrote it.
+    settings.defaultPermissionModeUpdate("read_only");
+    expect(saved()).toMatchObject({ defaultModel: GAMMA, lastPickedModel: GONE });
+
+    // A usable pick wins; switching it off in Settings falls back again.
+    models.selectionUsed({ ...BETA, permissionMode: "read_only", effort: "low" });
+    expect(saved()).toMatchObject({ defaultModel: GAMMA, lastPickedModel: BETA });
+    expect(startsOn(models)).toEqual(BETA);
+    settings.modelEnabledUpdate(happyAgentModelKey(BETA.providerId, BETA.modelId), false);
+    expect(startsWith(models)).toMatchObject({ ...GAMMA, effort: "high" });
+
+    for (const [config] of desktopConfigWrite.mock.calls)
+        expect(desktopConfigValidate(config)).toEqual(config);
     const reopened = await desktopOpen(saved()!);
     expect(reopened.settings.get().defaultModelId).toBeUndefined();
     expect(startsOn(reopened.models)).toEqual(BETA);

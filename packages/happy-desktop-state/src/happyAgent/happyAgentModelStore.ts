@@ -56,6 +56,12 @@ export interface HappyAgentModelPreferenceDocument {
     readonly defaultPermissionMode?: HappyAgentPermissionMode;
     /** The model last picked in a chat box, kept only while Settings names none. */
     readonly lastPickedModel?: HappyAgentModelPreferenceIdentity;
+    /**
+     * Where Last used model starts when the last pick is unavailable: the
+     * Settings model an earlier version kept beside the pick, which it fell
+     * back to the same way.
+     */
+    readonly lastPickedFallback?: HappyAgentModelPreferenceDefault;
     readonly preferences: HappyAgentModelPreferences;
     /**
      * Models switched off in Settings, which the pickers leave out and a new
@@ -494,6 +500,10 @@ function selectionsFromDocument(
         ) ?? catalogSelection;
     // A model chosen in Settings pins every new session; without one, the last
     // pick in a chat box carries over.
+    const lastUsedPermissionMode =
+        document.defaultPermissionMode ??
+        current?.lastUsedSelection.permissionMode ??
+        defaultSelection.permissionMode;
     const lastUsedSelection = document.defaultSelection
         ? defaultSelection
         : (preferenceSelection(
@@ -501,10 +511,17 @@ function selectionsFromDocument(
               document.lastPickedModel,
               document.preferences,
               disabledModels,
-              document.defaultPermissionMode ??
-                  current?.lastUsedSelection.permissionMode ??
-                  defaultSelection.permissionMode,
-          ) ?? defaultSelection);
+              lastUsedPermissionMode,
+          ) ??
+          preferenceSelection(
+              catalog,
+              document.lastPickedFallback,
+              document.preferences,
+              disabledModels,
+              lastUsedPermissionMode,
+              document.defaultEffort,
+          ) ??
+          defaultSelection);
     return { defaultSelection, lastUsedSelection };
 }
 
