@@ -296,6 +296,66 @@ it("does nothing when nothing is unread", () => {
     expect(onChatSelect).not.toHaveBeenCalled();
 });
 
+it("opens a different unread chat on each press, then stands down once all are read", () => {
+    const unread = new Set(["ses_bot", "ses_root", "ses_feature"]);
+    const holds = () => ({
+        bots: [bot(conversation("ses_bot", 30, { unread: unread.has("ses_bot") }))],
+        projects: [
+            project(
+                [conversation("ses_root", 20, { unread: unread.has("ses_root") })],
+                [conversation("ses_feature", 10, { unread: unread.has("ses_feature") })],
+            ),
+        ],
+    });
+    let snapshot: AppHappyAgentDirectorySnapshot = { happyAgents: [entry("local", holds())] };
+    const listeners = new Set<() => void>();
+    const directory: AppHappyAgentDirectoryStore = {
+        get: () => snapshot,
+        subscribe: (listener) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+        },
+        happyAgentActivate: () => undefined,
+    };
+    const onChatSelect = vi.fn();
+    const commandPalette = commandPaletteStoreCreate();
+    const appearance = appearanceStoreCreate({ mode: "light" });
+    const windowAt = (route: { readonly groupId?: string; readonly chatId?: string }) => (
+        <AppHappyAgentView
+            appearance={appearance}
+            commandPalette={commandPalette}
+            onChatSelect={onChatSelect}
+            onFileClose={() => undefined}
+            onFileSelect={() => undefined}
+            onSettingsOpen={() => undefined}
+            happyAgentId="local"
+            happyAgents={directory}
+            {...route}
+        />
+    );
+    const { rerender } = render(windowAt({}));
+    const opened: string[] = [];
+    for (let press = 0; press < 3; press += 1) {
+        optionCommandL();
+        const [, groupId, chatId] = onChatSelect.mock.lastCall as [string, string, string];
+        opened.push(chatId);
+        // What the app does with that: the route names the chat, and reading
+        // it clears its dot on the host, which the directory then publishes.
+        unread.delete(chatId);
+        act(() => {
+            snapshot = { happyAgents: [entry("local", holds())] };
+            for (const listener of listeners) listener();
+        });
+        rerender(windowAt({ groupId, chatId }));
+    }
+    expect(opened).toEqual(["ses_bot", "ses_root", "ses_feature"]);
+    optionCommandL();
+    shiftOptionCommandL();
+    expect(onChatSelect).toHaveBeenCalledTimes(3);
+    act(() => commandPalette.paletteOpen());
+    expect(document.querySelector('[data-row-id="action:unread-next"]')).toBeNull();
+});
+
 it("offers Go to next unread at the top of the palette, naming the chat and wearing its chord", () => {
     const { commandPalette, onChatSelect } = view({
         bots: [bot(conversation("ses_bot", 30))],
@@ -368,6 +428,25 @@ it("keeps next unread within the held-Command card, however many recent chats th
     expect(
         commandPaletteSuggestionRows(CONTEXT).some((row) => row.id.startsWith("action:unread")),
     ).toBe(false);
+});
+
+it("does not offer the next unread chat a second time among the recent ones", () => {
+    const rows = commandPaletteSuggestionRows({
+        ...CONTEXT,
+        unread: { next: target("ses_6"), previous: target("ses_1") },
+    });
+    expect(
+        rows
+            .filter(
+                (row) =>
+                    row.kind === "command" &&
+                    row.command.kind === "chatOpen" &&
+                    row.command.chatId === "ses_6",
+            )
+            .map((row) => row.id),
+    ).toEqual(["action:unread-next"]);
+    // Every other recent chat is still offered.
+    expect(rows.some((row) => row.id === "chat:ses_5")).toBe(true);
 });
 
 it("finds both jumps by typing, each with its own chord and its own chat", () => {

@@ -942,7 +942,14 @@ export function commandPaletteSuggestionRows(context: CommandPaletteContext): Co
             ? owner.worktree.conversations
             : owner.project.conversations;
         const openIds = new Set(conversations.map((summary) => summary.id));
-        for (const summary of conversations)
+        // The chat Go to next unread already names is not offered again as a
+        // recent one: the card holds only a few rows, and one is already its.
+        const unreadNextId =
+            context.unread?.next.happyAgentId === context.happyAgentId
+                ? context.unread.next.chatId
+                : undefined;
+        for (const summary of conversations) {
+            if (summary.id === unreadNextId) continue;
             recent.push({
                 rank: 0,
                 updatedAt: summary.updatedAt,
@@ -961,6 +968,7 @@ export function commandPaletteSuggestionRows(context: CommandPaletteContext): Co
                     },
                 },
             });
+        }
         for (const session of context.archivedSessions) {
             if (
                 session.parentSessionId !== undefined ||
