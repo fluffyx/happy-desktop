@@ -297,6 +297,12 @@ const PERMISSION_MODES: readonly HappyAgentPermissionMode[] = [
     "full_access",
 ];
 
+/**
+ * The Default model choice that names no model: a new session starts on the
+ * one last picked in a chat box. Without a `:`, it is never a model key.
+ */
+const LAST_USED_MODEL = "last-used";
+
 /** Stands in where the host cannot hold the machine awake, keeping hook order fixed. */
 const keepAwakeStoreNone = keepAwakeStoreCreate({ mode: "off" });
 
@@ -900,11 +906,15 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                         : {})}
                     appearance={appearance.mode}
                     defaultModelKey={
-                        selection.modelId
-                            ? happyAgentModelKey(selection.providerId, selection.modelId)
-                            : undefined
+                        settings.defaultProviderId && settings.defaultModelId
+                            ? happyAgentModelKey(
+                                  settings.defaultProviderId,
+                                  settings.defaultModelId,
+                              )
+                            : LAST_USED_MODEL
                     }
                     effort={effort}
+                    effortFollowsLastPick={!settings.defaultProviderId || !settings.defaultModelId}
                     effortOptions={(model?.model.thinkingLevels ?? []).map((level) => ({
                         label: happyAgentThinkingLabel(level),
                         value: level,
@@ -954,6 +964,10 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                           }
                         : {})}
                     onDefaultModelChange={(key) => {
+                        if (key === LAST_USED_MODEL) {
+                            if (happyAgentOnline()) props.settings.defaultModelClear();
+                            return;
+                        }
                         const [providerId, ...rest] = key.split(":");
                         const modelId = rest.join(":");
                         const selected = catalog?.providers
@@ -1259,7 +1273,11 @@ function documentLoading(
     );
 }
 
-/** The chosen default, falling back to whatever the catalog itself defaults to. */
+/**
+ * The chosen default, falling back to whatever the catalog itself defaults to.
+ * Under Last used model that fallback is where a session starts without a
+ * usable pick, so its switch stays locked on as a chosen model's does.
+ */
 function defaultSelection(
     catalog: HappyAgentModelCatalog | undefined,
     settings: HappyAgentSettingsSnapshot,
@@ -1271,16 +1289,17 @@ function defaultSelection(
 }
 
 /**
- * Every model a usable provider offers, labelled "Provider · Model" for one flat
- * picker. A hidden account is not offered, as in the composer's picker, except
- * the model already configured as the default, which stays shown as selected.
+ * Last used model, then every model a usable provider offers, labelled
+ * "Provider · Model" for one flat picker. A hidden account is not offered, as
+ * in the composer's picker, except the model already configured as the
+ * default, which stays shown as selected.
  */
 function modelOptions(
     catalog: HappyAgentModelCatalog | undefined,
     settings: HappyAgentSettingsSnapshot,
     selection: { readonly providerId: string; readonly modelId: string },
 ): readonly SelectOption[] {
-    return (catalog?.providers ?? []).flatMap((provider) =>
+    const models = (catalog?.providers ?? []).flatMap((provider) =>
         provider.models
             .filter(
                 (model) =>
@@ -1294,6 +1313,7 @@ function modelOptions(
                 value: happyAgentModelKey(provider.id, model.id),
             })),
     );
+    return [{ label: "Last used model", value: LAST_USED_MODEL }, ...models];
 }
 
 function providerRows(

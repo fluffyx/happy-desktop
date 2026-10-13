@@ -59,7 +59,7 @@ export function desktopPreferencesCreate(
     bridge: HappyDesktopBridge,
     initial: DesktopConfig,
 ): DesktopPreferences {
-    let config = initial;
+    let config = desktopConfigDefaultModelNormalize(initial);
     // Models switched off in Settings. Held for this run only: they are not
     // part of the desktop document, so switching one never writes it.
     let disabledModels: readonly HappyAgentModelKey[] = [];
@@ -168,6 +168,18 @@ export function desktopPreferencesCreate(
                     updated,
                 ];
             }
+            // A model chosen in Settings leaves no pick to remember. Going back
+            // to Last used model keeps the pick, or starts from the model that
+            // was chosen until a chat box picks another.
+            const lastPickedModel = nextDefault
+                ? undefined
+                : (config.lastPickedModel ??
+                  (config.defaultModel
+                      ? {
+                            providerId: config.defaultModel.providerId,
+                            modelId: config.defaultModel.modelId,
+                        }
+                      : undefined));
             commit({
                 appearance: config.appearance,
                 defaultEffort: nextEffort,
@@ -175,16 +187,7 @@ export function desktopPreferencesCreate(
                 defaultPermissionMode: nextPermissionMode,
                 linkOpen: nextLinkOpen,
                 ...(config.keepAwake === undefined ? {} : { keepAwake: config.keepAwake }),
-                ...(nextDefault
-                    ? {
-                          lastPickedModel: {
-                              providerId: nextDefault.providerId,
-                              modelId: nextDefault.modelId,
-                          },
-                      }
-                    : config.lastPickedModel
-                      ? { lastPickedModel: config.lastPickedModel }
-                      : {}),
+                ...(lastPickedModel ? { lastPickedModel } : {}),
                 modelPreferences,
                 previewUpdatesEnabled: snapshot.previewUpdatesEnabled,
                 scrollbarVisibility: config.scrollbarVisibility,
@@ -195,6 +198,18 @@ export function desktopPreferencesCreate(
             });
         },
     };
+}
+
+/**
+ * Reads a document naming both a Settings model and a chat-box pick as "Last
+ * used model". Versions before that choice existed wrote both and let the pick
+ * win, so this keeps what they did. This version never writes both, so the
+ * rule changes nothing in a document it saved, and needs no marker to run once.
+ */
+function desktopConfigDefaultModelNormalize(config: DesktopConfig): DesktopConfig {
+    if (!config.defaultModel || !config.lastPickedModel) return config;
+    const { defaultModel: _defaultModel, ...rest } = config;
+    return rest;
 }
 
 function settingsInitial(config: DesktopConfig): HappyAgentSettingsInitial {

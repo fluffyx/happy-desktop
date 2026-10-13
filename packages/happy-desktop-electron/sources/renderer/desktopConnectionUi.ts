@@ -102,21 +102,30 @@ export function desktopConnectionUiCreate(input: {
         ? undefined
         : settings.subscribe(() => {
               const value = settings.get();
-              const current = input.preferences.read();
+              const {
+                  defaultSelection: currentDefault,
+                  lastPickedModel: currentPick,
+                  ...current
+              } = input.preferences.read() ?? { preferences: {} };
+              const defaultSelection =
+                  value.defaultProviderId && value.defaultModelId
+                      ? { providerId: value.defaultProviderId, modelId: value.defaultModelId }
+                      : undefined;
+              // As on this machine: a chosen model leaves no pick to remember,
+              // and Last used model starts from the model that was chosen.
+              const lastPickedModel = defaultSelection
+                  ? undefined
+                  : (currentPick ??
+                    (currentDefault
+                        ? { providerId: currentDefault.providerId, modelId: currentDefault.modelId }
+                        : undefined));
               input.preferences.write({
                   ...current,
-                  preferences: current?.preferences ?? {},
                   defaultEffort: value.defaultEffort,
                   defaultPermissionMode: value.defaultPermissionMode,
                   disabledModels: [...value.disabledModels],
-                  ...(value.defaultProviderId && value.defaultModelId
-                      ? {
-                            defaultSelection: {
-                                providerId: value.defaultProviderId,
-                                modelId: value.defaultModelId,
-                            },
-                        }
-                      : {}),
+                  ...(defaultSelection ? { defaultSelection } : {}),
+                  ...(lastPickedModel ? { lastPickedModel } : {}),
               });
           });
     return {

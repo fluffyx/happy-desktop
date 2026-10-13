@@ -12,7 +12,9 @@ export function desktopConnectionPreferencesCreate(
     let current: HappyAgentModelPreferenceDocument | undefined;
     try {
         const value = localStorage.getItem(key);
-        current = value ? (JSON.parse(value) as HappyAgentModelPreferenceDocument) : undefined;
+        current = value
+            ? documentDefaultNormalize(JSON.parse(value) as HappyAgentModelPreferenceDocument)
+            : undefined;
     } catch {
         /* Storage-denied windows retain in-memory choices. */
     }
@@ -34,4 +36,17 @@ export function desktopConnectionPreferencesCreate(
             return () => listeners.delete(listener);
         },
     };
+}
+
+/**
+ * Reads a document naming both a Settings model and a chat-box pick as "Last
+ * used model", as the desktop document is read: versions that wrote both let
+ * the pick win, and this one never writes both.
+ */
+function documentDefaultNormalize(
+    document: HappyAgentModelPreferenceDocument,
+): HappyAgentModelPreferenceDocument {
+    if (!document.defaultSelection || !document.lastPickedModel) return document;
+    const { defaultSelection: _defaultSelection, ...rest } = document;
+    return rest;
 }

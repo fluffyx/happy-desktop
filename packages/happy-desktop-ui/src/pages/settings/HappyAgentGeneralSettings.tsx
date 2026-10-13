@@ -27,6 +27,11 @@ export type HappyAgentGeneralSettingsProps = {
     effort?: string;
     /** The chosen model's own reasoning levels; empty when it exposes none. */
     effortOptions: readonly SelectOption[];
+    /**
+     * Set when no model is chosen ("Last used model"): a new session takes the
+     * effort last picked with its model, so the effort control says so instead.
+     */
+    effortFollowsLastPick?: boolean;
     permissionMode: string;
     permissionModeOptions: readonly SelectOption[];
     /** Set while the catalog is still being read, so the pickers say so. */
@@ -283,7 +288,7 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                 />
             </HappyAgentSettingsSection>
             <HappyAgentSettingsSection
-                description="What a session started on this machine begins with. Each session can still be changed from its composer."
+                description="What a new session on this machine starts with. Last used model starts with whatever you last picked in a chat box; choose a model to always start with it. Each session can still be changed from its composer."
                 title="New sessions"
             >
                 <FormRow
@@ -320,6 +325,7 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                                 aria-label="Reasoning effort"
                                 disabled={
                                     props.unavailable !== undefined ||
+                                    props.effortFollowsLastPick === true ||
                                     props.effortOptions.length === 0
                                 }
                                 fullWidth
@@ -327,12 +333,14 @@ export function HappyAgentGeneralSettings(props: HappyAgentGeneralSettingsProps)
                                 onValueChange={props.onEffortChange}
                                 options={[...props.effortOptions]}
                                 placeholder={
-                                    props.effortOptions.length === 0
-                                        ? "Not offered by this model"
-                                        : "Model default"
+                                    props.effortFollowsLastPick
+                                        ? "Follows your last pick"
+                                        : props.effortOptions.length === 0
+                                          ? "Not offered by this model"
+                                          : "Model default"
                                 }
                                 size="small"
-                                value={props.effort}
+                                value={props.effortFollowsLastPick ? undefined : props.effort}
                             />
                         </Box>
                     }

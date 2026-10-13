@@ -24,7 +24,10 @@ export function happyAgentModelKey(providerId: string, modelId: string): HappyAg
 export type HappyAgentLinkOpenPlacement = "panel" | "browser";
 
 export interface HappyAgentSettingsSnapshot {
-    /** Unset until the reader picks a model; the catalog's own default stands in. */
+    /**
+     * Unset for "Last used model": a new session starts on the model last
+     * picked in a chat box, else the catalog's own default.
+     */
     readonly defaultProviderId?: string;
     readonly defaultModelId?: string;
     readonly defaultEffort: HappyAgentThinkingLevel;
@@ -50,6 +53,8 @@ export interface HappyAgentSettingsStore {
     subscribe(listener: () => void): () => void;
     /** Chooses the model a new session starts on, together with its provider. */
     defaultModelUpdate(providerId: string, modelId: string): void;
+    /** Lets a new session start on the model last picked in a chat box again. */
+    defaultModelClear(): void;
     defaultEffortUpdate(effort: HappyAgentThinkingLevel): void;
     defaultPermissionModeUpdate(mode: HappyAgentPermissionMode): void;
     linkOpenPlacementUpdate(placement: HappyAgentLinkOpenPlacement): void;
@@ -102,6 +107,16 @@ export function happyAgentSettingsStoreCreate(
             if (snapshot.defaultProviderId === providerId && snapshot.defaultModelId === modelId)
                 return;
             publish({ ...snapshot, defaultProviderId: providerId, defaultModelId: modelId });
+        },
+        defaultModelClear() {
+            if (snapshot.defaultProviderId === undefined && snapshot.defaultModelId === undefined)
+                return;
+            const {
+                defaultProviderId: _defaultProviderId,
+                defaultModelId: _defaultModelId,
+                ...rest
+            } = snapshot;
+            publish(rest);
         },
         defaultEffortUpdate(effort) {
             if (snapshot.defaultEffort === effort) return;
