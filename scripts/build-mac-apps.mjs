@@ -13,19 +13,29 @@ const require = createRequire(join(desktopDirectory, "package.json"));
 const { Arch, Platform, build } = require("electron-builder");
 const packageJson = JSON.parse(await readFile(join(desktopDirectory, "package.json"), "utf8"));
 const releaseVersion = process.env.RELEASE_VERSION ?? packageJson.version;
-if (!/^\d+\.\d+\.\d+(?:-preview\.(?:0|[1-9]\d*))?$/u.test(releaseVersion))
-    throw new Error("RELEASE_VERSION must be a stable or numbered preview version.");
+if (!/^\d+\.\d+\.\d+(?:-(?:preview|fluffy)\.(?:0|[1-9]\d*))?$/u.test(releaseVersion))
+    throw new Error(
+        "RELEASE_VERSION must be a stable, numbered preview, or numbered Fluffy version.",
+    );
 packageJson.version = releaseVersion;
 const localWebOrigin = "https://local.app.happy.engineering";
 const flavor = argument("--flavor", ["all", ...desktopFlavorNames], "all");
 const architecture = argument("--arch", ["all", "arm64", "x64"], "all");
 const flavors = flavor === "all" ? desktopFlavorNames : [flavor];
 const architectures = architecture === "all" ? ["arm64", "x64"] : [architecture];
+/*
+ * An ad-hoc signed, un-notarized build for checking the packaging path on a
+ * machine without release credentials. It runs locally but is not Gatekeeper
+ * approved, so it is never a release.
+ */
+const unsigned = process.argv.includes("--unsigned");
 
 if (process.platform !== "darwin")
     throw new Error("Signed Happy macOS releases must be built on macOS.");
-releaseEnvironmentValidate();
-await keychainSigningIdentityValidate();
+if (!unsigned) {
+    releaseEnvironmentValidate();
+    await keychainSigningIdentityValidate();
+}
 
 await run("pnpm", ["desktop:assets"]);
 await run("pnpm", ["--dir", "packages/happy-desktop-electron", "typecheck"]);
@@ -115,7 +125,9 @@ for (const selectedFlavorName of flavors) {
 }
 
 console.log(
-    `Built, signed, notarized, stapled, and verified ${flavors.join(", ")} for ${architectures.join(", ")}.`,
+    unsigned
+        ? `Built ad-hoc signed, un-notarized ${flavors.join(", ")} for ${architectures.join(", ")}.`
+        : `Built, signed, notarized, stapled, and verified ${flavors.join(", ")} for ${architectures.join(", ")}.`,
 );
 
 function builderConfiguration(base, output, app, flavorName, selectedFlavor) {
@@ -162,6 +174,7 @@ function builderConfiguration(base, output, app, flavorName, selectedFlavor) {
             entitlements,
             entitlementsInherit: entitlements,
             icon,
+            ...(unsigned ? { identity: "-", notarize: false } : {}),
         },
         publish: { ...structuredClone(base.publish), channel: selectedFlavor.channel },
     };
@@ -211,8 +224,10 @@ async function releaseVerify(selectedFlavor, output) {
             "dist/happyAgentRendererUtility.js",
         ]);
         await run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", application]);
-        await run("xcrun", ["stapler", "validate", application]);
-        await run("spctl", ["--assess", "--type", "execute", "--verbose=4", application]);
+        if (!unsigned) {
+            await run("xcrun", ["stapler", "validate", application]);
+            await run("spctl", ["--assess", "--type", "execute", "--verbose=4", application]);
+        }
         await run("hdiutil", ["verify", dmg]);
     }
 }
@@ -239,9 +254,12 @@ function releaseEnvironmentValidate() {
     const apiKeyNames = ["APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"];
     const appleIdReady = appleIdNames.every((name) => Boolean(process.env[name]));
     const apiKeyReady = apiKeyNames.every((name) => Boolean(process.env[name]));
-    if (!appleIdReady && !apiKeyReady)
+    // A local `xcrun notarytool store-credentials` profile, which electron-builder
+    // hands to notarytool as `--keychain-profile`; the secret stays in Keychain.
+    const keychainProfileReady = Boolean(process.env.APPLE_KEYCHAIN_PROFILE);
+    if (!appleIdReady && !apiKeyReady && !keychainProfileReady)
         throw new Error(
-            `Set one complete notarization environment: ${apiKeyNames.join(", ")} (recommended) or ${appleIdNames.join(", ")}.`,
+            `Set one complete notarization environment: ${apiKeyNames.join(", ")} (recommended), ${appleIdNames.join(", ")}, or APPLE_KEYCHAIN_PROFILE.`,
         );
     const cscLink = Boolean(process.env.CSC_LINK);
     const cscPassword = Boolean(process.env.CSC_KEY_PASSWORD);
@@ -266,6 +284,16 @@ async function keychainSigningIdentityValidate() {
         throw new Error(
             "No Developer ID Application identity is installed; set CSC_LINK or import it into Keychain.",
         );
+    // electron-builder signs with the first identity whose line contains
+    // CSC_NAME, so a team ID such as T6WFD82P2T selects that team's certificate.
+    const qualifier = process.env.CSC_NAME?.trim();
+    if (
+        qualifier &&
+        !result
+            .split("\n")
+            .some((line) => line.includes("Developer ID Application:") && line.includes(qualifier))
+    )
+        throw new Error(`No Developer ID Application identity in Keychain matches "${qualifier}".`);
 }
 
 function argument(name, allowed, fallback) {
