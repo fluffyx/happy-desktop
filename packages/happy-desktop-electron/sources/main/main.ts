@@ -30,7 +30,8 @@ import {
 } from "./navigation";
 import { desktopFlavor } from "./desktopFlavor";
 import { dockBadgeApply, dockBadgeClear, dockUnreadCountRead } from "./dockBadge";
-import { desktopUpdaterCreate, type DesktopUpdater } from "./updater";
+import type { DesktopUpdater } from "./updater";
+import { desktopUpdaterDisabled } from "./updaterDisabled";
 import { DesktopWindowLifecycle, type DesktopWindowBounds } from "./windowLifecycle";
 import {
     desktopDaemonVersionValidate,
@@ -1629,14 +1630,7 @@ void app
             if (window && !window.isDestroyed())
                 window.webContents.send(desktopIpc.onboardingChanged, snapshot);
         });
-        const updater = desktopUpdaterCreate({
-            preview: desktopConfigStore.get().previewUpdatesEnabled === true,
-            flavor: desktopFlavor.kind,
-            // Releases publish macOS update manifests only; a packaged Linux or
-            // Windows build has nothing to check against yet.
-            packaged: app.isPackaged && process.platform === "darwin",
-            update: (snapshot) => runtime.updateSet(snapshot),
-        });
+        const updater = desktopUpdaterDisabled;
         desktopUpdater = updater;
         let previewUpdatesEnabled = desktopConfigStore.get().previewUpdatesEnabled === true;
         runtime.subscribe((snapshot) => {
