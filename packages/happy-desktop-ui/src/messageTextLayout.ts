@@ -43,6 +43,8 @@ const PARAGRAPH_LINE = 24;
 /** `.happy-message__body pre code`, which never wraps (`white-space: pre`). */
 const CODE_LINE = 20;
 const CODE_PADDING = 16;
+/** `.happy-code-block-frame` padding-top: the strip that holds the copy action. */
+const CODE_COPY_STRIP = 28;
 /** `.happy-message__body > * + *` stacking, and the wider margin around `pre`. */
 const BLOCK_GAP = 8;
 const CODE_GAP = 12;
@@ -1043,7 +1045,7 @@ function markdownBlockHeight(
             };
         const lines = Math.max(1, node.value.split("\n").length);
         return {
-            height: CODE_PADDING * 2 + lines * CODE_LINE,
+            height: CODE_COPY_STRIP + CODE_PADDING * 2 + lines * CODE_LINE,
             marginTop: codeMargins ? CODE_GAP : 0,
             marginBottom: codeMargins ? CODE_GAP : 0,
         };
