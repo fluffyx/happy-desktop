@@ -662,6 +662,15 @@ export interface HappyAgentWorkspaceSnapshot {
     /** Local session and file destinations, newest first, retained after their tabs close. */
     readonly recentTabs: readonly HappyAgentRecentTabMemory[];
     /**
+     * The tabs the reader has closed in this run, most recently closed first,
+     * so a tab closed by mistake can be brought straight back. A file returns
+     * to the strip it left; a session is restored from the archive. An entry
+     * leaves the list as soon as its tab is open again, by whatever route, so
+     * reopening never offers a tab that is already there. Memory-only: it is a
+     * list of regrets, not of history, and the window's history keeps that.
+     */
+    readonly closedTabs: readonly HappyAgentClosedTab[];
+    /**
      * The addressed group's tab strip, by tab id, in the order it is shown. It
      * covers everything the strip holds — sessions and files alike — because the
      * reader arranges one strip, not one order per kind of thing in it. Empty
@@ -841,6 +850,24 @@ export interface HappyAgentProjectCloneSnapshot {
  * file was last pointed at.
  */
 export const HAPPY_AGENT_PANEL_FILE_VIEW_ID = "file";
+
+/**
+ * One tab the reader closed and may want back: a session or a file, in the
+ * same shape the recents remember them, or a browser page by its address. A
+ * file also says which side it was closed from, so it returns there.
+ */
+export type HappyAgentClosedTab =
+    | Extract<HappyAgentRecentTabMemory, { readonly type: "session" }>
+    | (Extract<HappyAgentRecentTabMemory, { readonly type: "file" }> & {
+          readonly placement: HappyAgentViewPlacement;
+      })
+    | {
+          readonly type: "browser";
+          readonly groupId: HappyAgentGroupId;
+          readonly url: string;
+          /** The page's title as the tab last showed it, for the row that offers it back. */
+          readonly label: string;
+      };
 
 /** One of the four faces offered for a new bot, by position. */
 export type HappyAgentBotFaceSlot = 0 | 1 | 2 | 3;
@@ -1528,6 +1555,14 @@ export interface HappyAgentWorkspaceStore {
     /** Returns an archived conversation to its workspace strip. Navigation remains the caller's. */
     conversationRestore(conversationId: HappyAgentSessionId): Promise<void>;
     /**
+     * Opens a closed browser page again, in the side panel of the group it was
+     * closed in, and drops it from `closedTabs`. `tab` is the entry as
+     * `closedTabs` holds it: two pages on one address are two entries, and only
+     * this one is dropped. Addressing that group, when it is not the open one,
+     * remains the caller's.
+     */
+    browserReopen(tab: HappyAgentClosedTab & { readonly type: "browser" }): void;
+    /**
      * Moves one tab of the addressed group directly after `afterId`, or to the
      * front of the strip when null. The order is this client's own and takes
      * effect at once: nothing is asked of the daemon, which orders sessions but
@@ -2198,6 +2233,12 @@ export function happyAgentWorkspaceStoreCreate(
         terminalOpen: (sessionId) => client.terminalOpen(sessionId),
         memoryRead: (groupId) => client.memory.groupRead(groupId)?.panel,
         memoryWrite: (groupId, memory) => client.memory.groupPanelWrite(groupId, memory),
+        // A closed page joins the closed sessions and files, so one chord and
+        // one palette row bring back whichever was closed last.
+        browserClosed: (tab) => {
+            closedTabRemember({ type: "browser", ...tab });
+            recompute();
+        },
     });
 
     const listeners = new Set<() => void>();
@@ -2480,6 +2521,75 @@ export function happyAgentWorkspaceStoreCreate(
     let activeMainViewGroupId: HappyAgentGroupId | undefined;
     /** The addressed group's tab strip, in the order the reader arranged it. */
     let tabOrder: readonly string[] = [];
+    /** What the reader has closed and may want back, most recent first. */
+    let closedTabs: readonly HappyAgentClosedTab[] = [];
+    /** Enough to undo a sweep of "close others"; nobody reopens the fortieth. */
+    const CLOSED_TAB_LIMIT = 32;
+    /**
+     * The one entry a session or file can have. A page has none: two tabs on
+     * one address are two closures, each brought back on its own, so a page
+     * matches only its own entry.
+     */
+    const closedTabKey = (tab: HappyAgentClosedTab): string | undefined =>
+        tab.type === "session"
+            ? `session\u0000${tab.groupId}\u0000${tab.sessionId}`
+            : tab.type === "file"
+              ? `file\u0000${tab.groupId}\u0000${tab.path}`
+              : undefined;
+    /** Whether an entry stands for the same closed tab as another. */
+    const closedTabSame = (entry: HappyAgentClosedTab, tab: HappyAgentClosedTab): boolean => {
+        const key = closedTabKey(tab);
+        return key === undefined ? entry === tab : closedTabKey(entry) === key;
+    };
+    const closedTabRemember = (tab: HappyAgentClosedTab): void => {
+        closedTabs = [tab, ...closedTabs.filter((entry) => !closedTabSame(entry, tab))].slice(
+            0,
+            CLOSED_TAB_LIMIT,
+        );
+    };
+    /** The list snapshot closed sessions were last checked against. */
+    let closedTabsListChecked: HappyAgentSessionListSnapshot | undefined;
+    /**
+     * Sessions this store is asking the host to restore. The list shows them
+     * before the host answers, so they are left to `conversationRestore`,
+     * which forgets them only once the restore is confirmed.
+     */
+    const closedTabsRestoring = new Set<HappyAgentSessionId>();
+    /**
+     * Drops closed sessions the list shows open again. An archive the host
+     * refuses is withdrawn by a later reconcile, after `conversationArchive`
+     * has returned, so the list is where that withdrawal can be seen.
+     */
+    const closedTabsReconcile = (snapshot: HappyAgentSessionListSnapshot): void => {
+        if (snapshot === closedTabsListChecked) return;
+        closedTabsListChecked = snapshot;
+        if (!closedTabs.some((entry) => entry.type === "session")) return;
+        const listed = new Set<string>();
+        for (const entry of [
+            ...snapshot.bots,
+            ...snapshot.tasks,
+            ...happyAgentBotSubtasks([...snapshot.bots, ...snapshot.tasks]),
+        ])
+            listed.add(entry.conversation.id);
+        if (snapshot.projects.type === "ready")
+            for (const project of snapshot.projects.value) {
+                for (const summary of project.conversations) listed.add(summary.id);
+                for (const worktree of project.worktrees)
+                    for (const summary of worktree.conversations) listed.add(summary.id);
+            }
+        const kept = closedTabs.filter(
+            (entry) =>
+                entry.type !== "session" ||
+                closedTabsRestoring.has(entry.sessionId) ||
+                !listed.has(entry.sessionId),
+        );
+        if (kept.length !== closedTabs.length) closedTabs = kept;
+    };
+    /** Drops the entry for a tab that is open again, however it was reopened. */
+    const closedTabForget = (tab: HappyAgentClosedTab): void => {
+        if (!closedTabs.some((entry) => closedTabSame(entry, tab))) return;
+        closedTabs = closedTabs.filter((entry) => !closedTabSame(entry, tab));
+    };
     const fileLoadGenerations = new Map<string, number>();
     let filePresentationId = 0;
     const filePresentationIdNext = (): string =>
@@ -2685,6 +2795,7 @@ export function happyAgentWorkspaceStoreCreate(
         groupAccess: happyAgentGroupAccessRefused(HAPPY_AGENT_GROUP_UNLISTED_REFUSAL),
         fileTabs,
         recentTabs: client.memory.recentTabsRead(),
+        closedTabs,
         tabOrder,
         groupResume,
         openInTargets,
@@ -2945,6 +3056,7 @@ export function happyAgentWorkspaceStoreCreate(
     const recompute = (): void => {
         if (composing > 0) return;
         const listSnapshot = list.get();
+        closedTabsReconcile(listSnapshot);
         groupResume = groupResumeCompute();
         const nextTabOrder = groupTabOrderCompute(addressedGroupId);
         // The strip keeps its identity across ticks that did not move anything,
@@ -3028,6 +3140,7 @@ export function happyAgentWorkspaceStoreCreate(
                 snapshot.groupSessionDraft === groupSessionDraft &&
                 snapshot.fileTabs === fileTabs &&
                 snapshot.recentTabs === recentTabs &&
+                snapshot.closedTabs === closedTabs &&
                 snapshot.tabOrder === tabOrder &&
                 snapshot.activeMainViewId === activeMainViewId &&
                 snapshot.displayedMainViewId === displayedMainViewId &&
@@ -3066,6 +3179,7 @@ export function happyAgentWorkspaceStoreCreate(
                           groupAccess,
                           fileTabs,
                           recentTabs,
+                          closedTabs,
                           tabOrder,
                           groupResume,
                           openInTargets,
@@ -4180,6 +4294,7 @@ export function happyAgentWorkspaceStoreCreate(
         };
         if (!restoring)
             client.memory.recentTabRemember({ type: "file", groupId, path, fileKind: kind });
+        closedTabForget({ type: "file", groupId, path, fileKind: kind, placement });
         const id = fileTabIdOf(groupId, path);
         const existing = fileTabs.find((tab) => tab.id === id);
         // Only the main content selects what it is showing. A file opening in
@@ -4421,6 +4536,13 @@ export function happyAgentWorkspaceStoreCreate(
     const fileTabClose = (tabId: string): void => {
         const closing = fileTabs.find((tab) => tab.id === tabId);
         if (!closing) return;
+        closedTabRemember({
+            type: "file",
+            groupId: closing.groupId,
+            path: closing.path,
+            fileKind: closing.kind,
+            placement: closing.placement,
+        });
         fileTabCacheStore(closing);
         fileTabRelease(tabId);
         // The neighbours a closed tab can uncover are the ones beside it in its
@@ -6279,6 +6401,7 @@ export function happyAgentWorkspaceStoreCreate(
                     groupAccess: happyAgentGroupAccessRefused(HAPPY_AGENT_GROUP_UNLISTED_REFUSAL),
                     fileTabs,
                     recentTabs: client.memory.recentTabsRead(),
+                    closedTabs,
                     tabOrder,
                     groupResume,
                     openInTargets,
@@ -6984,13 +7107,42 @@ export function happyAgentWorkspaceStoreCreate(
             return list.sessionCreate(create).then(created);
         },
         conversationArchive: async (conversationId) => {
+            // Where it was is read before it goes: an archived session is no
+            // longer listed under its group, so this is the last moment the
+            // group can be asked for.
+            const groupId = conversationGroupId(conversationId);
             await list.sessionArchive(conversationId);
             client.chatArchive(conversationId);
+            if (groupId !== undefined) {
+                closedTabRemember({ type: "session", groupId, sessionId: conversationId });
+                recompute();
+            }
         },
         conversationRestore: async (conversationId) => {
-            const result = await list.sessionRestore(conversationId);
+            closedTabsRestoring.add(conversationId);
+            let result: Awaited<ReturnType<typeof list.sessionRestore>>;
+            try {
+                result = await list.sessionRestore(conversationId);
+            } finally {
+                closedTabsRestoring.delete(conversationId);
+                // Checked again on the next change, now that the answer is in.
+                closedTabsListChecked = undefined;
+            }
             if (result.type === "failed") throw result.error;
             client.chatRestore(conversationId);
+            const restored = closedTabs.find(
+                (entry) => entry.type === "session" && entry.sessionId === conversationId,
+            );
+            if (restored) {
+                closedTabForget(restored);
+                recompute();
+            }
+        },
+        browserReopen(tab) {
+            if (disposed) return;
+            panel.browserRestore({ groupId: tab.groupId, url: tab.url, label: tab.label });
+            closedTabForget(tab);
+            recompute();
         },
         tabReorder(tabId, afterId) {
             if (disposed || addressedGroupId === undefined) return;
@@ -7249,6 +7401,17 @@ export function happyAgentWorkspaceStoreCreate(
         },
         filePanelClose() {
             if (disposed) return;
+            // Closed on purpose, so it can be asked for back; the viewer being
+            // replaced by the next file is not that, and remembers nothing.
+            const held = fileTabs.find((tab) => tab.placement === "panel");
+            if (held)
+                closedTabRemember({
+                    type: "file",
+                    groupId: held.groupId,
+                    path: held.path,
+                    fileKind: held.kind,
+                    placement: "panel",
+                });
             panelFileTabClose();
             panel.fileViewClose();
             recompute();

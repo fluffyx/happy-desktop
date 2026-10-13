@@ -90,6 +90,36 @@ export function TabbedPane(props: TabbedPaneProps) {
         "transferable",
     ]);
     const scroller = useRef<HTMLDivElement>(null);
+    // A vertical wheel over the strip walks it sideways, the way a mouse
+    // without a tilt wheel expects; a trackpad's horizontal swipe already
+    // scrolls natively. The listener is attached directly because React's
+    // wheel handler is passive, and only a strip that actually moved may take
+    // the gesture from whatever scrolls beyond it.
+    const scrollerAttach = (element: HTMLDivElement | null) => {
+        scroller.current = element;
+        if (!element) return;
+        const wheel = (event: WheelEvent) => {
+            if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+            // Both axes are in one unit, normalised the way Scrollbar does.
+            const scale =
+                event.deltaMode === WheelEvent.DOM_DELTA_LINE
+                    ? 16
+                    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+                      ? element.clientWidth
+                      : 1;
+            // Taking the gesture cancels its native sideways scroll too, so a
+            // diagonal's horizontal part is applied here with the vertical one.
+            const delta = (event.deltaY + event.deltaX) * scale;
+            const before = element.scrollLeft;
+            element.scrollLeft += delta;
+            if (element.scrollLeft !== before) event.preventDefault();
+        };
+        element.addEventListener("wheel", wheel, { passive: false });
+        return () => {
+            element.removeEventListener("wheel", wheel);
+            scroller.current = null;
+        };
+    };
     // eslint-disable-next-line happy-react/no-layout-effect -- activation must reveal the committed tab before paint by moving its horizontal browser scrollport; depending only on activeId preserves a deliberate manual scroll until another tab is activated
     useLayoutEffect(() => {
         const viewport = scroller.current;
@@ -123,7 +153,7 @@ export function TabbedPane(props: TabbedPaneProps) {
                 <div
                     className="happy-tabbed-pane__scroller"
                     data-happy-desktop-ui="tabbed-pane-scroller"
-                    ref={scroller}
+                    ref={scrollerAttach}
                 >
                     {/* The strip is only as wide as the tabs. The action follows
                         this shrinkable scrollport outside its clip, so it stays

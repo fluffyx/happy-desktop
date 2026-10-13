@@ -557,6 +557,7 @@ it("offers New task in the command palette with its chord, only where a task can
         projects: [],
         sessionCreateAvailable: false,
         tabs: [],
+        tabStepAvailable: false,
         workspaceCreateAvailable: false,
     };
     const rows = commandPaletteSuggestionRows({ ...context, taskCreateAvailable: true });
