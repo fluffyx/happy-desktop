@@ -145,7 +145,7 @@ function desktopProfilerBuildMode(): DesktopProfilerBuildMode {
  * literally "Electron" while running unpackaged — a window that claims to be
  * Electron tells the reader nothing about which of their checkouts it came from.
  */
-const applicationName = buildIdentity ? "Happy Dev" : "Happy";
+const applicationName = buildIdentity ? "Fluffy Dev" : "Fluffy";
 app.setName(applicationName);
 /*
  * Each checkout is its own installation of the app. Everything below is keyed on
@@ -174,7 +174,7 @@ const applicationIconPath = existsSync(generatedApplicationIconPath)
 /*
  * The title carries the checkout as well, because that is what Mission Control,
  * the Window menu, and the app switcher's window list have room to show. The
- * ordinary checkout on the default branch is simply "Happy Dev": it is the one
+ * ordinary checkout on the default branch is simply "Fluffy Dev": it is the one
  * window with nothing to distinguish it from, and naming it twice says nothing.
  */
 const windowTitle =
@@ -376,7 +376,7 @@ if (
           ? app.setAsDefaultProtocolClient(cloudAuthProtocol, process.execPath, [process.argv[1]])
           : app.setAsDefaultProtocolClient(cloudAuthProtocol))
 )
-    console.warn(`Happy could not register the ${cloudAuthProtocol}: callback protocol.`);
+    console.warn(`Fluffy could not register the ${cloudAuthProtocol}: callback protocol.`);
 
 app.on("open-url", (event, candidate) => {
     const callback = cloudAuthCallbackRead(candidate);
@@ -1981,7 +1981,7 @@ void app
     })
     .catch((error: unknown) => {
         dialog.showErrorBox(
-            "Happy could not start",
+            "Fluffy could not start",
             error instanceof Error ? error.message : "The desktop runtime failed to initialize.",
         );
         app.quit();

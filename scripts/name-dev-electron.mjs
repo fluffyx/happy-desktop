@@ -84,12 +84,12 @@ const label = buildLabel();
 const plist = electronBundle();
 if (!label || !plist) process.exit(0);
 
-const name = label === "dev" ? "Happy Dev" : `Happy Dev — ${label}`;
+const name = label === "dev" ? "Fluffy Dev" : `Fluffy Dev — ${label}`;
 // The checkout's own path, not its label, is what has to be unique: a label is a
 // branch name, and `feature/x` and `feature-x` reduce to the same characters a
 // bundle identifier admits. Two checkouts sharing an identifier are one
 // application to LaunchServices, which is the collision being avoided.
-const identifier = `com.slopus.happy.dev.${createHash("sha256").update(workspace).digest("hex").slice(0, 12)}`;
+const identifier = `com.fluffyx.fluffy.dev.${createHash("sha256").update(workspace).digest("hex").slice(0, 12)}`;
 const entries = [
     ["CFBundleName", name],
     ["CFBundleDisplayName", name],

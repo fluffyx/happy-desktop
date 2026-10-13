@@ -17,23 +17,23 @@
  */
 export const desktopFlavors = {
     standard: {
-        appId: "com.slopus.happy",
-        artifactPrefix: "Happy",
+        appId: "com.fluffyx.fluffy",
+        artifactPrefix: "Fluffy",
         /** electron-updater's stable release channel. */
         channel: "latest",
         output: "standard",
-        productName: "Happy",
+        productName: "Fluffy",
         /** Electron-updater's on-disk download cache; distinct from Nightly's. */
-        updaterCacheDirName: "happy-desktop-updater",
+        updaterCacheDirName: "fluffy-desktop-updater",
     },
     "local-web": {
-        appId: "com.slopus.happy.nightly",
-        artifactPrefix: "Happy-Nightly",
+        appId: "com.fluffyx.fluffy.nightly",
+        artifactPrefix: "Fluffy-Nightly",
         channel: "nightly",
         output: "local-web",
-        productName: "Happy Nightly",
+        productName: "Fluffy Nightly",
         /** Electron-updater's on-disk download cache; distinct from standard's. */
-        updaterCacheDirName: "happy-desktop-nightly-updater",
+        updaterCacheDirName: "fluffy-desktop-nightly-updater",
     },
 };
 
