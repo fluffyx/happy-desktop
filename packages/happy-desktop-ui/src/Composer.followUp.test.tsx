@@ -251,8 +251,27 @@ it("names the follow-up on the send control while the agent works, and ⌘ held 
     bubble.style.transition = "none";
     expect(getComputedStyle(bubble).opacity).toBe("1");
     await view.screenshot("Composer.followUp.test");
-    // A click while ⌘ is held does what the control says. It moves no focus,
-    // as in WebKit, where the draft can stay focused through it.
+    /*
+     * A press on the control keeps a focused draft focused in every engine,
+     * so the hold survives the press. The draft is focused for this step, with
+     * no await in it for a window switch to land in: a press that took focus
+     * would blur it and clear the hold. A dispatched mousedown cannot move
+     * focus, so declining to is checked as its default being prevented.
+     */
+    textarea.focus();
+    press(textarea, "keydown", { key: "Meta", metaKey: true });
+    const mousedown = new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        cancelable: true,
+        metaKey: true,
+    });
+    flushSync(() => {
+        sendOf("running").dispatchEvent(mousedown);
+    });
+    expect(mousedown.defaultPrevented).toBe(true);
+    expect(sendOf("running").dataset.delivery).toBe("queue");
+    // The click then does what the control says.
     sendOf("running").click();
     expect(runningSends).toEqual(["queue"]);
     press(textarea, "keyup", { key: "Meta" });

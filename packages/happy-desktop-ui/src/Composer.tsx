@@ -1279,10 +1279,17 @@ ${el.value.slice(el.selectionEnd)}`,
                                     icon="arrow-up"
                                     iconOnly
                                     // The click does what the control says,
-                                    // ⌘ held included: in WebKit the draft can
-                                    // keep focus through it, so the hold
-                                    // survives into the click.
+                                    // ⌘ held included. Pressing the control
+                                    // keeps the draft focused, as WebKit does
+                                    // on its own, so the hold survives the
+                                    // press, the label does not flip back
+                                    // under the pointer, and the draft has the
+                                    // caret afterwards. Keyboard activation
+                                    // still moves focus here, with nothing held.
                                     onClick={() => send(props.running ? sendDelivery() : followUp)}
+                                    onMouseDown={(event) => {
+                                        if (event.button === 0) event.preventDefault();
+                                    }}
                                     size="small"
                                     variant="primary"
                                 />
