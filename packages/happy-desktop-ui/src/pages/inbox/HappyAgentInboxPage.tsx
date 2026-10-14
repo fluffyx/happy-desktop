@@ -3,6 +3,7 @@ import type {
     HappyAgentInboxItem,
     HappyAgentInboxItemId,
     HappyAgentInboxSubmission,
+    SendKey,
     UserError,
 } from "happy-desktop-state";
 import { AvatarBrutalist } from "../../AvatarBrutalist";
@@ -47,6 +48,8 @@ export interface HappyAgentInboxPageProps {
     onMessageChange?: (itemId: HappyAgentInboxItemId, text: string) => void;
     /** Sends what was written as that question's answer. */
     onMessageSubmit?: (itemId: HappyAgentInboxItemId) => void;
+    /** Which key sends a reply; see `Composer.sendKey`. */
+    sendKey?: SendKey;
     /** Opens the session that asked, for the context a question does not carry. */
     onOpenSession?: (item: HappyAgentInboxItem) => void;
     /** Names the project or worktree an item belongs to. */
@@ -164,6 +167,7 @@ export function HappyAgentInboxPage(props: HappyAgentInboxPageProps) {
                                 ? { onMessageSubmit: props.onMessageSubmit }
                                 : {})}
                             {...(props.onOpenSession ? { onOpenSession: props.onOpenSession } : {})}
+                            {...(props.sendKey === undefined ? {} : { sendKey: props.sendKey })}
                             submission={submissions?.get(item.id)}
                             time={props.itemTime?.(item)}
                             {...(props.unavailable === undefined
@@ -319,6 +323,7 @@ interface InboxPendingItemProps extends InboxItemHeaderProps {
     onSelectionChange?: (itemId: HappyAgentInboxItemId, answers: HappyAgentInboxAnswerMap) => void;
     onMessageChange?: (itemId: HappyAgentInboxItemId, text: string) => void;
     onMessageSubmit?: (itemId: HappyAgentInboxItemId) => void;
+    sendKey?: SendKey;
     submission?: HappyAgentInboxSubmission;
     unavailable?: string;
 }
@@ -376,6 +381,7 @@ function InboxPendingItem(props: InboxPendingItemProps) {
                     onValueChange={(value) => onMessageChange(props.item.id, value)}
                     pending={submission?.type === "pending"}
                     placeholder="Or say what to do instead…"
+                    {...(props.sendKey === undefined ? {} : { sendKey: props.sendKey })}
                     submitDisabled={props.unavailable !== undefined}
                     value={props.message}
                 />

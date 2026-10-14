@@ -18,6 +18,7 @@ import type {
     CommandPaletteStore,
     ExperimentsStore,
     ProjectsVisibilityStore,
+    SendBehaviorStore,
     GptLiveStore,
     HappyAgentGroupId,
     UsageAnalyticsStore,
@@ -123,6 +124,11 @@ export interface HappyAgentRouterContext {
      * connection. Absent in a host that remembers no such choice, which shows them.
      */
     readonly projectsVisibility?: ProjectsVisibilityStore;
+    /**
+     * How this window sends a message while the agent works. Absent in a host
+     * that remembers no such choice, which steers and offers no control for it.
+     */
+    readonly sendBehavior?: SendBehaviorStore;
     /** Whether this window sends product analytics events. Absent where it sends none. */
     readonly usageAnalytics?: UsageAnalyticsStore;
     /** Window-owned GPT-Live opt-in; unrelated to coding-provider settings. */
@@ -548,6 +554,7 @@ function HappyAgentWorkspaceLayout(
             {...(context.projectsVisibility
                 ? { projectsVisibility: context.projectsVisibility }
                 : {})}
+            {...(context.sendBehavior ? { sendBehavior: context.sendBehavior } : {})}
             {...(context.gptLive ? { gptLive: context.gptLive } : {})}
             {...(context.keepAwake ? { keepAwake: context.keepAwake } : {})}
             {...(context.statusBar ? { statusBar: context.statusBar } : {})}
@@ -694,6 +701,7 @@ function HappyAgentSettingsRoute() {
             {...(context.projectsVisibility
                 ? { projectsVisibility: context.projectsVisibility }
                 : {})}
+            {...(context.sendBehavior ? { sendBehavior: context.sendBehavior } : {})}
             {...(context.usageAnalytics ? { usageAnalytics: context.usageAnalytics } : {})}
             {...(context.gptLive ? { gptLive: context.gptLive } : {})}
             {...(context.keepAwake ? { keepAwake: context.keepAwake } : {})}

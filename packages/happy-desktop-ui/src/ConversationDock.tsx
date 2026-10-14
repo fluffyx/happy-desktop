@@ -1,5 +1,5 @@
 import { useState, type CSSProperties, type ReactNode } from "react";
-import type { ComposerSnapshot } from "happy-desktop-state";
+import type { ComposerSnapshot, MessageDelivery, SendKey } from "happy-desktop-state";
 import { Banner } from "./Banner";
 import { Button } from "./Button";
 import { commandPickerItems } from "./CommandPicker";
@@ -39,12 +39,18 @@ export type ConversationDockProps = {
      * stopping is offered is said by giving this or withholding it.
      */
     onAbort?: () => void;
-    onCommandInvoke?: (commandId: string) => void;
+    /** The delivery a command that becomes a message carries, as a send would. */
+    onCommandInvoke?: (commandId: string, delivery: MessageDelivery) => void;
     onComposerAttachmentRemove?: (attachmentId: string) => void;
     onComposerAttachmentsSelect?: (files: File[]) => void;
     onComposerFocusChange?: (focused: boolean) => void;
-    onComposerSend: () => void;
+    /** Receives the delivery the key or control that sent the draft stands for. */
+    onComposerSend: (delivery: MessageDelivery) => void;
     onComposerValueChange: (value: string) => void;
+    /** What a plain send does while the agent is working; see `Composer.followUp`. */
+    followUp?: MessageDelivery;
+    /** Which key sends; see `Composer.sendKey`. */
+    sendKey?: SendKey;
     running?: boolean;
     style?: CSSProperties;
 };
@@ -156,9 +162,15 @@ export function ConversationDock(props: ConversationDockProps) {
         }
         props.onComposerAttachmentRemove?.(attachmentId);
     };
-    const composerSend = () => {
+    const followUp = props.followUp ?? "steer";
+    // A retry sends the failed message the way it was sent, not the way the
+    // setting would send a new one.
+    const retryDelivery =
+        (composer.submission.status === "failed" ? composer.submission.delivery : undefined) ??
+        followUp;
+    const composerSend = (delivery: MessageDelivery) => {
         setPreviewAttachmentId(null);
-        props.onComposerSend();
+        props.onComposerSend(delivery);
     };
     const commandSelect = (commandId: string) => {
         const command = composer.capabilities.commands.find(
@@ -169,7 +181,7 @@ export function ConversationDock(props: ConversationDockProps) {
             props.onComposerValueChange(`${slash} `);
             return;
         }
-        props.onCommandInvoke?.(commandId);
+        props.onCommandInvoke?.(commandId, followUp);
     };
     const attachmentRemoveEnabled =
         !props.disabled && props.onComposerAttachmentRemove !== undefined;
@@ -221,7 +233,10 @@ export function ConversationDock(props: ConversationDockProps) {
                     action={
                         props.disabled || props.submitDisabled
                             ? undefined
-                            : { label: "Retry", onClick: composerSend }
+                            : {
+                                  label: "Retry",
+                                  onClick: () => composerSend(retryDelivery),
+                              }
                     }
                     data-testid="conversation-submission-error"
                     tone="danger"
@@ -238,10 +253,12 @@ export function ConversationDock(props: ConversationDockProps) {
                     commands={commandItems}
                     disabled={props.disabled}
                     focusOnType={props.composerFocusOnType}
+                    followUp={followUp}
                     {...(props.composerFocusKey === undefined
                         ? {}
                         : { focusKey: props.composerFocusKey })}
-                    hint="Enter to send"
+                    hint={props.sendKey === "cmdEnter" ? "⌘ Enter to send" : "Enter to send"}
+                    {...(props.sendKey === undefined ? {} : { sendKey: props.sendKey })}
                     {...(composer.capabilities.mentions
                         ? {
                               mentions: mentionsOf(composer),

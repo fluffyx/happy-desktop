@@ -464,6 +464,41 @@ export function MessagePage() {
             </Specimen>
 
             <Specimen
+                detail="Waiting for the agent: steering keeps the own bubble, a queued message is a dashed outline drawn from the bubble's own padding, so neither moves when the agent takes it"
+                label="Message — pending steering + queued"
+                number="07b"
+                stage="app"
+            >
+                {channelFrame(
+                    <>
+                        <Message
+                            author="You"
+                            body="Use the staging database instead."
+                            deliveryState="pending_steering"
+                            own
+                            time="11:04"
+                        />
+                        <Message
+                            author="You"
+                            body="After this, open a PR."
+                            deliveryState="pending_queue"
+                            grouped
+                            own
+                            time="11:04"
+                        />
+                        <Message
+                            author="Maya Johnson"
+                            body="And tag me on it."
+                            deliveryState="pending_queue"
+                            time="11:05"
+                            tone="amber"
+                        />
+                    </>,
+                )}
+                <DimensionRule label="pending_queue: 1px dashed border inside 10/12 padding" />
+            </Specimen>
+
+            <Specimen
                 detail="A written file reference becomes the click it looks like. A path with a line or a run of lines links, in prose and in backticks alike; a fenced block is code being shown rather than cited, a time of day is not a file, and a link that is already a link is left alone"
                 label="Message — file references"
                 number="17"

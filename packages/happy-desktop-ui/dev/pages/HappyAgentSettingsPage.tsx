@@ -614,6 +614,10 @@ export function HappyAgentSettingsBlueprintPage() {
                         linkOpenPlacement="panel"
                         onTitleShimmerChange={noop}
                         onProjectsHiddenChange={noop}
+                        sendKey="enter"
+                        onSendKeyChange={noop}
+                        followUp="steer"
+                        onFollowUpChange={noop}
                         permissionMode="auto"
                         permissionModeOptions={permissionModeOptions}
                         projectsHidden
@@ -1191,6 +1195,10 @@ export function HappyAgentSettingsBlueprintPage() {
                         onLinkOpenPlacementChange={noop}
                         linkOpenPlacement="panel"
                         onTitleShimmerChange={noop}
+                        sendKey="cmdEnter"
+                        onSendKeyChange={noop}
+                        followUp="queue"
+                        onFollowUpChange={noop}
                         permissionMode="auto"
                         permissionModeOptions={permissionModeOptions}
                         scrollbarVisibility="automatic"

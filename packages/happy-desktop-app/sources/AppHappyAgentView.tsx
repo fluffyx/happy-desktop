@@ -76,6 +76,9 @@ import type {
     HappyAgentTask,
     HappyAgentTaskId,
     ProjectsVisibilityStore,
+    MessageDelivery,
+    SendKey,
+    SendBehaviorStore,
     HappyAgentGroupLifecycle,
     HappyAgentChangeTier,
     HappyAgentChangeTierId,
@@ -120,6 +123,7 @@ import {
     commandPaletteStoreNoop,
     experimentsStoreNoop,
     projectsVisibilityStoreNoop,
+    sendBehaviorStoreNoop,
     happyAgentVersionAtLeast,
     HAPPY_AGENT_TASKS_VERSION,
     HAPPY_AGENT_TASK_CREATE_VERSION,
@@ -570,6 +574,11 @@ export interface AppHappyAgentViewProps {
      * remembers no such choice supplies none, and the projects stay listed.
      */
     projectsVisibility?: ProjectsVisibilityStore;
+    /**
+     * How a message sent while the agent works is delivered. A host that
+     * remembers no such choice supplies none, and every send steers.
+     */
+    sendBehavior?: SendBehaviorStore;
     gptLive?: GptLiveStore;
     /**
      * Whether running session, project, and workspace titles shimmer. A host
@@ -2482,6 +2491,14 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
         projectsVisibilityStore.get,
         projectsVisibilityStore.get,
     ).projectsHidden;
+    // Which key sends, and what a send does while the agent works. The
+    // window's own choice, read once here and handed to every composer below.
+    const sendBehaviorStore = props.sendBehavior ?? sendBehaviorStoreNoop;
+    const { sendKey, followUp } = useSyncExternalStore(
+        sendBehaviorStore.subscribe,
+        sendBehaviorStore.get,
+        sendBehaviorStore.get,
+    );
     const navigationOrderStore = props.navigationOrder ?? happyAgentNavigationOrderStoreNoop;
     const navigationOrder = useSyncExternalStore(
         navigationOrderStore.subscribe,
@@ -3126,6 +3143,7 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
         onTaskCreateOpen: props.onTaskCreateOpen,
         store: commandPaletteStore,
         settings: settingsStore,
+        ...(props.sendBehavior ? { sendBehavior: props.sendBehavior } : {}),
         titleShimmer: titleShimmerStore,
     };
 
@@ -3160,6 +3178,7 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
                         // so it goes to the machine's own browser where the
                         // host can send it there.
                         onExternalLinkOpen={props.onExternalLinkOpen ?? openExternalLink}
+                        sendKey={sendKey}
                         workspace={active.session.workspace}
                         {...(activeAvailability?.refusal === undefined
                             ? {}
@@ -3176,6 +3195,7 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
                     <HappyAgentCreateTaskSurface
                         happyAgentOnline={activeHappyAgentOnline}
                         providerUsage={active.session.providerUsage}
+                        sendKey={sendKey}
                         workspace={active.session.workspace}
                         {...(activeAvailability?.refusal === undefined
                             ? {}
@@ -3227,6 +3247,7 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
                         projects={active.projects}
                         happyAgentId={active.id}
                         happyAgentOnline={activeHappyAgentOnline}
+                        sendKey={sendKey}
                         snapshot={inbox}
                         store={active.session.inbox}
                         {...(activeAvailability?.refusal === undefined
@@ -3267,6 +3288,8 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
                     }
                     onExternalLinkOpen={props.onExternalLinkOpen ?? openExternalLink}
                     linkOpenDefault={settings.linkOpenPlacement}
+                    followUp={followUp}
+                    sendKey={sendKey}
                     platform={props.platform}
                     projects={active.projects}
                     happyAgentOnline={activeHappyAgentOnline}
@@ -3493,6 +3516,8 @@ interface HappyAgentPaletteActions {
     appearance: AppearanceStore;
     experiments: ExperimentsStore;
     settings: HappyAgentSettingsStore;
+    /** Absent where the host keeps no follow-up choice. */
+    sendBehavior?: SendBehaviorStore;
     titleShimmer: TitleShimmerStore;
     store: CommandPaletteStore;
     happyAgentOnline: () => boolean;
@@ -3802,6 +3827,12 @@ function HappyAgentCommandPalette(
         props.settings.get,
         props.settings.get,
     );
+    const sendBehaviorStore = props.sendBehavior ?? sendBehaviorStoreNoop;
+    const sendBehavior = useSyncExternalStore(
+        sendBehaviorStore.subscribe,
+        sendBehaviorStore.get,
+        sendBehaviorStore.get,
+    );
     const results = commandPaletteResults({
         ...paletteContext(props, props.facts),
         experimentalFeaturesEnabled: experiments.experimentalFeaturesEnabled,
@@ -3809,6 +3840,9 @@ function HappyAgentCommandPalette(
         scrollbarVisibility: appearance.scrollbarVisibility,
         themeMode: appearance.mode,
         linkOpenPlacement: settings.linkOpenPlacement,
+        ...(props.sendBehavior
+            ? { sendKey: sendBehavior.sendKey, followUp: sendBehavior.followUp }
+            : {}),
         titleShimmerEnabled: titleShimmer.titleShimmerEnabled,
     });
     const sections = results.sections.map(
@@ -3988,6 +4022,42 @@ function paletteSettingControl(
                     label={row.label}
                 />
             );
+        case "sendKey":
+            return (
+                <FormRow
+                    control={
+                        <SegmentedControl
+                            aria-label={row.label}
+                            onChange={(value) =>
+                                actions.sendBehavior?.sendKeyUpdate(value as SendKey)
+                            }
+                            segments={[...row.control.segments]}
+                            size="small"
+                            value={row.control.value}
+                        />
+                    }
+                    description={row.description}
+                    label={row.label}
+                />
+            );
+        case "followUp":
+            return (
+                <FormRow
+                    control={
+                        <SegmentedControl
+                            aria-label={row.label}
+                            onChange={(value) =>
+                                actions.sendBehavior?.followUpUpdate(value as MessageDelivery)
+                            }
+                            segments={[...row.control.segments]}
+                            size="small"
+                            value={row.control.value}
+                        />
+                    }
+                    description={row.description}
+                    label={row.label}
+                />
+            );
         case "experimentalFeatures":
             return (
                 <FormRow
@@ -4029,6 +4099,12 @@ function paletteSettingCommit(row: CommandPaletteSettingRow, actions: HappyAgent
             return;
         case "linkOpenPlacement":
             actions.settings.linkOpenPlacementUpdate(row.control.next);
+            return;
+        case "sendKey":
+            actions.sendBehavior?.sendKeyUpdate(row.control.next);
+            return;
+        case "followUp":
+            actions.sendBehavior?.followUpUpdate(row.control.next);
             return;
         case "experimentalFeatures":
             actions.experiments.experimentalFeaturesUpdate(row.control.next);
@@ -4194,6 +4270,7 @@ function HappyAgentInboxSurface(props: {
     projects: readonly HappyAgentProjectGroup[];
     happyAgentId: string;
     happyAgentOnline: () => boolean;
+    sendKey: SendKey;
     snapshot: HappyAgentInboxSnapshot;
     store: HappyAgentInboxStore;
     unavailable?: string;
@@ -4228,6 +4305,7 @@ function HappyAgentInboxSurface(props: {
                 props.store.itemSelectionUpdate(itemId, answers)
             }
             selections={props.snapshot.selections}
+            sendKey={props.sendKey}
             onOpenSession={(item) => {
                 if (!item.scope) return;
                 props.onOpenSession(
@@ -4562,6 +4640,10 @@ interface HappyAgentWorkspaceSurfaceProps {
     onExternalLinkOpen(url: string): void;
     /** Which of the two places a plain click on a link goes, marked in its menu. */
     linkOpenDefault: LinkOpenPlacement;
+    /** What a send does while the agent works; the other send key does the opposite. */
+    followUp: MessageDelivery;
+    /** Which key sends. */
+    sendKey: SendKey;
 }
 
 /**
@@ -5367,6 +5449,8 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
             // under the strip is the same composer that starts the first one.
             <HappyAgentGroupComposer
                 composer={workspace.groupComposer}
+                followUp={props.followUp}
+                sendKey={props.sendKey}
                 modelUsageWatch={modelUsageWatch}
                 {...(workspace.groupSessionDraft
                     ? { draftMenus: workspace.groupSessionDraft.menus }
@@ -5462,6 +5546,8 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                     else props.workspace.panel.browserAdd(url);
                 }}
                 linkOpenDefault={props.linkOpenDefault}
+                followUp={props.followUp}
+                sendKey={props.sendKey}
                 canAbort={conversationCanAbort}
                 readOnly={conversationReadOnly}
                 happyAgentOnline={happyAgentOnline}
@@ -6804,6 +6890,10 @@ function HappyAgentGroupComposer(props: {
      */
     draftMenus?: HappyAgentMenusSnapshot;
     focusOnType: boolean;
+    /** What a send does while the agent works, should the new one already be busy. */
+    followUp: MessageDelivery;
+    /** Which key sends. */
+    sendKey: SendKey;
     /** The group being written into. Arriving at another one takes the caret. */
     groupId: string;
     groupName: string;
@@ -6822,6 +6912,8 @@ function HappyAgentGroupComposer(props: {
             agentAuthor={agentAuthor}
             composer={props.composer}
             composerDisabled={modelsNotConfigured}
+            composerFollowUp={props.followUp}
+            composerSendKey={props.sendKey}
             composerFocusOnType={props.focusOnType && !modelsNotConfigured}
             // Only the composer that claims stray typing takes the caret, so the
             // dock over an expanded panel cannot pull it out from under the one
@@ -6888,9 +6980,9 @@ function HappyAgentGroupComposer(props: {
             }
             onComposerAttachmentsSelect={(files) => workspace.composerAttachmentsAdd(files)}
             onComposerFocusChange={(focused) => workspace.composerFocusUpdate(focused)}
-            onComposerSend={() => {
+            onComposerSend={(delivery) => {
                 if (!modelsNotConfigured && props.happyAgentOnline())
-                    workspace.composerTextSubmit();
+                    workspace.composerTextSubmit(delivery);
             }}
             onComposerValueChange={(value) =>
                 reactFrameInputUpdate(workspace, () => workspace.composerTextUpdate(value))
@@ -6933,6 +7025,10 @@ function HappyAgentConversationBody(props: {
     onLinkOpen: LinkOpenHandler;
     /** Which of the two places a plain click on a link goes, marked in its menu. */
     linkOpenDefault: LinkOpenPlacement;
+    /** What a send does while the agent works; the other send key does the opposite. */
+    followUp: MessageDelivery;
+    /** Which key sends. */
+    sendKey: SendKey;
     readOnly: boolean;
     /** Reads current transport health when a Happy Agent-backed action is invoked. */
     happyAgentOnline: () => boolean;
@@ -6974,6 +7070,8 @@ function HappyAgentConversationBody(props: {
                 onFileLinkOpen={props.onFileLinkOpen}
                 onLinkOpen={props.onLinkOpen}
                 linkOpenDefault={props.linkOpenDefault}
+                followUp={props.followUp}
+                sendKey={props.sendKey}
                 canAbort={props.canAbort}
                 readOnly={props.readOnly}
                 happyAgentOnline={props.happyAgentOnline}
@@ -7130,6 +7228,10 @@ function HappyAgentConversationSurface(props: {
     onLinkOpen: LinkOpenHandler;
     /** Which of the two places a plain click on a link goes, marked in its menu. */
     linkOpenDefault: LinkOpenPlacement;
+    /** What a send does while the agent works; the other send key does the opposite. */
+    followUp: MessageDelivery;
+    /** Which key sends. */
+    sendKey: SendKey;
     readOnly: boolean;
     /** Reads current transport health when a Happy Agent-backed action is invoked. */
     happyAgentOnline: () => boolean;
@@ -7363,8 +7465,9 @@ function HappyAgentConversationSurface(props: {
             }
             onCommandInvoke={
                 !modelsNotConfigured && props.unavailable === undefined
-                    ? (commandId) => {
-                          if (props.happyAgentOnline()) workspace.composerCommandInvoke(commandId);
+                    ? (commandId, delivery) => {
+                          if (props.happyAgentOnline())
+                              workspace.composerCommandInvoke(commandId, delivery);
                       }
                     : undefined
             }
@@ -7373,9 +7476,9 @@ function HappyAgentConversationSurface(props: {
             }
             onComposerAttachmentsSelect={(files) => workspace.composerAttachmentsAdd(files)}
             onComposerFocusChange={(focused) => workspace.composerFocusUpdate(focused)}
-            onComposerSend={() => {
+            onComposerSend={(delivery) => {
                 if (!modelsNotConfigured && props.happyAgentOnline())
-                    workspace.composerTextSubmit();
+                    workspace.composerTextSubmit(delivery);
             }}
             onComposerValueChange={(value) =>
                 reactFrameInputUpdate(workspace, () => workspace.composerTextUpdate(value))
@@ -7386,6 +7489,8 @@ function HappyAgentConversationSurface(props: {
             onFileLinkOpen={props.onFileLinkOpen}
             onLinkOpen={props.onLinkOpen}
             linkOpenDefault={props.linkOpenDefault}
+            composerFollowUp={props.followUp}
+            composerSendKey={props.sendKey}
             onImageOpen={(messageId, attachmentId) => {
                 if (props.happyAgentOnline()) workspace.imageOpen(messageId, attachmentId);
             }}
@@ -7904,6 +8009,7 @@ function HappyAgentCreateBotSurface(props: {
     happyAgentOnline: () => boolean;
     onExternalLinkOpen: (url: string) => void;
     providerUsage?: HappyAgentProviderUsageStore;
+    sendKey: SendKey;
     unavailable?: string;
     workspace: HappyAgentWorkspaceStore;
 }) {
@@ -7971,6 +8077,7 @@ function HappyAgentCreateBotSurface(props: {
                 />
             }
             composerPlaceholder="What should it work on?"
+            composerSendKey={props.sendKey}
             composerSubmitDisabled={props.unavailable !== undefined}
             emptyContent={
                 <HappyAgentCreateBotPage
@@ -8004,8 +8111,8 @@ function HappyAgentCreateBotSurface(props: {
             }
             onComposerAttachmentsSelect={(files) => store.botCreateAttachmentsAdd(files)}
             onComposerFocusChange={(focused) => store.botCreateTaskFocusUpdate(focused)}
-            onComposerSend={() => {
-                if (props.happyAgentOnline()) store.botCreateTaskSend();
+            onComposerSend={(delivery) => {
+                if (props.happyAgentOnline()) store.botCreateTaskSend(delivery);
             }}
             onComposerValueChange={(value) =>
                 reactFrameInputUpdate(store, () => store.botCreateTaskUpdate(value))
@@ -8024,6 +8131,7 @@ function HappyAgentCreateBotSurface(props: {
 function HappyAgentCreateTaskSurface(props: {
     happyAgentOnline: () => boolean;
     providerUsage?: HappyAgentProviderUsageStore;
+    sendKey: SendKey;
     unavailable?: string;
     workspace: HappyAgentWorkspaceStore;
 }) {
@@ -8084,6 +8192,7 @@ function HappyAgentCreateTaskSurface(props: {
                 />
             }
             composerPlaceholder="What should it work on?"
+            composerSendKey={props.sendKey}
             composerSubmitDisabled={props.unavailable !== undefined}
             emptyContent={
                 <HappyAgentCreateTaskPage
@@ -8110,8 +8219,8 @@ function HappyAgentCreateTaskSurface(props: {
             }
             onComposerAttachmentsSelect={(files) => store.taskCreateAttachmentsAdd(files)}
             onComposerFocusChange={(focused) => store.taskCreateMessageFocusUpdate(focused)}
-            onComposerSend={() => {
-                if (props.happyAgentOnline()) store.taskCreateMessageSend();
+            onComposerSend={(delivery) => {
+                if (props.happyAgentOnline()) store.taskCreateMessageSend(delivery);
             }}
             onComposerValueChange={(value) =>
                 reactFrameInputUpdate(store, () => store.taskCreateMessageUpdate(value))

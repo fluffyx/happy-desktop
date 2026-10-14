@@ -175,22 +175,59 @@
 }
 
 /*
- * Steering the reader has queued but the turn has not taken yet. It sits below
- * the live status line rather than among the rows above it, because it is the
- * one thing in the transcript that has not happened: ordered as history it
+ * Messages the reader sent that the agent has not taken yet. They sit below the
+ * live status line rather than among the rows above it, because they are the
+ * one thing in the transcript that has not happened: ordered as history they
  * would read as something the agent had already been told.
  *
- * It is held back rather than greyed out — the words stay the reader's own, at
- * their own colour, just short of full presence — and it comes forward as it is
- * applied, at which point it becomes an ordinary row in the transcript above.
+ * Each group — steering, then the queue — opens with one caption saying when
+ * the agent takes it. The messages are held back rather than greyed out — the
+ * words stay the reader's own, at their own colour, just short of full presence
+ * — and come forward as they are taken, at which point they become ordinary
+ * rows in the transcript above. The caption is not held back: it is the one
+ * line here that is already true.
  */
 .happy-conversation__queued {
     display: flex;
     flex: none;
     flex-direction: column;
     width: 100%;
+}
+
+.happy-conversation__pending-group {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    width: 100%;
+}
+
+.happy-conversation__pending-group > :not(.happy-conversation__pending-caption) {
     opacity: 0.62;
     transition: opacity 160ms ease;
+}
+
+/* 24px: a 16px line with 4px above and below. Right-aligned on the same 28px
+   inset as the reader's own bubbles, which are what it captions. */
+.happy-conversation__pending-caption {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 24px;
+    padding: 4px 28px 4px 0;
+    font-family: var(--happy-font-ui);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 16px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.happy-conversation__pending-label {
+    font-weight: 600;
 }
 
 .happy-conversation__panel,

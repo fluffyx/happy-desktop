@@ -11,6 +11,7 @@ import {
     type ChatElement,
     type MutationRejectedDelta,
     type HappyAgentConnection,
+    type MessageDelivery,
     type SessionState,
     type SessionUsage,
 } from "../happyAgentConnection/index.js";
@@ -44,7 +45,6 @@ import type {
     HappyAgentModelEffortRemembered,
     HappyAgentModelSelection,
     HappyAgentPermissionMode,
-    HappyAgentQueuedMessage,
     HappyAgentSelection,
     HappyAgentServiceTier,
     HappyAgentSession,
@@ -207,18 +207,6 @@ function transcriptPendingUserInputsProject(
             required: question.required ?? false,
             options: question.options,
         })),
-    }));
-}
-
-function transcriptQueuedMessagesProject(
-    session: SessionState,
-): readonly HappyAgentQueuedMessage[] {
-    return session.pendingSteeringMessages.map((pending) => ({
-        id: pending.message.id,
-        text: pending.message.blocks
-            .filter((block) => block.type === "text")
-            .map((block) => block.text)
-            .join("\n"),
     }));
 }
 
@@ -507,7 +495,6 @@ function sessionProject(session: SessionState): HappyAgentSession {
         ...(session.recap === undefined ? {} : { recap: session.recap }),
         ...(session.draft === undefined ? {} : { draft: session.draft }),
         ...(session.draftUpdatedAt === undefined ? {} : { draftUpdatedAt: session.draftUpdatedAt }),
-        queuedMessages: transcriptQueuedMessagesProject(session),
         pendingUserInputs: transcriptPendingUserInputsProject(session),
         ...(transcriptGoalProject(session) === undefined
             ? {}
@@ -544,7 +531,6 @@ export interface HappyAgentChatSnapshot {
     readonly pendingUserInputs: readonly HappyAgentUserInputRequest[];
     readonly requestSubmissions: readonly ConversationRequestSubmission[];
     readonly requestSelections: ReadonlyMap<string, Readonly<Record<string, readonly string[]>>>;
-    readonly queuedMessages: readonly HappyAgentQueuedMessage[];
     /** Complete ordered slash-command catalog projected from the focused agent. */
     readonly slashCommands: readonly HappyAgentSlashCommand[];
     readonly tasks: readonly HappyAgentTodo[];
@@ -568,7 +554,7 @@ export type HappyAgentChatOutput =
     | {
           readonly type: "messageSent";
           readonly sessionId: HappyAgentSessionId;
-          readonly steered: boolean;
+          readonly delivery: MessageDelivery;
       }
     | { readonly type: "runAborted"; readonly sessionId: HappyAgentSessionId }
     | {
@@ -584,13 +570,23 @@ export interface HappyAgentChatStore {
     subscribe(listener: () => void): () => void;
     sessionRetry(): void;
     historyLoadMore(): void;
-    messageSend(text: string, images?: readonly HappyAgentImageInput[]): Promise<void>;
+    messageSend(
+        text: string,
+        images: readonly HappyAgentImageInput[],
+        delivery: MessageDelivery,
+    ): Promise<void>;
     /** Exact-text human confirmation from voice. Never routes text into a pending question. */
     voiceMessageSendConfirmed(
         text: string,
         permissionMode: HappyAgentPermissionMode,
+        delivery: MessageDelivery,
     ): Promise<void>;
-    slashCommandInvoke(name: string, argumentsValue?: string): Promise<void>;
+    /** A skill is sent as a message, so it is delivered like one; other commands ignore it. */
+    slashCommandInvoke(
+        name: string,
+        argumentsValue: string | undefined,
+        delivery: MessageDelivery,
+    ): Promise<void>;
     draftSet(draft: string, updatedAt: number, origin: string): Promise<void>;
     runAbort(): Promise<void>;
     answerInput(input: HappyAgentUserInputAnswers): Promise<void>;
@@ -708,7 +704,6 @@ export function happyAgentChatStoreCreate(
         pendingUserInputs: [],
         requestSubmissions: [],
         requestSelections: new Map(),
-        queuedMessages: [],
         slashCommands: [],
         tasks: [],
         subagents: [],
@@ -919,8 +914,6 @@ export function happyAgentChatStoreCreate(
             pendingUserInputs,
             requestSubmissions: [...requestSubmissions.values()],
             requestSelections: new Map(requestSelections),
-            queuedMessages:
-                connected === undefined ? [] : transcriptQueuedMessagesProject(connected),
             slashCommands,
             tasks,
             ...(goal === undefined ? {} : { goal }),
@@ -1198,7 +1191,7 @@ export function happyAgentChatStoreCreate(
             if (token === undefined || transcriptSession?.loadingMore === true) return;
             transcriptConnection?.loadMore(token);
         },
-        voiceMessageSendConfirmed: (text, permissionMode) =>
+        voiceMessageSendConfirmed: (text, permissionMode, delivery) =>
             rejecting(async () => {
                 const current = store.getState();
                 if (current.session.type !== "ready")
@@ -1212,17 +1205,15 @@ export function happyAgentChatStoreCreate(
                     );
                 if (current.session.value.permissionMode !== permissionMode)
                     throw new Error("The access mode changed. Review the message again.");
-                const steered = runStatus === "running";
-                await deps.connectActions.sendMessageConfirmed(sessionId, text);
-                output({ type: "messageSent", sessionId, steered });
+                await deps.connectActions.sendMessageConfirmed(sessionId, { text, delivery });
+                output({ type: "messageSent", sessionId, delivery });
             }),
-        messageSend: (text, images) =>
+        messageSend: (text, images, delivery) =>
             rejecting(async () => {
                 if ((await pendingQuestionAnswer(text)).textUsed) return;
-                const steered = runStatus === "running";
                 const mutationId = deps.connectActions.sendMessage(
                     sessionId,
-                    images && images.length > 0
+                    images.length > 0
                         ? {
                               text,
                               content: [
@@ -1233,14 +1224,15 @@ export function happyAgentChatStoreCreate(
                                       data: image.data,
                                   })),
                               ],
+                              delivery,
                           }
-                        : text,
+                        : { text, delivery },
                 );
-                if (images && images.length > 0) sentImagesRemember(mutationId, images);
+                if (images.length > 0) sentImagesRemember(mutationId, images);
                 connectMutationTrack(mutationId);
-                output({ type: "messageSent", sessionId, steered });
+                output({ type: "messageSent", sessionId, delivery });
             }),
-        slashCommandInvoke: (name, argumentsValue) =>
+        slashCommandInvoke: (name, argumentsValue, delivery) =>
             rejecting(() => {
                 // A skill is not a command the daemon runs on its own: it is a
                 // document the model has to read before it acts. So invoking one
@@ -1252,7 +1244,6 @@ export function happyAgentChatStoreCreate(
                 // invocation and the model reads the ask beside the loaded document.
                 const command = slashCommands.find((one) => one.name === name);
                 if (command?.kind === "skill") {
-                    const steered = runStatus === "running";
                     const text =
                         argumentsValue === undefined || argumentsValue.trim().length === 0
                             ? `/${name}`
@@ -1268,9 +1259,10 @@ export function happyAgentChatStoreCreate(
                                     arguments: { name },
                                 },
                             ],
+                            delivery,
                         }),
                     );
-                    output({ type: "messageSent", sessionId, steered });
+                    output({ type: "messageSent", sessionId, delivery });
                     return;
                 }
                 connectMutationTrack(

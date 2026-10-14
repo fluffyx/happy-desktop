@@ -79,6 +79,23 @@
     line-height: 16px;
 }
 
+/* The detail line keeps the description's type, so a key cap inside it reads
+   as part of the same sentence. 18px is the key cap's own height. */
+.happy-form-row__detail {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    min-height: 18px;
+    margin: 0;
+    color: var(--text-secondary);
+    font-family: var(--happy-font-ui);
+    font-size: 12px;
+    font-synthesis: none;
+    font-weight: 400;
+    line-height: 16px;
+}
+
 .happy-form-row__control {
     display: flex;
     flex: none;

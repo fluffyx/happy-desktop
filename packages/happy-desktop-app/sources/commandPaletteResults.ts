@@ -5,7 +5,9 @@ import type {
     HappyAgentTranscriptMode,
     HappyAgentWorktreeGroup,
     HappyAgentLinkOpenPlacement,
+    MessageDelivery,
     ScrollbarVisibility,
+    SendKey,
     ThemeMode,
 } from "happy-desktop-state";
 import { happyAgentSessionGroupIdOf } from "happy-desktop-state";
@@ -135,6 +137,30 @@ export type CommandPaletteSettingRow =
           };
       })
     | (CommandPaletteSettingRowBase & {
+          readonly setting: "sendKey";
+          readonly control: {
+              readonly kind: "segmented";
+              readonly value: SendKey;
+              readonly segments: readonly {
+                  readonly value: SendKey;
+                  readonly label: string;
+              }[];
+              readonly next: SendKey;
+          };
+      })
+    | (CommandPaletteSettingRowBase & {
+          readonly setting: "followUp";
+          readonly control: {
+              readonly kind: "segmented";
+              readonly value: MessageDelivery;
+              readonly segments: readonly {
+                  readonly value: MessageDelivery;
+                  readonly label: string;
+              }[];
+              readonly next: MessageDelivery;
+          };
+      })
+    | (CommandPaletteSettingRowBase & {
           readonly setting: "titleShimmer";
           readonly control: {
               readonly kind: "switch";
@@ -249,6 +275,10 @@ export interface CommandPaletteInput extends CommandPaletteContext {
     readonly themeMode: ThemeMode;
     readonly scrollbarVisibility: ScrollbarVisibility;
     readonly linkOpenPlacement: HappyAgentLinkOpenPlacement;
+    /** Absent where the host keeps no send key choice, which offers no row for it. */
+    readonly sendKey?: SendKey;
+    /** Absent where the host keeps no follow-up choice, which offers no row for it. */
+    readonly followUp?: MessageDelivery;
     readonly titleShimmerEnabled: boolean;
     readonly experimentalFeaturesEnabled: boolean;
 }
@@ -280,6 +310,22 @@ const LINK_OPEN_SEGMENTS: readonly {
 }[] = [
     { value: "panel", label: "Side panel" },
     { value: "browser", label: "Browser" },
+];
+
+const SEND_KEY_SEGMENTS: readonly {
+    readonly value: SendKey;
+    readonly label: string;
+}[] = [
+    { value: "enter", label: "Enter" },
+    { value: "cmdEnter", label: "⌘ Enter" },
+];
+
+const FOLLOW_UP_SEGMENTS: readonly {
+    readonly value: MessageDelivery;
+    readonly label: string;
+}[] = [
+    { value: "steer", label: "Steer" },
+    { value: "queue", label: "Queue" },
 ];
 
 /**
@@ -737,6 +783,50 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
                 next: LINK_OPEN_SEGMENTS[(linkOpenIndex + 1) % LINK_OPEN_SEGMENTS.length].value,
             },
         },
+        ...(input.sendKey === undefined
+            ? []
+            : [
+                  {
+                      kind: "setting" as const,
+                      setting: "sendKey" as const,
+                      id: "setting:send-key",
+                      label: "Send messages with",
+                      description:
+                          input.sendKey === "enter"
+                              ? "Shift+Enter adds a new line"
+                              : "Enter adds a new line",
+                      controlId: "happy-agent-palette-send-key",
+                      control: {
+                          kind: "segmented" as const,
+                          value: input.sendKey,
+                          segments: SEND_KEY_SEGMENTS,
+                          next:
+                              input.sendKey === "enter"
+                                  ? ("cmdEnter" as const)
+                                  : ("enter" as const),
+                      },
+                  },
+              ]),
+        ...(input.followUp === undefined
+            ? []
+            : [
+                  {
+                      kind: "setting" as const,
+                      setting: "followUp" as const,
+                      id: "setting:follow-up",
+                      label: "Follow-up behavior",
+                      description:
+                          "Steer the agent mid-turn, or queue messages to send after it finishes",
+                      controlId: "happy-agent-palette-follow-up",
+                      control: {
+                          kind: "segmented" as const,
+                          value: input.followUp,
+                          segments: FOLLOW_UP_SEGMENTS,
+                          next:
+                              input.followUp === "steer" ? ("queue" as const) : ("steer" as const),
+                      },
+                  },
+              ]),
         {
             kind: "setting",
             setting: "titleShimmer",
@@ -776,6 +866,8 @@ function settingRows(input: CommandPaletteInput): CommandPaletteSettingRow[] {
  */
 const SETTINGS_INLINE_SECTIONS: Record<CommandPaletteSettingRow["setting"], string> = {
     experimentalFeatures: "Settings General Experimental features",
+    followUp: "Settings General Conversations steer queue",
+    sendKey: "Settings General Conversations enter return newline cmd command ⌘",
     linkOpenPlacement: "Settings General Links",
     scrollbarVisibility: "Settings General Appearance",
     themeMode: "Settings General Appearance",
