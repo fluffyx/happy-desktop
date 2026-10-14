@@ -151,10 +151,17 @@ it("writes no ⌃↵ new line into a draft whose send is in flight", async () =>
 });
 
 it("names ⌥↵ as the other key while the agent works, and ⌥ held shows what it does", async () => {
+    const runningSends: MessageDelivery[] = [];
     const view = createRenderer();
     view.render(
         () => (
-            <Harness initial="Look again" running sendKey="cmdEnter" sends={[]} testid="running" />
+            <Harness
+                initial="Look again"
+                running
+                sendKey="cmdEnter"
+                sends={runningSends}
+                testid="running"
+            />
         ),
         { width: 600, height: 200, padding: 20 },
     ).render(
@@ -198,6 +205,9 @@ it("names ⌥↵ as the other key while the agent works, and ⌥ held shows what
     const bubble = tipOf("running").querySelector(".happy-tooltip__bubble") as HTMLElement;
     await expect.poll(() => getComputedStyle(bubble).opacity).toBe("1");
     await view.screenshot("Composer.sendKey.test");
+    // A click with ⌥ still held does what the control says.
+    sendOf("running").click();
+    expect(runningSends).toEqual(["queue"]);
     await userEvent.keyboard("{/Alt}");
     expect(sendOf("running").getAttribute("aria-label")).toBe("Steer · ⌥↵ to queue");
     expect(tipOf("running").hasAttribute("data-open")).toBe(false);
