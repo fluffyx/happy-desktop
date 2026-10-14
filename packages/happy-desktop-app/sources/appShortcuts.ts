@@ -118,6 +118,27 @@ export const APP_SHORTCUT_SECTIONS: readonly ShortcutSheetSection[] = [
         ],
     },
     {
+        id: "chats",
+        title: "Chats",
+        items: [
+            {
+                id: "unread-next",
+                title: "Go to next unread",
+                shortcut: APP_SHORTCUTS.unreadNextOpen,
+            },
+            {
+                id: "unread-previous",
+                title: "Go to previous unread",
+                shortcut: APP_SHORTCUTS.unreadPreviousOpen,
+            },
+            {
+                id: "transcript-copy",
+                title: "Copy concise transcript",
+                shortcut: APP_SHORTCUTS.transcriptCopy,
+            },
+        ],
+    },
+    {
         id: "files",
         title: "Files",
         items: [{ id: "file-save", title: "Save file", shortcut: commandShortcut("s") }],
