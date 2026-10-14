@@ -51,6 +51,7 @@ import {
     type HappyAgentViewPreferencesPersistence,
 } from "./happyAgentViewPreferences.js";
 import type { HappyAgentHost } from "./happyAgentHost.js";
+import type { HappyAgentTranscriptMode } from "./happyAgentTranscript.js";
 import type {
     HappyAgentChatSnapshot,
     HappyAgentChatStore,
@@ -693,6 +694,12 @@ export interface HappyAgentWorkspaceSnapshot {
      * Absent means the addressed conversation is still visible.
      */
     readonly displayedMainViewId?: string;
+    /**
+     * The transcript copy still worth reporting, on the tab of the session it
+     * copies: running, then how it ended for a moment, then gone. One at a
+     * time — a new copy replaces the report of the last.
+     */
+    readonly transcriptCopy?: HappyAgentTranscriptCopy;
     /**
      * The file the panel's viewer is on, if any: the one member of `fileTabs`
      * placed in the panel. It is the identical object, offered here so the
@@ -1425,6 +1432,23 @@ export interface HappyAgentWorkspaceDeps {
      * window and no longer, which is what Blueprint and tests want.
      */
     readonly viewPreferences?: HappyAgentViewPreferencesPersistence;
+    /**
+     * Puts text on the system clipboard, for the one act that ends there:
+     * copying a transcript. Absent, a copy reads the transcript and then
+     * reports that it failed, which is the honest state of a host with no
+     * clipboard — Blueprint and tests included.
+     */
+    readonly clipboardWrite?: (text: string) => Promise<void>;
+}
+
+/**
+ * Where one transcript copy stands. `empty` is a session with nothing in it to
+ * copy; `failed` covers both a read the host refused and a clipboard that
+ * would not take the text.
+ */
+export interface HappyAgentTranscriptCopy {
+    readonly sessionId: HappyAgentSessionId;
+    readonly status: "copying" | "copied" | "empty" | "failed";
 }
 
 export interface HappyAgentWorkspaceNewChatInput {
@@ -1562,6 +1586,12 @@ export interface HappyAgentWorkspaceStore {
      * remains the caller's.
      */
     browserReopen(tab: HappyAgentClosedTab & { readonly type: "browser" }): void;
+    /**
+     * Copies a session's whole transcript to the clipboard as Markdown — all of
+     * its history, not only what an open chat has loaded. It returns at once;
+     * `transcriptCopy` reports the copy running and then how it ended.
+     */
+    transcriptCopy(sessionId: HappyAgentSessionId, mode: HappyAgentTranscriptMode): void;
     /**
      * Moves one tab of the addressed group directly after `afterId`, or to the
      * front of the strip when null. The order is this client's own and takes
@@ -2113,6 +2143,9 @@ function subtaskIndex(
     return index;
 }
 
+/** How long a finished transcript copy says how it went, matching a copy button's check. */
+const TRANSCRIPT_COPY_REPORT_MS = 1_600;
+
 /**
  * The creation fields one selection names. Absent optionals are left out rather
  * than sent as undefined, so a create request carries only what was chosen and
@@ -2441,6 +2474,27 @@ export function happyAgentWorkspaceStoreCreate(
         readonly error?: string;
     }
     let botCreateDraft: BotCreateDraft | undefined;
+    let transcriptCopyState: HappyAgentTranscriptCopy | undefined;
+    /** Which copy is current, so a copy that was replaced neither writes nor reports. */
+    let transcriptCopyGeneration = 0;
+    let transcriptCopyTimer: ReturnType<typeof setTimeout> | undefined;
+    let transcriptCopyController: AbortController | undefined;
+    /** The clipboard writes in order; each settles before the next begins. */
+    let transcriptCopyWrites: Promise<void> = Promise.resolve();
+    const transcriptCopyReport = (generation: number, next: HappyAgentTranscriptCopy): void => {
+        if (disposed || generation !== transcriptCopyGeneration) return;
+        transcriptCopyState = next;
+        recompute();
+        if (next.status === "copying") return;
+        // How it ended is news for a moment, the way a copy button's check is,
+        // and then the tab goes back to being only the tab.
+        transcriptCopyTimer = setTimeout(() => {
+            transcriptCopyTimer = undefined;
+            if (disposed || generation !== transcriptCopyGeneration) return;
+            transcriptCopyState = undefined;
+            recompute();
+        }, TRANSCRIPT_COPY_REPORT_MS);
+    };
     /**
      * What the draft is making. A task is made on the bot's own machinery —
      * the same name, composer, and pickers — less the face, so one draft
@@ -3144,6 +3198,7 @@ export function happyAgentWorkspaceStoreCreate(
                 snapshot.tabOrder === tabOrder &&
                 snapshot.activeMainViewId === activeMainViewId &&
                 snapshot.displayedMainViewId === displayedMainViewId &&
+                snapshot.transcriptCopy === transcriptCopyState &&
                 snapshot.panelFile === panelFile &&
                 snapshot.groupResume === groupResume &&
                 snapshot.openInTargets === openInTargets &&
@@ -3204,6 +3259,7 @@ export function happyAgentWorkspaceStoreCreate(
                           ...(taskBrowseOpen ? { taskBrowseOpen: true as const } : {}),
                           ...(activeMainViewId ? { activeMainViewId } : {}),
                           ...(displayedMainViewId ? { displayedMainViewId } : {}),
+                          ...(transcriptCopyState ? { transcriptCopy: transcriptCopyState } : {}),
                           ...(panelFile ? { panelFile } : {}),
                           ...(groupComposerDraft ? { groupComposer: groupComposerDraft } : {}),
                           ...(groupSessionDraft ? { groupSessionDraft } : {}),
@@ -7188,6 +7244,48 @@ export function happyAgentWorkspaceStoreCreate(
             closedTabForget(tab);
             recompute();
         },
+        transcriptCopy(sessionId, mode) {
+            if (disposed) return;
+            clearTimeout(transcriptCopyTimer);
+            transcriptCopyTimer = undefined;
+            // The copy this one replaces stops downloading a history nobody
+            // will read.
+            transcriptCopyController?.abort();
+            const controller = new AbortController();
+            transcriptCopyController = controller;
+            transcriptCopyGeneration += 1;
+            const generation = transcriptCopyGeneration;
+            const current = (): boolean => !disposed && generation === transcriptCopyGeneration;
+            transcriptCopyReport(generation, { sessionId, status: "copying" });
+            const clipboardWrite = deps.clipboardWrite;
+            void client
+                .transcriptRead(sessionId, mode, controller.signal)
+                .then(async (text) => {
+                    // A later copy owns the clipboard as well as the report.
+                    if (!current()) return;
+                    if (text.length === 0) {
+                        transcriptCopyReport(generation, { sessionId, status: "empty" });
+                        return;
+                    }
+                    if (clipboardWrite === undefined)
+                        throw new Error("This window has no clipboard to copy into.");
+                    // Writes go one after another, and one that has been
+                    // replaced while it waited is skipped, so an older copy can
+                    // never land on the clipboard after a newer one.
+                    const write = transcriptCopyWrites.then(async () => {
+                        if (!current()) return false;
+                        await clipboardWrite(text);
+                        return true;
+                    });
+                    transcriptCopyWrites = write.then(
+                        () => undefined,
+                        () => undefined,
+                    );
+                    if (await write)
+                        transcriptCopyReport(generation, { sessionId, status: "copied" });
+                })
+                .catch(() => transcriptCopyReport(generation, { sessionId, status: "failed" }));
+        },
         tabReorder(tabId, afterId) {
             if (disposed || addressedGroupId === undefined) return;
             const groupId = addressedGroupId;
@@ -8459,6 +8557,8 @@ export function happyAgentWorkspaceStoreCreate(
             if (disposed) return;
             disposed = true;
             stop();
+            clearTimeout(transcriptCopyTimer);
+            transcriptCopyController?.abort();
             botCreateRelease(true);
             const released = new Set<string>();
             for (const attachments of [

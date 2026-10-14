@@ -9,9 +9,16 @@ import {
     type HappyAgentFileLinkTarget,
 } from "./happyAgentFileLink.js";
 import {
+    happyAgentAgentIdentitiesIndex,
     happyAgentAgentIdentitySourceCreate,
     type HappyAgentAgentIdentitySource,
 } from "./happyAgentAgentIdentities.js";
+import {
+    happyAgentTranscriptAgentNamesRead,
+    happyAgentTranscriptFormat,
+    happyAgentTranscriptRunsRead,
+    type HappyAgentTranscriptMode,
+} from "./happyAgentTranscript.js";
 import type { MutationRejectedDelta } from "../happyAgentConnection/index.js";
 import type { HappyAgentConnection } from "../happyAgentConnection/index.js";
 import {
@@ -320,6 +327,16 @@ export interface HappyAgentWorkspaceClient {
      * recent-chat cache disposes released stores when the live-store limit is exceeded.
      */
     chat(sessionId: HappyAgentSessionId): Promise<HappyAgentChatHandle>;
+    /**
+     * One session's whole history as Markdown, read page by page from the host
+     * rather than from whatever an open chat has loaded so far. Empty when the
+     * session has nothing to copy. Aborting `signal` abandons the read.
+     */
+    transcriptRead(
+        sessionId: HappyAgentSessionId,
+        mode: HappyAgentTranscriptMode,
+        signal?: AbortSignal,
+    ): Promise<string>;
     /** Stops background synchronization for an archived chat; its store remains subject to the bounded cache. */
     chatArchive(sessionId: HappyAgentSessionId): void;
     /** Lets a restored chat resume background synchronization when it is acquired again. */
@@ -903,6 +920,24 @@ export function happyAgentWorkspaceClientCreate(
                     }
                 },
             };
+        },
+        async transcriptRead(sessionId, mode, signal) {
+            if (disposed) throw new Error("The Happy Agent client is disposed.");
+            const runs = await happyAgentTranscriptRunsRead(deps.client, sessionId, mode, signal);
+            // Named the way the chat names them: from the list as it stands
+            // once the history is in, and by asking the host about the rest.
+            const identities = happyAgentAgentIdentitiesIndex(workspace.sessionList().get());
+            const names = await happyAgentTranscriptAgentNamesRead(
+                deps.client,
+                runs,
+                sessionId,
+                (agentId) => identities.get(agentId)?.name,
+                signal,
+            );
+            return happyAgentTranscriptFormat(
+                { agentId: sessionId, runs, agentName: (agentId) => names.get(agentId) },
+                mode,
+            );
         },
         chatArchive(sessionId) {
             const binding = chats.get(sessionId);

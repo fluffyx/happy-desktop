@@ -94,6 +94,7 @@ import type {
     HappyAgentThinkingLevel,
     TitleShimmerStore,
     HappyAgentWindowStore,
+    HappyAgentTranscriptCopy,
     HappyAgentWorkspaceSnapshot,
     HappyAgentWorkspaceStore,
     HappyAgentWorkingWait,
@@ -239,6 +240,7 @@ import {
     type SidebarReorder,
     type SidebarSection,
     type TabItem,
+    type TabNotice,
     WindowShortcuts,
     WorkspaceLifecycleLane,
     WorkspaceLifecycleNotice,
@@ -1521,6 +1523,44 @@ const TAB_MENU_CLOSE_OTHERS = "close-others";
 const TAB_MENU_CLOSE_LEFT = "close-left";
 const TAB_MENU_CLOSE_RIGHT = "close-right";
 const TAB_MENU_CLOSE_ALL = "close-all";
+const TAB_MENU_TRANSCRIPT_CONCISE = "transcript-copy-concise";
+const TAB_MENU_TRANSCRIPT_FULL = "transcript-copy-full";
+
+/**
+ * The copies a chat tab offers above its sweeps. Both read the session's whole
+ * history from the host, so neither can be done while it is out of reach.
+ */
+function transcriptCopyMenu(online: boolean): MenuItem[] {
+    return [
+        {
+            kind: "item",
+            id: TAB_MENU_TRANSCRIPT_CONCISE,
+            label: "Copy concise transcript",
+            shortcut: APP_SHORTCUTS.transcriptCopy.caps,
+            disabled: !online,
+        },
+        {
+            kind: "item",
+            id: TAB_MENU_TRANSCRIPT_FULL,
+            label: "Copy full transcript",
+            disabled: !online,
+        },
+    ];
+}
+
+/** What a chat tab says while its transcript is copied, and for a moment after. */
+function transcriptCopyNotice(status: HappyAgentTranscriptCopy["status"]): TabNotice {
+    switch (status) {
+        case "copying":
+            return { tone: "pending", label: "Copying…" };
+        case "copied":
+            return { tone: "success", label: "Copied" };
+        case "empty":
+            return { tone: "neutral", label: "Nothing to copy" };
+        case "failed":
+            return { tone: "danger", label: "Copy failed" };
+    }
+}
 const fileDocumentIdentities = new WeakMap<object, number>();
 let fileDocumentIdentityNext = 0;
 
@@ -3492,6 +3532,8 @@ interface HappyAgentPaletteFacts {
     };
     readonly sessionCreateAvailable: boolean;
     readonly groupResume?: ReadonlyMap<HappyAgentGroupId, HappyAgentSessionId>;
+    /** The chat on screen, when its transcript can be copied: the one ⌥⌘C copies. */
+    readonly transcriptCopySessionId?: HappyAgentSessionId;
 }
 
 /**
@@ -3604,6 +3646,11 @@ function paletteFacts(
             workspace.groupAccess.conversationRefusal === undefined &&
             workspaceLifecyclePhase(openGroup.lifecycle) !== "creating",
         tabs: paletteTabs(workspace, openGroup),
+        ...(online &&
+        workspace.address.conversationId !== undefined &&
+        workspace.activeMainViewId === undefined
+            ? { transcriptCopySessionId: workspace.address.conversationId }
+            : {}),
     };
 }
 
@@ -3683,6 +3730,9 @@ function paletteContext(
             subject.workspace !== undefined &&
             subject.workspaceCreateProjectId !== undefined,
         taskCreateAvailable: subject.taskCreateAvailable,
+        ...(facts.transcriptCopySessionId === undefined
+            ? {}
+            : { transcriptCopySessionId: facts.transcriptCopySessionId }),
     };
 }
 
@@ -4112,6 +4162,9 @@ function paletteCommandRun(
         case "shortcutSheetOpen":
             // The palette has already closed itself; the sheet takes its place.
             props.store.shortcutSheetOpen();
+            return;
+        case "transcriptCopy":
+            props.workspace?.transcriptCopy(command.sessionId as HappyAgentSessionId, command.mode);
             return;
         case "settingsOpen":
             props.onSettingsOpen();
@@ -4780,11 +4833,19 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
         groupFileTabs.map((tab) => tab.id),
         mainTools.map((tab) => tab.id),
         workspace.tabOrder,
-    ).flatMap((id) => {
-        const item = groupTabItems.get(id);
-        if (!item) return [];
-        return [id === pinnedTabId ? { ...item, closable: false } : item];
-    });
+    )
+        .flatMap((id) => {
+            const item = groupTabItems.get(id);
+            if (!item) return [];
+            return [id === pinnedTabId ? { ...item, closable: false } : item];
+        })
+        .map((tab) =>
+            // A chat whose transcript is being copied answers on its own tab, so
+            // the reader sees the copy land wherever they started it from.
+            tab.id === workspace.transcriptCopy?.sessionId
+                ? { ...tab, notice: transcriptCopyNotice(workspace.transcriptCopy.status) }
+                : tab,
+        );
     const historyMenuItems = (): readonly MenuItem[] => {
         if (!openGroup) return [];
         // One list in one order: every session this workspace has, open or
@@ -5085,6 +5146,21 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
     // addressed rather than listed, so a sweep over "the tabs beside this one"
     // never reaches it.
     const sweepableTabs = groupTabs.filter((entry) => entry.id !== detachedConversationId);
+    /** Whether a tab of the strip is a chat — a session — rather than a file, a review, or a tool. */
+    const tabIsChat = (tabId: string): boolean =>
+        openReview?.id !== tabId &&
+        !groupFileTabs.some((entry) => entry.id === tabId) &&
+        !mainTools.some((entry) => entry.id === tabId);
+    // The chord copies the chat on screen. Behind a file or a tool there is no
+    // chat on screen, and copying one the reader is not looking at would put
+    // something on the clipboard they did not see chosen.
+    const transcriptCopyActive = () => {
+        const current = props.workspace.get();
+        const sessionId = current.address.conversationId;
+        if (sessionId === undefined || current.activeMainViewId !== undefined) return;
+        if (!happyAgentOnline()) return;
+        props.workspace.transcriptCopy(sessionId, "concise");
+    };
     const previewTool = previewToolFind(conversation, panel.previewEntryId);
     const previewMedia = previewMediaFind(conversation, previewTool, panel.previewMediaIndex);
     const desktop = props.platform === "desktop";
@@ -5749,6 +5825,7 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                                 },
                                 shortcut: APP_SHORTCUTS.tabMoveToMain,
                             },
+                            { run: transcriptCopyActive, shortcut: APP_SHORTCUTS.transcriptCopy },
                             ...(checkoutClosed
                                 ? []
                                 : [
@@ -5942,12 +6019,17 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                             transferable={(tab) => mainTabTransferable(tab.id)}
                             transferTargets={MAIN_TRANSFER_TARGETS}
                             tabMenuItems={(tab) => {
+                                const copies = tabIsChat(tab.id)
+                                    ? transcriptCopyMenu(availability.online)
+                                    : [];
                                 const index = sweepableTabs.findIndex(
                                     (entry) => entry.id === tab.id,
                                 );
-                                // The detached subagent's tab is not in the sweepable
-                                // order, so it offers no menu — its runner owns it.
-                                if (index < 0) return [];
+                                // The detached subagent's tab is not in the
+                                // sweepable order, so it offers no sweeps — its
+                                // runner owns it — but reading it is still the
+                                // reader's, so it can still be copied.
+                                if (index < 0) return copies;
                                 // A session is archived; a file, a terminal, a
                                 // page is closed. The verb has to be the true
                                 // one for the tab it is offered on.
@@ -5956,9 +6038,32 @@ function HappyAgentWorkspaceSurface(props: HappyAgentWorkspaceSurfaceProps) {
                                     mainTools.some((entry) => entry.id === tab.id)
                                         ? "Close"
                                         : "Archive";
-                                return tabStripMenu(verb, index, sweepableTabs.length - index - 1);
+                                const sweeps = tabStripMenu(
+                                    verb,
+                                    index,
+                                    sweepableTabs.length - index - 1,
+                                );
+                                return copies.length === 0
+                                    ? sweeps
+                                    : [...copies, { kind: "separator" }, ...sweeps];
                             }}
                             onTabMenuSelect={(tab, actionId) => {
+                                if (
+                                    actionId === TAB_MENU_TRANSCRIPT_CONCISE ||
+                                    actionId === TAB_MENU_TRANSCRIPT_FULL
+                                ) {
+                                    // The menu was drawn while the host was in
+                                    // reach; it may not be by the time a row
+                                    // is picked.
+                                    if (!happyAgentOnline()) return;
+                                    props.workspace.transcriptCopy(
+                                        tab.id as HappyAgentSessionId,
+                                        actionId === TAB_MENU_TRANSCRIPT_CONCISE
+                                            ? "concise"
+                                            : "full",
+                                    );
+                                    return;
+                                }
                                 const ids = sweepableTabs.map((entry) => entry.id);
                                 const index = ids.indexOf(tab.id);
                                 if (index < 0) return;

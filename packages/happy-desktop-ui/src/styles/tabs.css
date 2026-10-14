@@ -122,6 +122,28 @@
     color: var(--status-error);
 }
 
+/*
+ * A notice speaks in the tab's own ink, except a failure, which is red like an
+ * open question: it is the one answer the reader may have to act on. Its mark
+ * in the trailing lane matches, and a success is the green check a copy
+ * button confirms with.
+ */
+.happy-tabs__tab-notice-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-secondary);
+}
+
+.happy-tabs__tab-notice-mark[data-tone="success"] {
+    color: var(--success);
+}
+
+.happy-tabs__tab-notice[data-tone="danger"],
+.happy-tabs__tab-notice-mark[data-tone="danger"] {
+    color: var(--status-error);
+}
+
 .happy-tabs__tab-dirty {
     display: block;
     width: 8px;

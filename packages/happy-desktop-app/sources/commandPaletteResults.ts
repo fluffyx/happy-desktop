@@ -2,6 +2,7 @@ import type {
     HappyAgentFileTabKind,
     HappyAgentProjectGroup,
     HappyAgentSessionSummary,
+    HappyAgentTranscriptMode,
     HappyAgentWorktreeGroup,
     HappyAgentLinkOpenPlacement,
     ScrollbarVisibility,
@@ -71,6 +72,11 @@ export type CommandPaletteCommand =
     | { readonly kind: "tabReopen" }
     /** The sheet listing every chord. */
     | { readonly kind: "shortcutSheetOpen" }
+    | {
+          readonly kind: "transcriptCopy";
+          readonly sessionId: string;
+          readonly mode: HappyAgentTranscriptMode;
+      }
     | { readonly kind: "settingsOpen" }
     | { readonly kind: "settingsSectionOpen"; readonly section: string }
     | { readonly kind: "updateApply" };
@@ -234,6 +240,8 @@ export interface CommandPaletteContext {
      * rows are never offered with nowhere to go.
      */
     readonly unread?: { readonly next: UnreadChat; readonly previous: UnreadChat };
+    /** The chat on screen, when its transcript can be copied right now. */
+    readonly transcriptCopySessionId?: string;
 }
 
 export interface CommandPaletteInput extends CommandPaletteContext {
@@ -979,6 +987,33 @@ function actionRows(
 }
 
 /**
+ * Copying the chat on screen. Offered only to a typed query: it is something
+ * done to one chat rather than something the window can always do, so it does
+ * not take a suggestion's place from the chats and actions that are.
+ */
+function transcriptRows(context: CommandPaletteContext): CommandPaletteCommandRow[] {
+    const sessionId = context.transcriptCopySessionId;
+    if (sessionId === undefined) return [];
+    return [
+        {
+            kind: "command",
+            id: "action:transcript-copy-concise",
+            title: "Copy concise transcript",
+            glyph: { kind: "icon", name: "copy" },
+            shortcut: APP_SHORTCUTS.transcriptCopy,
+            command: { kind: "transcriptCopy", sessionId, mode: "concise" },
+        },
+        {
+            kind: "command",
+            id: "action:transcript-copy-full",
+            title: "Copy full transcript",
+            glyph: { kind: "icon", name: "copy" },
+            command: { kind: "transcriptCopy", sessionId, mode: "full" },
+        },
+    ];
+}
+
+/**
  * What the palette offers before anything is typed, and what the held-Command
  * preview shows: the update if one is waiting, the next unread chat if there is
  * one, the chats this workspace was last working on, and the things the window
@@ -1095,12 +1130,13 @@ export function commandPaletteResults(input: CommandPaletteInput): CommandPalett
             {
                 id: "actions",
                 label: "Actions",
-                rows: actionRows(input, unread.next, unread.previous, updateRow(input)).flatMap(
-                    (row) => {
-                        const rank = rowRank(query, row.title, row.meta);
-                        return rank === undefined ? [] : [{ rank, updatedAt: 0, row }];
-                    },
-                ),
+                rows: [
+                    ...actionRows(input, unread.next, unread.previous, updateRow(input)),
+                    ...transcriptRows(input),
+                ].flatMap((row) => {
+                    const rank = rowRank(query, row.title, row.meta);
+                    return rank === undefined ? [] : [{ rank, updatedAt: 0, row }];
+                }),
             },
             { id: "settings", label: "Settings", rows: settingsSectionRows(input) },
         ];

@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { type MenuItem } from "../../src/Menu";
-import { type TabItem, Tabs, type TabsSize } from "../../src/Tabs";
+import { type TabItem, type TabNotice, Tabs, type TabsSize } from "../../src/Tabs";
 import { ComponentPage, DimensionRule, Specimen } from "../kit";
 
 /** The component plan this page documents. The selector and the page header read the same value. */
@@ -32,6 +32,13 @@ const laneTabs = (state: {
         awaitingInput: state.awaitingInput === true,
         unread: state.unread === true,
     }));
+/** Every tone a tab notice takes, as copying a transcript reports them. */
+const noticeStates: TabNotice[] = [
+    { tone: "pending", label: "Copying…" },
+    { tone: "success", label: "Copied" },
+    { tone: "neutral", label: "Nothing to copy" },
+    { tone: "danger", label: "Copy failed" },
+];
 const adminTabs: TabItem[] = [
     { id: "members", label: "Members", badge: 128 },
     { id: "bans", label: "Bans", badge: 4 },
@@ -286,6 +293,33 @@ export function TabsPage() {
                             tabs={laneTabs({ avatar: true, awaitingInput: true })}
                             width={440}
                         />
+                    </div>
+                </Specimen>
+                <Specimen
+                    detail="the answer to an act on the tab, said in place of its title — running, done, nothing to do, failed — with its mark in the trailing lane ahead of work"
+                    label="Notices"
+                    number="T-13"
+                    stage="app"
+                >
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "20px",
+                            padding: "24px",
+                        }}
+                    >
+                        {noticeStates.map((notice) => (
+                            <Bar
+                                active="one"
+                                key={notice.tone}
+                                tabs={laneTabs({ avatar: true, busy: true }).map((tab) =>
+                                    tab.id === "one" ? { ...tab, notice } : tab,
+                                )}
+                                width={440}
+                            />
+                        ))}
+                        <DimensionRule label="label 13 · danger in the error ink · mark 12 in the 16 lane" />
                     </div>
                 </Specimen>
             </div>
