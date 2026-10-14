@@ -10,6 +10,7 @@ const INPUT: CommandPaletteInput = {
     projects: [],
     archivedSessions: [],
     tabs: [],
+    tabStepAvailable: false,
     sessionCreateAvailable: false,
     workspaceCreateAvailable: false,
     taskCreateAvailable: false,
