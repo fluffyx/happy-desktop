@@ -1278,7 +1278,11 @@ ${el.value.slice(el.selectionEnd)}`,
                                     disabled={!canSend()}
                                     icon="arrow-up"
                                     iconOnly
-                                    onClick={() => send(followUp)}
+                                    // The click does what the control says,
+                                    // ⌘ held included: in WebKit the draft can
+                                    // keep focus through it, so the hold
+                                    // survives into the click.
+                                    onClick={() => send(props.running ? sendDelivery() : followUp)}
                                     size="small"
                                     variant="primary"
                                 />

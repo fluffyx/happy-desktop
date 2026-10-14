@@ -165,17 +165,21 @@ it("never sends or picks a command from an Enter that commits an IME composition
 });
 
 it("names the follow-up on the send control while the agent works, and ⌘ held shows the other", async () => {
+    const runningSends: MessageDelivery[] = [];
     const view = createRenderer();
     view.render(() => <Harness initial="Look again" sends={[]} testid="idle" />, {
         width: 600,
         height: 200,
         padding: 20,
     })
-        .render(() => <Harness initial="Look again" running sends={[]} testid="running" />, {
-            width: 600,
-            height: 200,
-            padding: 20,
-        })
+        .render(
+            () => <Harness initial="Look again" running sends={runningSends} testid="running" />,
+            {
+                width: 600,
+                height: 200,
+                padding: 20,
+            },
+        )
         .render(
             () => (
                 <Harness
@@ -226,6 +230,10 @@ it("names the follow-up on the send control while the agent works, and ⌘ held 
     const bubble = tipOf("running")?.querySelector(".happy-tooltip__bubble") as HTMLElement;
     await expect.poll(() => getComputedStyle(bubble).opacity).toBe("1");
     await view.screenshot("Composer.followUp.test");
+    // A click while ⌘ is held does what the control says. It is dispatched
+    // without moving focus, as WebKit does, so the hold is still on.
+    sendOf("running").click();
+    expect(runningSends).toEqual(["queue"]);
     await userEvent.keyboard("{/Meta}");
     expect(sendOf("running").getAttribute("aria-label")).toBe("Steer · ⌘↵ to queue");
     expect(tipOf("running")?.hasAttribute("data-open")).toBe(false);
@@ -234,4 +242,8 @@ it("names the follow-up on the send control while the agent works, and ⌘ held 
     await userEvent.keyboard("{Meta>}a{/Meta}");
     expect(tipOf("running")?.hasAttribute("data-open")).toBe(false);
     expect(sendOf("running").dataset.delivery).toBe("steer");
+
+    // With nothing held, a click sends with the setting.
+    sendOf("running").click();
+    expect(runningSends).toEqual(["queue", "steer"]);
 });
