@@ -227,8 +227,18 @@ it("names the follow-up on the send control while the agent works, and ⌘ held 
     expect(sendOf("running").getAttribute("aria-label")).toBe("Queue");
     expect(sendOf("running").dataset.delivery).toBe("queue");
     expect(tipOf("running")?.hasAttribute("data-open")).toBe(true);
+    /*
+     * The bubble fades in after a short dwell. That is the stylesheet's
+     * timing, not this behavior, and an engine whose window is in the
+     * background need not run the fade at all; so the fade is turned off here
+     * and the open bubble is read as it rests. Focus and the hold must still
+     * be on.
+     */
     const bubble = tipOf("running")?.querySelector(".happy-tooltip__bubble") as HTMLElement;
-    await expect.poll(() => getComputedStyle(bubble).opacity).toBe("1");
+    bubble.style.transition = "none";
+    expect(document.activeElement).toBe(textarea);
+    expect(tipOf("running")?.hasAttribute("data-open")).toBe(true);
+    expect(getComputedStyle(bubble).opacity).toBe("1");
     await view.screenshot("Composer.followUp.test");
     // A click while ⌘ is held does what the control says. It is dispatched
     // without moving focus, as WebKit does, so the hold is still on.
