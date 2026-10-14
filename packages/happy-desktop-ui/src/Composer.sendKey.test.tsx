@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { flushSync } from "react-dom";
 import type { MessageDelivery, SendKey } from "happy-desktop-state";
 import { expect, it } from "vitest";
 import { userEvent } from "vitest/browser";
@@ -27,6 +28,13 @@ const agentsCommand: CommandPickerItem = {
     description: "Monitor delegated subagents",
     icon: "users",
 };
+
+/** Sends one key event to `target` and lets React finish rendering it. */
+function press(target: HTMLElement, type: "keydown" | "keyup", init: KeyboardEventInit) {
+    flushSync(() => {
+        target.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init }));
+    });
+}
 
 function Harness(props: {
     sendKey: SendKey;
@@ -190,28 +198,28 @@ it("names ⌥↵ as the other key while the agent works, and ⌥ held shows what
 
     const textarea = view.$('[data-testid="running"] [data-happy-desktop-ui="composer-textarea"]')
         .element as HTMLTextAreaElement;
-    await userEvent.click(textarea);
+    // Keys go straight to the unfocused draft, so the window's focus cannot
+    // drop the hold; see Composer.followUp.test.tsx.
 
     // ⌘ is the send key here, so holding it shows nothing new.
-    await userEvent.keyboard("{Meta>}");
+    press(textarea, "keydown", { key: "Meta", metaKey: true });
     expect(sendOf("running").dataset.delivery).toBe("steer");
     expect(tipOf("running").hasAttribute("data-open")).toBe(false);
-    await userEvent.keyboard("{/Meta}");
+    press(textarea, "keyup", { key: "Meta" });
 
-    await userEvent.keyboard("{Alt>}");
+    press(textarea, "keydown", { key: "Alt", altKey: true });
     expect(sendOf("running").getAttribute("aria-label")).toBe("Queue");
     expect(sendOf("running").dataset.delivery).toBe("queue");
     expect(tipOf("running").hasAttribute("data-open")).toBe(true);
     // Read at rest, with the fade off, as in Composer.followUp.test.tsx.
     const bubble = tipOf("running").querySelector(".happy-tooltip__bubble") as HTMLElement;
     bubble.style.transition = "none";
-    expect(document.activeElement).toBe(textarea);
     expect(getComputedStyle(bubble).opacity).toBe("1");
     await view.screenshot("Composer.sendKey.test");
     // A click with ⌥ still held does what the control says.
     sendOf("running").click();
     expect(runningSends).toEqual(["queue"]);
-    await userEvent.keyboard("{/Alt}");
+    press(textarea, "keyup", { key: "Alt" });
     expect(sendOf("running").getAttribute("aria-label")).toBe("Steer · ⌥↵ to queue");
     expect(tipOf("running").hasAttribute("data-open")).toBe(false);
 });
