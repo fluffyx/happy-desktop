@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { connectHappyAgent } from "../happyAgentConnection/connectHappyAgent.js";
 import type { HappyAgentConnection } from "../happyAgentConnection/types.js";
 import { fakeHappyAgentDaemonCreate } from "../testing/fakeHappyAgentDaemon.js";
@@ -11,9 +11,29 @@ import type { HappyAgentSessionId } from "./happyAgentTypes.js";
 
 const openConnections: HappyAgentConnection[] = [];
 
+// The connection's retry waits and the fake daemon's deliveries run on fake
+// timers, advanced by `settled` until what a step waits for has happened.
+beforeEach(() => {
+    vi.useFakeTimers();
+});
+
 afterEach(() => {
     for (const connection of openConnections.splice(0)) connection.close();
+    vi.useRealTimers();
 });
+
+/** Advances fake time in small steps until `check` stops throwing. */
+async function settled(check: () => void): Promise<void> {
+    for (let step = 0; step < 100; step += 1) {
+        try {
+            check();
+            return;
+        } catch {
+            await vi.advanceTimersByTimeAsync(10);
+        }
+    }
+    check();
+}
 
 async function chatOpen() {
     const daemon = fakeHappyAgentDaemonCreate();
@@ -50,7 +70,7 @@ async function chatOpen() {
         output: (event) => outputs.push(event),
     });
     const unsubscribe = store.subscribe(() => undefined);
-    await vi.waitFor(() => {
+    await settled(() => {
         expect(groupsLive).toBe(true);
         expect(store.get().session.type).toBe("ready");
     });
@@ -63,8 +83,9 @@ async function chatOpen() {
 
 it("sends a typed message with the delivery its key chose", async () => {
     const { store, outputs, sent, unsubscribe } = await chatOpen();
-    await store.messageSend("after this, run the tests", [], "queue");
-    await vi.waitFor(() => expect(sent()).toHaveLength(1));
+    const sending = store.messageSend("after this, run the tests", [], "queue");
+    await settled(() => expect(sent()).toHaveLength(1));
+    await sending;
     expect(sent()[0]).toMatchObject({ text: "after this, run the tests", delivery: "queue" });
     expect(outputs).toContainEqual({
         type: "messageSent",
@@ -82,9 +103,10 @@ it("sends a skill as a message carrying the same delivery", async () => {
             { name: "review", description: "Review the diff", hasArguments: true, kind: "skill" },
         ],
     });
-    await vi.waitFor(() => expect(store.get().slashCommands).toHaveLength(1));
-    await store.slashCommandInvoke("review", "the diff", "queue");
-    await vi.waitFor(() => expect(sent()).toHaveLength(1));
+    await settled(() => expect(store.get().slashCommands).toHaveLength(1));
+    const invoking = store.slashCommandInvoke("review", "the diff", "queue");
+    await settled(() => expect(sent()).toHaveLength(1));
+    await invoking;
     expect(sent()[0]).toMatchObject({
         text: "/review the diff",
         delivery: "queue",
