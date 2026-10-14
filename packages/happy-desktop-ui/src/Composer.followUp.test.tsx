@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { flushSync } from "react-dom";
 import type { MessageDelivery } from "happy-desktop-state";
 import { expect, it } from "vitest";
 import { userEvent } from "vitest/browser";
@@ -26,6 +27,13 @@ const agentsCommand: CommandPickerItem = {
     description: "Monitor delegated subagents",
     icon: "users",
 };
+
+/** Sends one key event to `target` and lets React finish rendering it. */
+function press(target: HTMLElement, type: "keydown" | "keyup", init: KeyboardEventInit) {
+    flushSync(() => {
+        target.dispatchEvent(new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init }));
+    });
+}
 
 function Harness(props: {
     followUp?: MessageDelivery;
@@ -219,39 +227,46 @@ it("names the follow-up on the send control while the agent works, and ⌘ held 
         running.right - view.$('[data-testid="running"]').element.getBoundingClientRect().left,
     ).toBe(idle.right - view.$('[data-testid="idle"]').element.getBoundingClientRect().left);
 
-    // Holding ⌘ alone in the draft shows what ⌘↵ would do.
+    /*
+     * Holding ⌘ alone in the draft shows what ⌘↵ would do.
+     *
+     * The keys are sent straight to the draft and it is never focused. A
+     * focused draft hears a blur whenever the test window loses focus, which
+     * happens when other pages run beside it, and a blur rightly drops the
+     * hold, because the keyup will never come. Nothing here should depend on
+     * which window is in front.
+     */
     const textarea = view.$('[data-testid="running"] [data-happy-desktop-ui="composer-textarea"]')
         .element as HTMLTextAreaElement;
-    await userEvent.click(textarea);
-    await userEvent.keyboard("{Meta>}");
+    press(textarea, "keydown", { key: "Meta", metaKey: true });
     expect(sendOf("running").getAttribute("aria-label")).toBe("Queue");
     expect(sendOf("running").dataset.delivery).toBe("queue");
     expect(tipOf("running")?.hasAttribute("data-open")).toBe(true);
     /*
-     * The bubble fades in after a short dwell. That is the stylesheet's
-     * timing, not this behavior, and an engine whose window is in the
-     * background need not run the fade at all; so the fade is turned off here
-     * and the open bubble is read as it rests. Focus and the hold must still
-     * be on.
+     * The bubble fades in after a short dwell. That timing belongs to the
+     * stylesheet, and a window in the background need not run the fade at
+     * all, so the fade is turned off here and the open bubble is read at rest.
      */
     const bubble = tipOf("running")?.querySelector(".happy-tooltip__bubble") as HTMLElement;
     bubble.style.transition = "none";
-    expect(document.activeElement).toBe(textarea);
-    expect(tipOf("running")?.hasAttribute("data-open")).toBe(true);
     expect(getComputedStyle(bubble).opacity).toBe("1");
     await view.screenshot("Composer.followUp.test");
-    // A click while ⌘ is held does what the control says. It is dispatched
-    // without moving focus, as WebKit does, so the hold is still on.
+    // A click while ⌘ is held does what the control says. It moves no focus,
+    // as in WebKit, where the draft can stay focused through it.
     sendOf("running").click();
     expect(runningSends).toEqual(["queue"]);
-    await userEvent.keyboard("{/Meta}");
+    press(textarea, "keyup", { key: "Meta" });
     expect(sendOf("running").getAttribute("aria-label")).toBe("Steer · ⌘↵ to queue");
     expect(tipOf("running")?.hasAttribute("data-open")).toBe(false);
 
     // A chord is not a hold: ⌘A closes it at its second key.
-    await userEvent.keyboard("{Meta>}a{/Meta}");
+    press(textarea, "keydown", { key: "Meta", metaKey: true });
+    expect(tipOf("running")?.hasAttribute("data-open")).toBe(true);
+    press(textarea, "keydown", { key: "a", metaKey: true });
     expect(tipOf("running")?.hasAttribute("data-open")).toBe(false);
     expect(sendOf("running").dataset.delivery).toBe("steer");
+    press(textarea, "keyup", { key: "a", metaKey: true });
+    press(textarea, "keyup", { key: "Meta" });
 
     // With nothing held, a click sends with the setting.
     sendOf("running").click();
