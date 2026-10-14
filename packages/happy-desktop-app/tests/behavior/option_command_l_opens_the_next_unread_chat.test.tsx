@@ -126,6 +126,7 @@ function workspace(
         groupAccess: happyAgentGroupAccessRefused(HAPPY_AGENT_GROUP_UNLISTED_REFUSAL),
         fileTabs: [],
         tabOrder: [],
+        closedTabs: [],
         openInTargets: [],
         fileViewMode: "unified" as const,
         fileScope: "changed" as const,
