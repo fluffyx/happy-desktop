@@ -31,6 +31,12 @@ export interface HappyAgentTranscriptInput {
 export const HAPPY_AGENT_TRANSCRIPT_PAGE_LIMIT = 500;
 /** How long one page may take before the copy gives up rather than spinning on. */
 const PAGE_TIMEOUT_MS = 60_000;
+/**
+ * How long the host may take to describe one agent the list does not name.
+ * Shorter than a page: a name is a nicety, and past this the agent keeps its id
+ * rather than holding the whole copy.
+ */
+export const HAPPY_AGENT_TRANSCRIPT_NAME_TIMEOUT_MS = 10_000;
 
 /**
  * Every run of one agent's history, oldest first, read from the host page by
@@ -73,6 +79,43 @@ export async function happyAgentTranscriptRunsRead(
         before = oldest.id;
     }
     return pages.flat();
+}
+
+/**
+ * A name for every other agent a history names: the one `listed` gives it, or
+ * else the title the host describes it by. An agent the host refuses, or is
+ * slower than `HAPPY_AGENT_TRANSCRIPT_NAME_TIMEOUT_MS` to describe, is left out
+ * and keeps its id in the transcript. Aborting `signal` abandons the read.
+ */
+export async function happyAgentTranscriptAgentNamesRead(
+    client: Pick<HappyAgentClient, "getAgent">,
+    runs: readonly HistoryRun[],
+    agentId: string,
+    listed: (agentId: string) => string | undefined,
+    signal?: AbortSignal,
+): Promise<ReadonlyMap<string, string>> {
+    const names = new Map<string, string>();
+    await Promise.all(
+        [...happyAgentTranscriptAgentIds(runs, agentId)].map(async (other) => {
+            const known = listed(other);
+            if (known !== undefined) {
+                names.set(other, known);
+                return;
+            }
+            const timeout = AbortSignal.timeout(HAPPY_AGENT_TRANSCRIPT_NAME_TIMEOUT_MS);
+            const title = await client
+                .getAgent(other, {
+                    signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+                })
+                .then(
+                    ({ agent }) => agent.title?.trim(),
+                    () => undefined,
+                );
+            if (title) names.set(other, title);
+        }),
+    );
+    signal?.throwIfAborted();
+    return names;
 }
 
 /**

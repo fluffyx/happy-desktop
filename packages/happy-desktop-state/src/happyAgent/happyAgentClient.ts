@@ -14,7 +14,7 @@ import {
     type HappyAgentAgentIdentitySource,
 } from "./happyAgentAgentIdentities.js";
 import {
-    happyAgentTranscriptAgentIds,
+    happyAgentTranscriptAgentNamesRead,
     happyAgentTranscriptFormat,
     happyAgentTranscriptRunsRead,
     type HappyAgentTranscriptMode,
@@ -913,27 +913,15 @@ export function happyAgentWorkspaceClientCreate(
             if (disposed) throw new Error("The Happy Agent client is disposed.");
             const runs = await happyAgentTranscriptRunsRead(deps.client, sessionId, mode, signal);
             // Named the way the chat names them: from the list as it stands
-            // once the history is in, and by asking the host about an agent the
-            // list does not name. One the host will not describe keeps its id.
+            // once the history is in, and by asking the host about the rest.
             const identities = happyAgentAgentIdentitiesIndex(workspace.sessionList().get());
-            const names = new Map<string, string>();
-            await Promise.all(
-                [...happyAgentTranscriptAgentIds(runs, sessionId)].map(async (agentId) => {
-                    const listed = identities.get(agentId)?.name;
-                    if (listed !== undefined) {
-                        names.set(agentId, listed);
-                        return;
-                    }
-                    const title = await deps.client
-                        .getAgent(agentId, signal === undefined ? {} : { signal })
-                        .then(
-                            ({ agent }) => agent.title?.trim(),
-                            () => undefined,
-                        );
-                    if (title) names.set(agentId, title);
-                }),
+            const names = await happyAgentTranscriptAgentNamesRead(
+                deps.client,
+                runs,
+                sessionId,
+                (agentId) => identities.get(agentId)?.name,
+                signal,
             );
-            signal?.throwIfAborted();
             return happyAgentTranscriptFormat(
                 { agentId: sessionId, runs, agentName: (agentId) => names.get(agentId) },
                 mode,

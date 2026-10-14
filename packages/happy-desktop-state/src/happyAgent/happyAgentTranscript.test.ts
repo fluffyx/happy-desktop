@@ -10,12 +10,14 @@ import type {
     ToolCallBlock,
     UserMessage,
 } from "@slopus/happy-agent-client";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import {
     HAPPY_AGENT_TRANSCRIPT_MESSAGE_LIMIT,
+    HAPPY_AGENT_TRANSCRIPT_NAME_TIMEOUT_MS,
     HAPPY_AGENT_TRANSCRIPT_PAGE_LIMIT,
     happyAgentTranscriptFormat,
     happyAgentTranscriptAgentIds,
+    happyAgentTranscriptAgentNamesRead,
     happyAgentTranscriptRunsRead,
     type HappyAgentTranscriptMode,
 } from "./happyAgentTranscript.js";
@@ -532,23 +534,24 @@ it("fails rather than asking forever when a page reaches no further back", async
     expect(reads).toBe(2);
 });
 
-it("stops reading once the copy is abandoned", async () => {
+it("cancels the page in flight once the copy is abandoned", async () => {
     const controller = new AbortController();
-    const signals: AbortSignal[] = [];
+    let asked = 0;
     const client = {
+        // A page that never arrives on its own: only its signal ends it, so the
+        // read can only settle if the abandonment reaches the request itself.
         getMessages: (_agentId: string, _query: MessageHistoryQuery = {}, options = {}) => {
-            signals.push((options as { signal: AbortSignal }).signal);
-            // The reader moves on while the first page is still arriving.
-            controller.abort();
-            return Promise.resolve({ cursor: "c", hasMore: true, runs: [run([user("One.")])] });
+            asked += 1;
+            const { signal } = options as { signal: AbortSignal };
+            return new Promise<MessageHistoryResponse>((_resolve, reject) =>
+                signal.addEventListener("abort", () => reject(signal.reason)),
+            );
         },
     };
-    await expect(
-        happyAgentTranscriptRunsRead(client, SELF, "full", controller.signal),
-    ).rejects.toThrow();
-    expect(signals).toHaveLength(1);
-    // The page in flight was asked with a signal the abandonment cancels.
-    expect(signals[0]!.aborted).toBe(true);
+    const read = happyAgentTranscriptRunsRead(client, SELF, "full", controller.signal);
+    controller.abort(new Error("Replaced by a newer copy."));
+    await expect(read).rejects.toThrow("Replaced by a newer copy.");
+    expect(asked).toBe(1);
 });
 
 it("shows what a background terminal runs above what was typed into it", () => {
@@ -589,4 +592,63 @@ it("lists the other agents a history names, for naming them before it is written
         "agent_coordinator",
         "agent_child",
     ]);
+});
+
+afterEach(() => {
+    vi.restoreAllMocks();
+});
+
+it("names an unlisted agent by the host's title, and leaves one the host refuses unnamed", async () => {
+    const chat = [
+        run([
+            user("Listed.", { senderAgentId: "agent_coordinator" }),
+            user("Described.", { senderAgentId: "agent_described" }),
+            user("Refused.", { senderAgentId: "agent_refused" }),
+        ]),
+    ];
+    const asked: string[] = [];
+    const client = {
+        getAgent: (agentId: string) => {
+            asked.push(agentId);
+            return agentId === "agent_described"
+                ? Promise.resolve({ agent: { title: " Release notes " } })
+                : Promise.reject(new Error("Not found."));
+        },
+    } as unknown as Parameters<typeof happyAgentTranscriptAgentNamesRead>[0];
+
+    const names = await happyAgentTranscriptAgentNamesRead(client, chat, SELF, (id) =>
+        NAMES.get(id),
+    );
+    expect(Object.fromEntries(names)).toEqual({
+        agent_coordinator: "Coordinator",
+        agent_described: "Release notes",
+    });
+    // A listed agent is never asked about.
+    expect(asked).toEqual(["agent_described", "agent_refused"]);
+});
+
+it("gives up on a host slow to name an agent, keeping its id instead of holding the copy", async () => {
+    // Stands in for the deadline, so the test decides when it passes.
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const chat = [run([user("Hello.", { senderAgentId: "agent_stalled" })])];
+    const client = {
+        // Never answers; only its signal ends it.
+        getAgent: (_agentId: string, options: { signal: AbortSignal }) =>
+            new Promise((_resolve, reject) =>
+                options.signal.addEventListener("abort", () => reject(options.signal.reason)),
+            ),
+    } as unknown as Parameters<typeof happyAgentTranscriptAgentNamesRead>[0];
+
+    const reading = happyAgentTranscriptAgentNamesRead(client, chat, SELF, () => undefined);
+    expect(timeout).toHaveBeenCalledWith(HAPPY_AGENT_TRANSCRIPT_NAME_TIMEOUT_MS);
+    deadline.abort(new Error("Timed out."));
+    const names = await reading;
+    expect(names.size).toBe(0);
+    expect(
+        happyAgentTranscriptFormat(
+            { agentId: SELF, runs: chat, agentName: (id) => names.get(id) },
+            "full",
+        ),
+    ).toBe("## Agent: agent_stalled\n\nHello.");
 });
