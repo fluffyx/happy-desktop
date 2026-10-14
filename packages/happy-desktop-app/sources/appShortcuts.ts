@@ -13,6 +13,8 @@ export const APP_SHORTCUTS = {
     panelToggleAlternate: commandShortcut("b", { alt: true }),
     sessionCreate: commandShortcut("t"),
     tabClose: commandShortcut("w"),
+    /** Copies the chat on screen as a concise transcript, as its tab's menu does. */
+    transcriptCopy: commandShortcut("c", { alt: true }),
     /** Opens the new-task surface on the active Happy Agent, as its Tasks heading's + does. */
     taskCreate: commandShortcut("n"),
     workspaceCreate: commandShortcut("n", { shift: true }),

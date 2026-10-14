@@ -451,6 +451,7 @@ export function happyAgentConnectionOpen(input: {
             workspace = happyAgentWorkspaceStoreCreate(client, {
                 host: input.host,
                 viewPreferences: desktopViewPreferencesPersistence(input.happyAgentId),
+                clipboardWrite: (text) => navigator.clipboard.writeText(text),
                 output: (event) => {
                     switch (event.type) {
                         case "conversationOpenRequested":

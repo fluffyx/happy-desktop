@@ -25,6 +25,15 @@ import {
     type TabTransferTarget,
 } from "./tabTransfer";
 export type TabsSize = "small" | "medium" | "large";
+/**
+ * A short answer to something the reader just did to a tab, such as copying
+ * its transcript. `pending` while the act runs, then how it ended: `success`,
+ * `neutral` for an act that had nothing to do, `danger` for one that failed.
+ */
+export type TabNotice = {
+    tone: "pending" | "success" | "neutral" | "danger";
+    label: string;
+};
 export type TabItem = {
     id: string;
     label: string;
@@ -62,6 +71,14 @@ export type TabItem = {
     awaitingInput?: boolean;
     /** Unsaved file content. Drawn as the classic dot in the tab's trailing lane. */
     dirty?: boolean;
+    /**
+     * The answer to something the reader just did to this tab, said in place of
+     * its title for as long as the owner keeps it, with its mark in the trailing
+     * lane. It outranks every other report there: the reader has just asked,
+     * so this is what they are looking at the tab for. In a tabbed pane, where
+     * every tab has one width, only the words change.
+     */
+    notice?: TabNotice;
     /** Marks the tab as carrying unread activity with a dot on its leading mark. */
     unread?: boolean;
     /**
@@ -126,11 +143,32 @@ function tabLeadingMark(tab: TabItem, iconSize: 14 | 16 | 18) {
 }
 
 /**
- * What the tab is doing, for the trailing lane. A question waiting on the
- * reader outranks everything, and running work outranks a scheduled wait: a tab
- * doing both is doing real work, and that is the thing worth showing.
+ * What the tab is doing, for the trailing lane. The answer to something the
+ * reader just asked of the tab comes first, then a question waiting on the
+ * reader, and running work outranks a scheduled wait: a tab doing both is doing
+ * real work, and that is the thing worth showing. A notice with nothing to
+ * mark leaves the lane to whichever of those applies.
  */
 function tabActivityMark(tab: TabItem) {
+    // The notice's own words are what is announced; a spinner saying them
+    // again would be a second status region reading the same line.
+    if (tab.notice?.tone === "pending")
+        return (
+            <span aria-hidden="true" className="happy-tabs__tab-notice-mark">
+                <Spinner size={12} tone="muted" />
+            </span>
+        );
+    if (tab.notice?.tone === "success" || tab.notice?.tone === "danger")
+        return (
+            <span
+                aria-hidden="true"
+                className="happy-tabs__tab-notice-mark"
+                data-happy-desktop-ui="tab-notice-mark"
+                data-tone={tab.notice.tone}
+            >
+                <Icon name={tab.notice.tone === "success" ? "check" : "alert"} size={12} />
+            </span>
+        );
     if (tab.awaitingInput)
         return (
             <span
@@ -684,7 +722,17 @@ export function Tabs(props: TabsProps) {
                                 title again here would stack a second emphasis
                                 on top of one the tab had already earned. Only
                                 the travelling band is new. */}
-                            {tab.busy && !tab.awaitingInput && tab.labelShimmer !== false ? (
+                            {tab.notice ? (
+                                <span
+                                    aria-live="polite"
+                                    className="happy-tabs__tab-notice"
+                                    data-happy-desktop-ui="tab-notice"
+                                    data-tone={tab.notice.tone}
+                                    role="status"
+                                >
+                                    {tab.notice.label}
+                                </span>
+                            ) : tab.busy && !tab.awaitingInput && tab.labelShimmer !== false ? (
                                 <ShimmerText sweep="sheen" tone="inherit">
                                     {tab.label}
                                 </ShimmerText>

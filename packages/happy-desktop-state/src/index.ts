@@ -141,6 +141,7 @@ export {
 export * from "./happyAgent/happyAgentWindowStore.js";
 export * from "./happyAgent/happyAgentWorkspaceMemory.js";
 export * from "./happyAgent/happyAgentWorkspaceStore.js";
+export type { HappyAgentTranscriptMode } from "./happyAgent/happyAgentTranscript.js";
 export * from "./happyAgent/happyAgentViewPreferences.js";
 export type {
     HappyTerminalCliSnapshot,
