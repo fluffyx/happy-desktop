@@ -202,8 +202,11 @@ it("names ⌥↵ as the other key while the agent works, and ⌥ held shows what
     expect(sendOf("running").getAttribute("aria-label")).toBe("Queue");
     expect(sendOf("running").dataset.delivery).toBe("queue");
     expect(tipOf("running").hasAttribute("data-open")).toBe(true);
+    // Read at rest, with the fade off, as in Composer.followUp.test.tsx.
     const bubble = tipOf("running").querySelector(".happy-tooltip__bubble") as HTMLElement;
-    await expect.poll(() => getComputedStyle(bubble).opacity).toBe("1");
+    bubble.style.transition = "none";
+    expect(document.activeElement).toBe(textarea);
+    expect(getComputedStyle(bubble).opacity).toBe("1");
     await view.screenshot("Composer.sendKey.test");
     // A click with ⌥ still held does what the control says.
     sendOf("running").click();
