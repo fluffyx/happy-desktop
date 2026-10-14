@@ -53,9 +53,10 @@ export interface HappyAgentSessionDraftWriter {
     /**
      * The daemon changed what it offers, or the reader switched models on or
      * off in Settings. The pickers re-derive from both; a speed tier the
-     * model/account no longer offers is cleared. A draft on a model that is
-     * now switched off moves to `fallback`, the selection a new session would
-     * otherwise start with.
+     * model/account no longer offers is cleared. Omitting `disabledModels`
+     * keeps the switches the draft already has; an empty set clears them. A
+     * draft on a model that is now switched off moves to `fallback`, the
+     * selection a new session would otherwise start with.
      */
     catalogChanged(
         catalog: HappyAgentModelCatalog,
@@ -317,7 +318,7 @@ export function happyAgentSessionDraftStoreOwnedCreate(options: HappyAgentSessio
                 ),
         },
         writer: {
-            catalogChanged(next, nextDisabled, fallback) {
+            catalogChanged(next, nextDisabled = disabledModels, fallback) {
                 if (next === catalog && nextDisabled === disabledModels) return;
                 catalog = next;
                 disabledModels = nextDisabled;

@@ -138,7 +138,7 @@ export function desktopPreferencesCreate(
                     : undefined;
             const nextLinkOpen = snapshot.linkOpenPlacement;
             if (
-                defaultEqual(config.defaultModel, nextDefault) &&
+                defaultEqual(pinnedModel(config), nextDefault) &&
                 config.defaultEffort === nextEffort &&
                 config.defaultPermissionMode === nextPermissionMode &&
                 (config.linkOpen ?? "panel") === nextLinkOpen &&
@@ -168,23 +168,28 @@ export function desktopPreferencesCreate(
                     updated,
                 ];
             }
+            // A model chosen in Settings leaves no pick to remember. Going back
+            // to Last used model keeps the pick and its fallback, or starts from
+            // the model that was chosen until a chat box picks another.
+            const lastPickedModel = nextDefault
+                ? undefined
+                : (config.lastPickedModel ??
+                  (config.defaultModel
+                      ? {
+                            providerId: config.defaultModel.providerId,
+                            modelId: config.defaultModel.modelId,
+                        }
+                      : undefined));
+            const defaultModel =
+                nextDefault ?? (config.lastPickedModel ? config.defaultModel : undefined);
             commit({
                 appearance: config.appearance,
                 defaultEffort: nextEffort,
-                ...(nextDefault ? { defaultModel: nextDefault } : {}),
+                ...(defaultModel ? { defaultModel } : {}),
                 defaultPermissionMode: nextPermissionMode,
                 linkOpen: nextLinkOpen,
                 ...(config.keepAwake === undefined ? {} : { keepAwake: config.keepAwake }),
-                ...(nextDefault
-                    ? {
-                          lastPickedModel: {
-                              providerId: nextDefault.providerId,
-                              modelId: nextDefault.modelId,
-                          },
-                      }
-                    : config.lastPickedModel
-                      ? { lastPickedModel: config.lastPickedModel }
-                      : {}),
+                ...(lastPickedModel ? { lastPickedModel } : {}),
                 modelPreferences,
                 previewUpdatesEnabled: snapshot.previewUpdatesEnabled,
                 scrollbarVisibility: config.scrollbarVisibility,
@@ -197,16 +202,28 @@ export function desktopPreferencesCreate(
     };
 }
 
+/**
+ * The model every new session is pinned to, if any. A document that also names
+ * a chat-box pick is "Last used model": versions before that choice existed
+ * wrote both and let the pick win, falling back to the Settings model when the
+ * pick was unavailable, and this reads it the same way. This version only
+ * writes both while keeping such a document's fallback, so it needs no marker.
+ */
+function pinnedModel(config: DesktopConfig): DesktopDefaultModel | undefined {
+    return config.lastPickedModel ? undefined : config.defaultModel;
+}
+
 function settingsInitial(config: DesktopConfig): HappyAgentSettingsInitial {
     const effort =
         thinkingLevel(config.defaultEffort) ??
         thinkingLevel(config.defaultModel?.effort) ??
         HAPPY_AGENT_DEFAULT_THINKING_LEVEL;
+    const pinned = pinnedModel(config);
     return {
-        ...(config.defaultModel
+        ...(pinned
             ? {
-                  defaultProviderId: config.defaultModel.providerId,
-                  defaultModelId: config.defaultModel.modelId,
+                  defaultProviderId: pinned.providerId,
+                  defaultModelId: pinned.modelId,
               }
             : {}),
         defaultEffort: effort,
@@ -237,18 +254,22 @@ function preferenceDocument(
         preferences[preference.providerId] = provider;
     }
     const defaultEffort = thinkingLevel(config.defaultModel?.effort);
+    const defaultSelection = config.defaultModel
+        ? {
+              providerId: config.defaultModel.providerId,
+              modelId: config.defaultModel.modelId,
+              ...(defaultEffort ? { effort: defaultEffort } : {}),
+          }
+        : undefined;
     return {
         defaultEffort: thinkingLevel(config.defaultEffort) ?? HAPPY_AGENT_DEFAULT_THINKING_LEVEL,
-        ...(config.defaultModel
-            ? {
-                  defaultSelection: {
-                      providerId: config.defaultModel.providerId,
-                      modelId: config.defaultModel.modelId,
-                      ...(defaultEffort ? { effort: defaultEffort } : {}),
-                  },
-              }
-            : {}),
-        ...(config.lastPickedModel ? { lastPickedModel: config.lastPickedModel } : {}),
+        ...(defaultSelection
+            ? config.lastPickedModel
+                ? { lastPickedModel: config.lastPickedModel, lastPickedFallback: defaultSelection }
+                : { defaultSelection }
+            : config.lastPickedModel
+              ? { lastPickedModel: config.lastPickedModel }
+              : {}),
         defaultPermissionMode: permissionMode(config.defaultPermissionMode),
         preferences,
         ...(disabledModels.length > 0 ? { disabledModels } : {}),
@@ -277,22 +298,22 @@ function configFromPreferenceDocument(
             left.providerId.localeCompare(right.providerId) ||
             left.modelId.localeCompare(right.modelId),
     );
+    // A pick is saved beside its fallback, which is how earlier versions read it.
+    const defaultModel =
+        document.defaultSelection ??
+        (document.lastPickedModel ? document.lastPickedFallback : undefined);
     return {
         appearance: current.appearance,
         defaultEffort: document.defaultEffort ?? current.defaultEffort,
-        ...(document.defaultSelection
+        ...(defaultModel
             ? {
                   defaultModel: {
-                      providerId: document.defaultSelection.providerId,
-                      modelId: document.defaultSelection.modelId,
-                      ...(document.defaultSelection.effort
-                          ? { effort: document.defaultSelection.effort }
-                          : {}),
+                      providerId: defaultModel.providerId,
+                      modelId: defaultModel.modelId,
+                      ...(defaultModel.effort ? { effort: defaultModel.effort } : {}),
                   },
               }
-            : current.defaultModel
-              ? { defaultModel: current.defaultModel }
-              : {}),
+            : {}),
         ...(document.lastPickedModel ? { lastPickedModel: document.lastPickedModel } : {}),
         defaultPermissionMode: current.defaultPermissionMode,
         ...(current.linkOpen === undefined ? {} : { linkOpen: current.linkOpen }),

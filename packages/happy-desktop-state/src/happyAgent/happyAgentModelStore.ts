@@ -44,12 +44,24 @@ export interface HappyAgentModelPreferenceDefault extends HappyAgentModelPrefere
 
 /** Complete machine-local model choices supplied by the desktop host. */
 export interface HappyAgentModelPreferenceDocument {
+    /**
+     * The model chosen in Settings. While set, every new session starts on it
+     * and a model picked in a chat box changes only that session. Absent means
+     * "Last used model": new sessions start on `lastPickedModel`.
+     */
     readonly defaultSelection?: HappyAgentModelPreferenceDefault;
     /** Reasoning level configured for new sessions before a model-specific fallback. */
     readonly defaultEffort?: HappyAgentThinkingLevel;
     /** Access mode configured for a new session, independent of its model. */
     readonly defaultPermissionMode?: HappyAgentPermissionMode;
+    /** The model last picked in a chat box, kept only while Settings names none. */
     readonly lastPickedModel?: HappyAgentModelPreferenceIdentity;
+    /**
+     * Where Last used model starts when the last pick is unavailable: the
+     * Settings model an earlier version kept beside the pick, which it fell
+     * back to the same way.
+     */
+    readonly lastPickedFallback?: HappyAgentModelPreferenceDefault;
     readonly preferences: HappyAgentModelPreferences;
     /**
      * Models switched off in Settings, which the pickers leave out and a new
@@ -72,6 +84,7 @@ export type HappyAgentModelStoreSnapshot =
           readonly type: "ready";
           readonly catalog: HappyAgentModelCatalog;
           readonly defaultSelection: HappyAgentSelection;
+          /** What a new session starts with: the Settings model, else the last pick. */
           readonly lastUsedSelection: HappyAgentSelection;
           readonly menus: HappyAgentMenusSnapshot;
           /** Models switched off in Settings; the same set until its contents change. */
@@ -104,7 +117,10 @@ export interface HappyAgentModelStore {
      * and re-derives the defaults from it without touching what was last used.
      */
     catalogChanged(catalog: HappyAgentModelCatalog): void;
-    /** Records a user-selected model/effort/access/tier as the next-session default. */
+    /**
+     * Records a user-selected model/effort/access/tier as the next-session
+     * default. Does nothing while Settings names the model new sessions start on.
+     */
     selectionUsed(selection: HappyAgentSelection): void;
     /** Selects a model with that model's last locally remembered effort and speed. */
     modelSelect(current: HappyAgentSelection, input: HappyAgentModelSelection): HappyAgentSelection;
@@ -351,6 +367,9 @@ export function happyAgentModelStoreCreate(
         },
         selectionUsed(selection) {
             if (snapshot.type !== "ready") return;
+            // A model chosen in Settings is where every new session starts, so
+            // a pick in a chat box belongs to its own session and is not kept.
+            if (document.defaultSelection) return;
             const provider = preferences[selection.providerId] ?? {};
             preferences = {
                 ...preferences,
@@ -479,16 +498,30 @@ function selectionsFromDocument(
             defaultPermissionMode,
             document.defaultEffort,
         ) ?? catalogSelection;
-    const lastUsedSelection =
-        preferenceSelection(
-            catalog,
-            document.lastPickedModel,
-            document.preferences,
-            disabledModels,
-            document.defaultPermissionMode ??
-                current?.lastUsedSelection.permissionMode ??
-                defaultSelection.permissionMode,
-        ) ?? defaultSelection;
+    // A model chosen in Settings pins every new session; without one, the last
+    // pick in a chat box carries over.
+    const lastUsedPermissionMode =
+        document.defaultPermissionMode ??
+        current?.lastUsedSelection.permissionMode ??
+        defaultSelection.permissionMode;
+    const lastUsedSelection = document.defaultSelection
+        ? defaultSelection
+        : (preferenceSelection(
+              catalog,
+              document.lastPickedModel,
+              document.preferences,
+              disabledModels,
+              lastUsedPermissionMode,
+          ) ??
+          preferenceSelection(
+              catalog,
+              document.lastPickedFallback,
+              document.preferences,
+              disabledModels,
+              lastUsedPermissionMode,
+              document.defaultEffort,
+          ) ??
+          defaultSelection);
     return { defaultSelection, lastUsedSelection };
 }
 
