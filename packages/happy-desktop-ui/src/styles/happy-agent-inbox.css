@@ -189,6 +189,15 @@
     line-height: 20px;
 }
 
+.happy-agent-inbox__lead-in-text h1,
+.happy-agent-inbox__lead-in-text h2,
+.happy-agent-inbox__lead-in-text h3,
+.happy-agent-inbox__lead-in-text h4,
+.happy-agent-inbox__lead-in-text h5,
+.happy-agent-inbox__lead-in-text h6 {
+    color: var(--text-secondary);
+}
+
 /*
  * The written reply sits under the options as the last thing in the card, and
  * is separated from them by more than the card's own rhythm: it is the other

@@ -142,3 +142,44 @@ it("grows to the whole content on Show more and back on Show less", async () => 
     expect(button.textContent).toBe("Show more");
     expect(button.getAttribute("aria-expanded")).toBe("false");
 });
+
+it("shows the rest when focus reaches something below the cut", async () => {
+    const view = createRenderer().render(
+        () => (
+            <ClampedContent collapsedHeight={COLLAPSED} data-testid="clamped-focus">
+                <a data-testid="link-above" href="#above" style={{ height: 20 }}>
+                    Above the cut
+                </a>
+                <Lines count={12} />
+                <a data-testid="link-below" href="#below" style={{ height: 20 }}>
+                    Below the cut
+                </a>
+            </ClampedContent>
+        ),
+        { width: 320, height: 360, padding: 20 },
+    );
+    await view.ready();
+    await frame();
+    const root = view.$('[data-testid="clamped-focus"]');
+    const viewport = view.$(
+        '[data-testid="clamped-focus"] [data-happy-desktop-ui="clamped-content-viewport"]',
+    );
+    const toggle = root.element.querySelector(".happy-clamped-content__toggle");
+    const above = view.$('[data-testid="link-above"]').element as HTMLElement;
+    const below = view.$('[data-testid="link-below"]').element as HTMLElement;
+
+    // Focus on what is already in view leaves the block as it is.
+    above.focus();
+    expect(document.activeElement).toBe(above);
+    expect(root.element.hasAttribute("data-expanded")).toBe(false);
+    expect(viewport.bounds().height).toBe(COLLAPSED);
+
+    below.focus();
+    expect(document.activeElement).toBe(below);
+    expect(root.element.hasAttribute("data-expanded")).toBe(true);
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+    expect(viewport.bounds().height).toBe(20 + 12 * 20 + 20);
+    expect(viewport.element.scrollTop).toBe(0);
+    // The same nodes, so focus stays where the reader put it.
+    expect(root.element.querySelector(".happy-clamped-content__toggle")).toBe(toggle);
+});

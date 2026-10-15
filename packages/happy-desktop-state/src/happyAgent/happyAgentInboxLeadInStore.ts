@@ -3,8 +3,8 @@ import type { HappyAgentInboxItem, HappyAgentInboxItemId } from "./happyAgentTyp
 
 /**
  * What the asking agent said just before one waiting question, read from its
- * transcript. `none` is a settled reading: the run had no text to show, or it
- * could not be read, and the question stands on its own.
+ * transcript. `none` means the question stands on its own: the run had no text
+ * to show, or it could not be read while the inbox was open.
  */
 export type HappyAgentInboxLeadIn =
     | { readonly type: "ready"; readonly text: string }
@@ -28,7 +28,8 @@ export type HappyAgentInboxLeadInsSnapshot = ReadonlyMap<
  * Reads run only while the store has a subscriber, which is the open inbox
  * page, never the sidebar count. `itemsRequest` states the items on screen and
  * never publishes in its own call, so the page may state them while it renders.
- * A read that fails settles on `none`: the question works without a lead-in.
+ * A read that keeps failing settles on `none`, since the question works without
+ * a lead-in, but only until the inbox closes: opening it again reads again.
  */
 export interface HappyAgentInboxLeadInStore {
     get(): HappyAgentInboxLeadInsSnapshot;
@@ -44,9 +45,10 @@ export interface HappyAgentInboxLeadInStore {
 export interface HappyAgentInboxLeadInDeps {
     readonly client: Pick<HappyAgentClient, "getMessages">;
     /**
-     * How long to wait before reading again when the question's call is not in
-     * the transcript yet — the moment between the daemon opening the question
-     * and recording the message that asked it. Its length is the number of retries.
+     * How long to wait before reading again when a read fails, or when the
+     * question's call is not in the transcript yet — the moment between the
+     * daemon opening the question and recording the message that asked it. Its
+     * length is the number of retries.
      */
     readonly retryDelaysMs?: readonly number[];
 }
@@ -67,6 +69,8 @@ export function happyAgentInboxLeadInStoreCreate(
     let wanted = new Map<HappyAgentInboxItemId, HappyAgentInboxItem>();
     /** Reads under way, each with what stops it. */
     const reading = new Map<HappyAgentInboxItemId, AbortController>();
+    /** Items whose `none` is a read that kept failing, read again on the next open. */
+    const failed = new Set<HappyAgentInboxItemId>();
     let pruneScheduled = false;
     let disposed = false;
 
@@ -80,22 +84,33 @@ export function happyAgentInboxLeadInStoreCreate(
         publish(next);
     };
 
+    /** Rejects when the last attempt failed, or when `signal` stopped it. */
     const leadInRead = async (
         item: HappyAgentInboxItem,
         signal: AbortSignal,
     ): Promise<HappyAgentInboxLeadIn> => {
         for (let attempt = 0; ; attempt += 1) {
-            // No cursor answers with the newest runs, the one still waiting on
-            // this question always whole; one message is enough to stop there.
-            const page = await deps.client.getMessages(
-                item.sessionId,
-                { limit: 1, omitToolData: true },
-                { signal },
-            );
-            const found = happyAgentInboxLeadInSelect(page.runs, item.runId, item.requestId);
-            if (found !== undefined) return found === "" ? NONE : { type: "ready", text: found };
+            let failure: { readonly error: unknown } | undefined;
+            try {
+                // No cursor answers with the newest runs, the one still waiting
+                // on this question always whole; one message is enough to stop there.
+                const page = await deps.client.getMessages(
+                    item.sessionId,
+                    { limit: 1, omitToolData: true },
+                    { signal },
+                );
+                const found = happyAgentInboxLeadInSelect(page.runs, item.runId, item.requestId);
+                if (found !== undefined)
+                    return found === "" ? NONE : { type: "ready", text: found };
+            } catch (error) {
+                if (signal.aborted) throw error;
+                failure = { error };
+            }
             const delay = retryDelaysMs[attempt];
-            if (delay === undefined) return NONE;
+            if (delay === undefined) {
+                if (failure !== undefined) throw failure.error;
+                return NONE;
+            }
             await new Promise<void>((resolve, reject) => {
                 const timer = setTimeout(resolve, delay);
                 signal.addEventListener(
@@ -118,14 +133,21 @@ export function happyAgentInboxLeadInStoreCreate(
             if (snapshot.has(itemId) || reading.has(itemId)) continue;
             const controller = new AbortController();
             reading.set(itemId, controller);
-            void leadInRead(item, controller.signal)
-                .catch(() => NONE)
-                .then((leadIn) => {
+            void leadInRead(item, controller.signal).then(
+                (leadIn) => {
                     if (controller.signal.aborted) return;
                     reading.delete(itemId);
                     settle(itemId, leadIn);
                     pump();
-                });
+                },
+                () => {
+                    if (controller.signal.aborted) return;
+                    reading.delete(itemId);
+                    failed.add(itemId);
+                    settle(itemId, NONE);
+                    pump();
+                },
+            );
         }
     };
 
@@ -137,13 +159,23 @@ export function happyAgentInboxLeadInStoreCreate(
         for (const itemId of snapshot.keys()) if (!wanted.has(itemId)) stale = true;
         if (!stale) return;
         const next = new Map(snapshot);
-        for (const itemId of next.keys()) if (!wanted.has(itemId)) next.delete(itemId);
+        for (const itemId of next.keys()) {
+            if (wanted.has(itemId)) continue;
+            next.delete(itemId);
+            failed.delete(itemId);
+        }
         publish(next);
     };
 
+    /** Stops every read and forgets the failed ones, so the next open reads them again. */
     const stop = (): void => {
         for (const controller of reading.values()) controller.abort();
         reading.clear();
+        if (failed.size === 0) return;
+        const next = new Map(snapshot);
+        for (const itemId of failed) next.delete(itemId);
+        failed.clear();
+        publish(next);
     };
 
     return {
@@ -186,8 +218,8 @@ export function happyAgentInboxLeadInStoreCreate(
         [Symbol.dispose]() {
             if (disposed) return;
             disposed = true;
-            stop();
             listeners.clear();
+            stop();
         },
     };
 }

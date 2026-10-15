@@ -204,6 +204,49 @@ describe("happyAgentInboxLeadInStore", () => {
         expect(store.get().get(quiet.id)).toEqual({ type: "none" });
     });
 
+    it("reads again after a failed read", async () => {
+        const { reads, store } = storeCreate([1]);
+        const one = item("one");
+        store.subscribe(() => undefined);
+        store.itemsRequest([one]);
+        await vi.waitFor(() => expect(reads).toHaveLength(1));
+
+        reads[0]!.fail(new Error("The Happy Agent is unreachable."));
+        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        expect(store.get().has(one.id)).toBe(false);
+
+        reads[1]!.respond(asking("one", "Back again."));
+        await vi.waitFor(() =>
+            expect(store.get().get(one.id)).toEqual({ type: "ready", text: "Back again." }),
+        );
+    });
+
+    it("reads a failed question again when the page opens again, but not one that said nothing", async () => {
+        const { reads, store } = storeCreate();
+        const quiet = item("quiet");
+        const broken = item("broken");
+        const unsubscribe = store.subscribe(() => undefined);
+        store.itemsRequest([quiet, broken]);
+        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        reads[0]!.respond([run("run-quiet", agent("a", call("question-quiet")))]);
+        reads[1]!.fail(new Error("The Happy Agent is unreachable."));
+        await vi.waitFor(() => expect(store.get().size).toBe(2));
+
+        unsubscribe();
+        expect(store.get().has(broken.id)).toBe(false);
+        expect(store.get().get(quiet.id)).toEqual({ type: "none" });
+
+        store.subscribe(() => undefined);
+        store.itemsRequest([quiet, broken]);
+        await vi.waitFor(() => expect(reads).toHaveLength(3));
+        expect(reads[2]!.agentId).toBe("agent-broken");
+        reads[2]!.respond(asking("broken", "Reachable now."));
+        await vi.waitFor(() =>
+            expect(store.get().get(broken.id)).toEqual({ type: "ready", text: "Reachable now." }),
+        );
+        expect(reads).toHaveLength(3);
+    });
+
     it("reads again while the asking message is not recorded yet", async () => {
         const { reads, store } = storeCreate([1]);
         const one = item("one");

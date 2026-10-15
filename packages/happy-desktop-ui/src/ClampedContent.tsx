@@ -1,4 +1,5 @@
 import { useId, useState, type CSSProperties, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 
 export interface ClampedContentProps {
     readonly children: ReactNode;
@@ -54,6 +55,22 @@ export function ClampedContent(props: ClampedContentProps) {
                 className="happy-clamped-content__viewport"
                 data-happy-desktop-ui="clamped-content-viewport"
                 id={viewportId}
+                onFocus={(event) => {
+                    // Tabbing reaches links below the cut too. Rather than
+                    // scroll the cut block to an unseen one, show the rest.
+                    // Making them inert would also hide the visible text from
+                    // screen readers, which read the whole block.
+                    if (!clipped || expanded) return;
+                    const content = event.currentTarget.firstElementChild;
+                    if (!content) return;
+                    const target = event.target;
+                    const bottom =
+                        target.getBoundingClientRect().bottom -
+                        content.getBoundingClientRect().top;
+                    if (bottom <= props.collapsedHeight + CLIP_EPSILON) return;
+                    flushSync(() => setExpanded(true));
+                    target.scrollIntoView({ block: "nearest" });
+                }}
             >
                 <div
                     className="happy-clamped-content__content"
