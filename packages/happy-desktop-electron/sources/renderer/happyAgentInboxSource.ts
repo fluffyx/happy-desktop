@@ -96,7 +96,11 @@ export function happyAgentInboxSourceCreate(
                 )
                     .then(({ question }) => {
                         // Gone by the time it was read: the catalog has already
-                        // stopped naming it, or will.
+                        // stopped naming it, or will. How it ended may be
+                        // waiting in `resolutions`, but an update carries only
+                        // the fields that changed, not the prompts, and a
+                        // resolved question cannot be read, so there is nothing
+                        // to show it as in the answered list.
                         if (controller.signal.aborted || question === null) return;
                         if (questions.has(question.id)) return;
                         const resolution = resolutions.get(question.id);
