@@ -115,7 +115,8 @@ export interface FakeHappyAgentDaemon {
     /**
      * Opens a pending question on an agent as a run asking would: it emits
      * `question.created`, then `agent.updated` naming it as `pendingQuestionId`.
-     * Answering it or aborting the agent resolves it with the matching events.
+     * Answering it, aborting the agent, or asking a new one resolves it with the
+     * matching events.
      */
     questionAsk(agentId: string, question: Question): void;
 
@@ -1314,6 +1315,10 @@ export function fakeHappyAgentDaemonCreate(): FakeHappyAgentDaemon {
             if (question !== null) questionsById.set(question.id, question);
         },
         questionAsk(agentId, question) {
+            // An agent waits on one question at a time, so asking again settles
+            // the one before, as aborting its run would.
+            if (questions.get(agentId)?.id !== question.id)
+                questionResolve(agentId, { status: "canceled" });
             questions.set(agentId, question);
             questionsById.set(question.id, question);
             emit("question.created", { question });
