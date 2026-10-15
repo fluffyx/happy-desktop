@@ -4,7 +4,7 @@ import type {
     MessageHistoryQuery,
     MessageHistoryResponse,
 } from "@slopus/happy-agent-client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeAgentMessage, fakeRun, fakeUserMessage } from "../testing/fakeHappyAgentDaemon.js";
 import {
     happyAgentInboxLeadInSelect,
@@ -161,31 +161,47 @@ function storeCreate(retryDelaysMs: readonly number[] = []) {
     return { reads, store };
 }
 
+/**
+ * Moves fake time on by `ms`, then lets every read the store started or
+ * answered run its promise chain to the end, one turn at a time.
+ */
+async function settled(ms = 0): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms);
+    for (let turn = 0; turn < 20; turn += 1) await vi.advanceTimersByTimeAsync(0);
+}
+
 describe("happyAgentInboxLeadInStore", () => {
+    beforeEach(() => {
+        vi.useFakeTimers();
+    });
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     it("reads only while subscribed, never in the call that states the items", async () => {
         const { reads, store } = storeCreate();
         const one = item("one");
         store.itemsRequest([one]);
-        await Promise.resolve();
+        await settled();
         expect(reads).toEqual([]);
 
         const notified = vi.fn();
         store.subscribe(notified);
         store.itemsRequest([one]);
         expect(notified).not.toHaveBeenCalled();
-        await vi.waitFor(() => expect(reads).toHaveLength(1));
+        await settled();
+        expect(reads).toHaveLength(1);
         expect(reads[0]).toMatchObject({
             agentId: "agent-one",
             query: { limit: 1, omitToolData: true },
         });
 
         reads[0]!.respond(asking("one", "Here is the situation."));
-        await vi.waitFor(() =>
-            expect(store.get().get(one.id)).toEqual({
-                type: "ready",
-                text: "Here is the situation.",
-            }),
-        );
+        await settled();
+        expect(store.get().get(one.id)).toEqual({
+            type: "ready",
+            text: "Here is the situation.",
+        });
         expect(notified).toHaveBeenCalled();
     });
 
@@ -195,30 +211,36 @@ describe("happyAgentInboxLeadInStore", () => {
         const broken = item("broken");
         store.subscribe(() => undefined);
         store.itemsRequest([quiet, broken]);
-        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        await settled();
+        expect(reads).toHaveLength(2);
 
         reads[0]!.respond([run("run-quiet", agent("a", call("question-quiet")))]);
         reads[1]!.fail(new Error("The Happy Agent is unreachable."));
 
-        await vi.waitFor(() => expect(store.get().get(broken.id)).toEqual({ type: "none" }));
+        await settled();
+        expect(store.get().get(broken.id)).toEqual({ type: "none" });
         expect(store.get().get(quiet.id)).toEqual({ type: "none" });
     });
 
     it("reads again after a failed read", async () => {
-        const { reads, store } = storeCreate([1]);
+        const { reads, store } = storeCreate([500]);
         const one = item("one");
         store.subscribe(() => undefined);
         store.itemsRequest([one]);
-        await vi.waitFor(() => expect(reads).toHaveLength(1));
+        await settled();
+        expect(reads).toHaveLength(1);
 
         reads[0]!.fail(new Error("The Happy Agent is unreachable."));
-        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        await settled(499);
+        // Waiting out the delay, not reading again straight away.
+        expect(reads).toHaveLength(1);
         expect(store.get().has(one.id)).toBe(false);
+        await settled(1);
+        expect(reads).toHaveLength(2);
 
         reads[1]!.respond(asking("one", "Back again."));
-        await vi.waitFor(() =>
-            expect(store.get().get(one.id)).toEqual({ type: "ready", text: "Back again." }),
-        );
+        await settled();
+        expect(store.get().get(one.id)).toEqual({ type: "ready", text: "Back again." });
     });
 
     it("reads a failed question again when the page opens again, but not one that said nothing", async () => {
@@ -227,10 +249,12 @@ describe("happyAgentInboxLeadInStore", () => {
         const broken = item("broken");
         const unsubscribe = store.subscribe(() => undefined);
         store.itemsRequest([quiet, broken]);
-        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        await settled();
+        expect(reads).toHaveLength(2);
         reads[0]!.respond([run("run-quiet", agent("a", call("question-quiet")))]);
         reads[1]!.fail(new Error("The Happy Agent is unreachable."));
-        await vi.waitFor(() => expect(store.get().size).toBe(2));
+        await settled();
+        expect(store.get().size).toBe(2);
 
         unsubscribe();
         expect(store.get().has(broken.id)).toBe(false);
@@ -238,42 +262,47 @@ describe("happyAgentInboxLeadInStore", () => {
 
         store.subscribe(() => undefined);
         store.itemsRequest([quiet, broken]);
-        await vi.waitFor(() => expect(reads).toHaveLength(3));
+        await settled();
+        expect(reads).toHaveLength(3);
         expect(reads[2]!.agentId).toBe("agent-broken");
         reads[2]!.respond(asking("broken", "Reachable now."));
-        await vi.waitFor(() =>
-            expect(store.get().get(broken.id)).toEqual({ type: "ready", text: "Reachable now." }),
-        );
+        await settled();
+        expect(store.get().get(broken.id)).toEqual({ type: "ready", text: "Reachable now." });
         expect(reads).toHaveLength(3);
     });
 
     it("reads again while the asking message is not recorded yet", async () => {
-        const { reads, store } = storeCreate([1]);
+        const { reads, store } = storeCreate([500]);
         const one = item("one");
         store.subscribe(() => undefined);
         store.itemsRequest([one]);
-        await vi.waitFor(() => expect(reads).toHaveLength(1));
+        await settled();
+        expect(reads).toHaveLength(1);
 
         reads[0]!.respond([run("run-one", agent("a", text("Still writing…")))]);
-        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        await settled(500);
+        expect(reads).toHaveLength(2);
         expect(store.get().has(one.id)).toBe(false);
 
         reads[1]!.respond(asking("one", "Now it is recorded."));
-        await vi.waitFor(() =>
-            expect(store.get().get(one.id)).toEqual({ type: "ready", text: "Now it is recorded." }),
-        );
+        await settled();
+        expect(store.get().get(one.id)).toEqual({ type: "ready", text: "Now it is recorded." });
     });
 
     it("gives up quietly when the call never shows up", async () => {
-        const { reads, store } = storeCreate([1]);
+        const { reads, store } = storeCreate([500]);
         const one = item("one");
         store.subscribe(() => undefined);
         store.itemsRequest([one]);
-        await vi.waitFor(() => expect(reads).toHaveLength(1));
+        await settled();
+        expect(reads).toHaveLength(1);
         reads[0]!.respond([]);
-        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        await settled(500);
+        expect(reads).toHaveLength(2);
         reads[1]!.respond([]);
-        await vi.waitFor(() => expect(store.get().get(one.id)).toEqual({ type: "none" }));
+        await settled();
+        expect(store.get().get(one.id)).toEqual({ type: "none" });
+        await settled(10_000);
         expect(reads).toHaveLength(2);
     });
 
@@ -283,9 +312,11 @@ describe("happyAgentInboxLeadInStore", () => {
         const two = item("two");
         const unsubscribe = store.subscribe(() => undefined);
         store.itemsRequest([one, two]);
-        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        await settled();
+        expect(reads).toHaveLength(2);
         reads[0]!.respond(asking("one", "One's lead-in."));
-        await vi.waitFor(() => expect(store.get().has(one.id)).toBe(true));
+        await settled();
+        expect(store.get().has(one.id)).toBe(true);
 
         unsubscribe();
         expect(reads[1]!.signal?.aborted).toBe(true);
@@ -293,7 +324,8 @@ describe("happyAgentInboxLeadInStore", () => {
         store.subscribe(() => undefined);
         store.itemsRequest([one, two]);
         // Only the read that never finished starts again.
-        await vi.waitFor(() => expect(reads).toHaveLength(3));
+        await settled();
+        expect(reads).toHaveLength(3);
         expect(reads[2]!.agentId).toBe("agent-two");
         expect(store.get().get(one.id)).toEqual({ type: "ready", text: "One's lead-in." });
     });
@@ -304,16 +336,19 @@ describe("happyAgentInboxLeadInStore", () => {
         const two = item("two");
         store.subscribe(() => undefined);
         store.itemsRequest([one, two]);
-        await vi.waitFor(() => expect(reads).toHaveLength(2));
+        await settled();
+        expect(reads).toHaveLength(2);
         reads[0]!.respond(asking("one", "One's lead-in."));
-        await vi.waitFor(() => expect(store.get().has(one.id)).toBe(true));
+        await settled();
+        expect(store.get().has(one.id)).toBe(true);
 
         // Both answered: neither is on screen any more.
         store.itemsRequest([]);
         expect(reads[1]!.signal?.aborted).toBe(true);
         // Forgotten after the call, not in it.
         expect(store.get().has(one.id)).toBe(true);
-        await vi.waitFor(() => expect(store.get().size).toBe(0));
+        await settled();
+        expect(store.get().size).toBe(0);
     });
 
     it("reads at most four questions at a time", async () => {
@@ -321,12 +356,12 @@ describe("happyAgentInboxLeadInStore", () => {
         const items = ["a", "b", "c", "d", "e", "f"].map((id) => item(id));
         store.subscribe(() => undefined);
         store.itemsRequest(items);
-        await vi.waitFor(() => expect(reads).toHaveLength(4));
-        await new Promise<void>((resolve) => queueMicrotask(resolve));
+        await settled();
         expect(reads).toHaveLength(4);
 
         reads[0]!.respond(asking("a", "A."));
-        await vi.waitFor(() => expect(reads).toHaveLength(5));
+        await settled();
+        expect(reads).toHaveLength(5);
         expect(reads[4]!.agentId).toBe("agent-e");
     });
 });
