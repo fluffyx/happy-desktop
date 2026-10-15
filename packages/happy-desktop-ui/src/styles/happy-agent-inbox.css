@@ -163,6 +163,33 @@
 }
 
 /*
+ * The agent's lead-in is its own words in the chat's Markdown, set a step
+ * quieter than the question under it: 14/20 secondary ink for every block, with
+ * headings kept to the same size and told apart by weight alone, so seven
+ * lines of it are about the same height whatever the agent wrote.
+ */
+.happy-agent-inbox__lead-in-text {
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--text-secondary);
+    overflow-wrap: break-word;
+}
+
+.happy-agent-inbox__lead-in-text p,
+.happy-agent-inbox__lead-in-text ul,
+.happy-agent-inbox__lead-in-text ol,
+.happy-agent-inbox__lead-in-text table,
+.happy-agent-inbox__lead-in-text h1,
+.happy-agent-inbox__lead-in-text h2,
+.happy-agent-inbox__lead-in-text h3,
+.happy-agent-inbox__lead-in-text h4,
+.happy-agent-inbox__lead-in-text h5,
+.happy-agent-inbox__lead-in-text h6 {
+    font-size: 14px;
+    line-height: 20px;
+}
+
+/*
  * The written reply sits under the options as the last thing in the card, and
  * is separated from them by more than the card's own rhythm: it is the other
  * way to answer, not another option.

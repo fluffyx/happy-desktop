@@ -27,6 +27,7 @@
 @import "./styles/turn-summary.css";
 @import "./styles/tooltip.css";
 @import "./styles/scrolling-text.css";
+@import "./styles/clamped-content.css";
 @import "./styles/copy-button.css";
 @import "./styles/conversation-error-card.css";
 @import "./styles/conversation-compute-event.css";

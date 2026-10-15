@@ -1,0 +1,73 @@
+/*
+ * ClampedContent — a long block cut to a fixed height until the reader asks for
+ * the rest.
+ *
+ * The viewport carries the cut and the fade; the content inside keeps its whole
+ * natural height so it can be measured whether or not it is cut. Like
+ * ScrollingText, the fade is an alpha mask rather than a gradient to a colour,
+ * so the block keeps whatever surface sits behind it.
+ */
+
+.happy-clamped-content {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+}
+
+.happy-clamped-content__viewport {
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-height: var(--happy-clamped-content-height);
+    overflow: hidden;
+}
+
+.happy-clamped-content[data-expanded] .happy-clamped-content__viewport {
+    max-height: none;
+}
+
+.happy-clamped-content[data-clipped]:not([data-expanded]) .happy-clamped-content__viewport {
+    -webkit-mask-image: linear-gradient(to bottom, black calc(100% - 40px), transparent 100%);
+    mask-image: linear-gradient(to bottom, black calc(100% - 40px), transparent 100%);
+}
+
+.happy-clamped-content__content {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+}
+
+/* The way to the rest is a line of quiet label type rather than a padded
+   button, so its words start on the reading's own left edge. */
+.happy-clamped-content__toggle {
+    display: flex;
+    align-items: center;
+    padding: 0;
+    font-family: var(--happy-font-ui);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 20px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    background: none;
+    border: 0;
+    border-radius: var(--happy-radius-sm);
+}
+
+.happy-clamped-content__toggle:hover {
+    color: var(--text);
+}
+
+.happy-clamped-content__toggle:focus-visible {
+    outline: 2px solid var(--radio-active);
+    outline-offset: 2px;
+}

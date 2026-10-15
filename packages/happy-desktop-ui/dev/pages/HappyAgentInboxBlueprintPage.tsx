@@ -145,6 +145,20 @@ const messages: ReadonlyMap<HappyAgentInboxItemId, string> = new Map([
 const location = (candidate: HappyAgentInboxItem): string =>
     candidate.scope?.kind === "workspace" ? "happy · feature worktree" : "happy";
 
+/** What each waiting question's agent said before asking, as the agent wrote it. */
+const leadIns: Readonly<Record<string, string>> = {
+    one: [
+        "I looked at how the plugin permission table is used before changing it.",
+        "- It holds **40 million** rows and grows by about 200,000 a day.",
+        "- Three services read it on every request; one writes to it.",
+        "- The nightly backup locks it for roughly four minutes.",
+        "One transaction keeps every reader consistent but holds the lock for the whole copy. Batches keep the lock short, but readers can see a mix of old and new rows while it runs.",
+    ].join("\n\n"),
+    two: "The new header works in the diff listing. The other two surfaces share its row rhythm, so they could adopt it in the same change.",
+};
+
+const leadIn = (candidate: HappyAgentInboxItem): string | undefined => leadIns[candidate.id];
+
 const time = (candidate: HappyAgentInboxItem): string =>
     candidate.status === "answered" ? "Answered 8m ago" : "Asked 3m ago";
 
@@ -225,6 +239,24 @@ export function HappyAgentInboxBlueprintPage() {
                     onOpenSession={() => undefined}
                     pending={pending}
                     submissions={failed}
+                />
+            </FullScreenSpecimen>
+
+            <FullScreenSpecimen
+                detail="What each agent said before asking, above its question: the first ran past seven lines and is cut with Show more, the second fits and is shown whole."
+                label="Lead-ins"
+                number="06"
+            >
+                <HappyAgentInboxPage
+                    answered={answered}
+                    itemLeadIn={leadIn}
+                    itemLocation={location}
+                    itemTime={time}
+                    onAnswer={() => undefined}
+                    onMessageChange={() => undefined}
+                    onMessageSubmit={() => undefined}
+                    onOpenSession={() => undefined}
+                    pending={pending}
                 />
             </FullScreenSpecimen>
         </ComponentPage>

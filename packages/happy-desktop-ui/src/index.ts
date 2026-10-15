@@ -59,6 +59,7 @@ export { TurnSummary, type TurnSummaryProps } from "./TurnSummary";
 export { Tooltip, type TooltipPlacement, type TooltipProps } from "./Tooltip";
 export { CopyButton, type CopyButtonProps } from "./CopyButton";
 export { ScrollingText, type ScrollingTextProps } from "./ScrollingText";
+export { ClampedContent, type ClampedContentProps } from "./ClampedContent";
 export { TypedText, type TypedTextProps } from "./TypedText";
 export {
     ConversationComputeEvent,

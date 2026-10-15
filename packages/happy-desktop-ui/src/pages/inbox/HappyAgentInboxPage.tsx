@@ -8,6 +8,7 @@ import type {
 import { AvatarBrutalist } from "../../AvatarBrutalist";
 import { Banner } from "../../Banner";
 import { Button } from "../../Button";
+import { ClampedContent } from "../../ClampedContent";
 import { Composer } from "../../Composer";
 import { EmptyState } from "../../EmptyState";
 import { Icon } from "../../Icon";
@@ -16,6 +17,7 @@ import {
     HappyAgentUserInputPrompt,
     type HappyAgentUserInputAnswerMap,
 } from "../../HappyAgentUserInputPrompt";
+import { renderMessageMarkdown } from "../../MessageMarkdown";
 import { ScrollArea } from "../../Scrollbar";
 import { Toolbar } from "../../Toolbar";
 
@@ -53,6 +55,12 @@ export interface HappyAgentInboxPageProps {
     itemLocation?: (item: HappyAgentInboxItem) => string | undefined;
     /** Renders an item's age the way the rest of the surface renders time. */
     itemTime?: (item: HappyAgentInboxItem) => string | undefined;
+    /**
+     * What the asking agent said just before a waiting question, as Markdown.
+     * Shown above the question, cut to a few lines until the reader asks for
+     * the rest; absent shows the question alone.
+     */
+    itemLeadIn?: (item: HappyAgentInboxItem) => string | undefined;
     className?: string;
     "data-testid"?: string;
     style?: CSSProperties;
@@ -148,6 +156,7 @@ export function HappyAgentInboxPage(props: HappyAgentInboxPageProps) {
                         <InboxPendingItem
                             item={item}
                             key={item.id}
+                            leadIn={props.itemLeadIn?.(item)}
                             location={props.itemLocation?.(item)}
                             message={props.messages?.get(item.id) ?? ""}
                             onAnswer={props.onAnswer}
@@ -310,7 +319,15 @@ function InboxItemHeader(props: InboxItemHeaderProps & { status?: string }) {
     );
 }
 
+/**
+ * Seven lines of lead-in type. Enough to carry the usual paragraph of
+ * explanation whole, short enough that a queue of questions stays a queue.
+ */
+const LEAD_IN_COLLAPSED_HEIGHT = 7 * 20;
+
 interface InboxPendingItemProps extends InboxItemHeaderProps {
+    /** What the asking agent said just before asking, as Markdown. */
+    leadIn?: string | undefined;
     /** What has been written as this question's reply so far. */
     message: string;
     onAnswer: (itemId: HappyAgentInboxItemId, answers: HappyAgentInboxAnswerMap) => void;
@@ -341,6 +358,25 @@ function InboxPendingItem(props: InboxPendingItemProps) {
                 {...(submission?.type === "pending" ? { status: "Sending…" } : {})}
                 {...(props.time === undefined ? {} : { time: props.time })}
             />
+            {/* What the agent said before asking, so the question can be
+                answered from here rather than from its conversation. It is the
+                agent's own words, set in the chat's Markdown, in a quieter
+                type than the question they lead into. */}
+            {props.leadIn ? (
+                <ClampedContent
+                    className="happy-agent-inbox__lead-in"
+                    collapsedHeight={LEAD_IN_COLLAPSED_HEIGHT}
+                    data-testid="happy-agent-inbox-lead-in"
+                >
+                    <div
+                        className="happy-agent-inbox__lead-in-text happy-message__body--markdown"
+                        data-happy-desktop-ui="happy-agent-inbox-lead-in-text"
+                        data-markdown=""
+                    >
+                        {renderMessageMarkdown(props.leadIn)}
+                    </div>
+                </ClampedContent>
+            ) : null}
             <HappyAgentUserInputPrompt
                 {...(submission?.type === "failed" ? { error: submission.error } : {})}
                 onAnswer={(_requestId, answers) => props.onAnswer(props.item.id, answers)}
