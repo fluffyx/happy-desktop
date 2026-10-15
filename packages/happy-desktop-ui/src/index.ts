@@ -157,7 +157,6 @@ export {
     type ComposerAttachmentPreviewsProps,
 } from "./ComposerAttachmentPreviews";
 export {
-    COMPOSER_MODEL_BENCHMARKS_URL,
     ComposerModelControl,
     type ComposerModelAccount,
     type ComposerModelAccountUsage,

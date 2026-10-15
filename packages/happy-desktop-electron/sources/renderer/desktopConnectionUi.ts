@@ -97,6 +97,8 @@ export function desktopConnectionUiCreate(input: {
             ...(stored?.defaultPermissionMode
                 ? { defaultPermissionMode: stored.defaultPermissionMode }
                 : {}),
+            // The connection's saved switches, kept with its other model choices.
+            ...(stored?.disabledModels ? { disabledModels: stored.disabledModels } : {}),
         });
     const unsubscribeSettings = input.main
         ? undefined
@@ -108,6 +110,7 @@ export function desktopConnectionUiCreate(input: {
                   preferences: current?.preferences ?? {},
                   defaultEffort: value.defaultEffort,
                   defaultPermissionMode: value.defaultPermissionMode,
+                  disabledModels: [...value.disabledModels],
                   ...(value.defaultProviderId && value.defaultModelId
                       ? {
                             defaultSelection: {

@@ -154,9 +154,8 @@
     min-width: 128px;
 }
 
-/* The model list's inset lives on its content and footer instead of the
- * panel, so an overflowing list sets its scrollbar beside the rows, that
- * inset away. */
+/* The model list's inset lives on its content instead of the panel, so an
+ * overflowing list sets its scrollbar beside the rows, that inset away. */
 .happy-composer-model-control__models {
     min-width: 192px;
     max-width: 256px;
@@ -187,8 +186,7 @@
     overscroll-behavior: contain;
 }
 
-.happy-composer-model-control__list-content,
-.happy-composer-model-control__footer {
+.happy-composer-model-control__list-content {
     display: flex;
     flex: 0 0 auto;
     flex-direction: column;
@@ -203,12 +201,11 @@
     flex-direction: column;
 }
 
-/* Every line has the same side padding, so headers, model names, and the
- * benchmarks link all start on one left edge; a check follows its label. */
+/* Every line has the same side padding, so headers and model names all start
+ * on one left edge; a check follows its label. */
 .happy-composer-model-control__service-header,
 .happy-composer-model-control__row,
-.happy-composer-model-control__option,
-.happy-composer-model-control__benchmarks {
+.happy-composer-model-control__option {
     position: relative;
     isolation: isolate;
     display: flex;
@@ -240,8 +237,7 @@
 /* A line's highlight is painted 2px inside it, so two neighbouring highlights
  * always keep 4px apart instead of touching. The line keeps its full hit box. */
 .happy-composer-model-control__row::before,
-.happy-composer-model-control__option::before,
-.happy-composer-model-control__benchmarks::before {
+.happy-composer-model-control__option::before {
     position: absolute;
     inset: 2px 0;
     z-index: -1;
@@ -254,21 +250,18 @@
 .happy-composer-model-control__row[data-active]::before,
 .happy-composer-model-control__row:hover:not(:disabled)::before,
 .happy-composer-model-control__option:hover::before,
-.happy-composer-model-control__option[data-shown]::before,
-.happy-composer-model-control__benchmarks:hover::before {
+.happy-composer-model-control__option[data-shown]::before {
     background: var(--surface-pressed);
 }
 
 /* Focus rings are drawn inside the highlight they belong to, never across a neighbour. */
 .happy-composer-model-control__row:focus-visible::before,
-.happy-composer-model-control__option:focus-visible::before,
-.happy-composer-model-control__benchmarks:focus-visible::before {
+.happy-composer-model-control__option:focus-visible::before {
     box-shadow: inset 0 0 0 2px var(--radio-active);
 }
 
 .happy-composer-model-control__row:focus-visible,
-.happy-composer-model-control__option:focus-visible,
-.happy-composer-model-control__benchmarks:focus-visible {
+.happy-composer-model-control__option:focus-visible {
     outline: none;
 }
 
@@ -403,30 +396,6 @@
     cursor: pointer;
 }
 
-.happy-composer-model-control__benchmarks {
-    justify-content: space-between;
-}
-
-.happy-composer-model-control__benchmarks {
-    color: var(--text-secondary);
-    font-size: 13px;
-    text-decoration: none;
-    cursor: pointer;
-}
-
-/* "Manage accounts" is a footer line like the benchmarks link, as a button. */
-.happy-composer-model-control__benchmarks:disabled {
-    cursor: default;
-    opacity: 0.48;
-}
-
-.happy-composer-model-control__footer-error {
-    padding: 0 10px 4px;
-    color: var(--text-destructive);
-    font-size: 12px;
-    line-height: 16px;
-}
-
 /* The mark beside the pill for a selected account that is not an ordinary
  * choice: a quiet grey triangle for a hidden one, red for one that is gone. */
 .happy-composer-model-control__notice-anchor {
@@ -537,8 +506,7 @@
 }
 
 /* A hairline runs exactly across the text column: from the left edge shared by
- * headers, names, and the benchmarks link to the matching right inset, clear
- * of the panel border. */
+ * headers and names to the matching right inset, clear of the panel border. */
 .happy-composer-model-control__separator {
     display: flex;
     flex: 0 0 auto;

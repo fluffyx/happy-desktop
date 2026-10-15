@@ -67,6 +67,8 @@ export interface HappyAgentSettingsInitial {
     readonly defaultPermissionMode?: HappyAgentPermissionMode;
     readonly linkOpenPlacement?: HappyAgentLinkOpenPlacement;
     readonly previewUpdatesEnabled?: boolean;
+    /** Switches the reader made earlier, restored from the creator's storage. */
+    readonly disabledModels?: readonly HappyAgentModelKey[];
 }
 
 /** Creates the workspace-lifetime preference store; it opens no transport or timers. */
@@ -80,7 +82,9 @@ export function happyAgentSettingsStoreCreate(
         defaultPermissionMode: initial.defaultPermissionMode ?? "auto",
         linkOpenPlacement: initial.linkOpenPlacement ?? "panel",
         previewUpdatesEnabled: initial.previewUpdatesEnabled ?? false,
-        disabledModels: EMPTY_DISABLED,
+        disabledModels: initial.disabledModels?.length
+            ? new Set(initial.disabledModels)
+            : EMPTY_DISABLED,
     };
 
     const publish = (next: HappyAgentSettingsSnapshot): void => {

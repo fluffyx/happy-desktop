@@ -291,7 +291,6 @@ function Picker(props: {
     return (
         <ComposerModelControl
             accountNotice={props.accountNotice}
-            onAccountsManage={chiefOfStaffAsk}
             onSelect={selectionSet}
             preview={props.preview}
             selection={selection}
@@ -498,7 +497,7 @@ export function ComposerModelControlPage() {
             <Specimen
                 number="13"
                 label="Long catalog"
-                detail="The model list stops at 480 px and scrolls. The scrollbar stands beside the rows, the panel inset away from the selected row, and the benchmarks link stays in view."
+                detail="The model list stops at 480 px and scrolls. The scrollbar stands beside the rows, the panel inset away from the selected row."
                 stage="surface"
             >
                 <Open height={560} services={LONG_SERVICES} />
@@ -639,19 +638,6 @@ export function ComposerModelControlPage() {
                         services={HIDDEN_SERVICES}
                     />
                 </Anchor>
-            </Specimen>
-            <Specimen
-                number="21"
-                label="Manage accounts"
-                detail="The model list's footer offers Manage accounts directly above Latest benchmarks, on the same line style. It adds a Manage connected accounts request to the Chief of Staff's draft and opens that conversation."
-                stage="surface"
-            >
-                <Open
-                    accountNotice={{ kind: "hidden" }}
-                    selection={ON_HIDDEN}
-                    selectionModel={OPUS_5_5}
-                    services={HIDDEN_SERVICES}
-                />
             </Specimen>
         </ComponentPage>
     );

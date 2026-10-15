@@ -12,6 +12,7 @@ import type {
     HappyAgentSecret,
     HappyAgentModelCatalog,
     HappyAgentModelKey,
+    HappyAgentModelStoreSnapshot,
     HappyAgentPermissionMode,
     HappyAgentProviderEntry,
     HappyAgentSettingsSnapshot,
@@ -566,7 +567,7 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                   : "stopped",
     };
     const catalog = models.type === "ready" ? models.catalog : undefined;
-    const selection = defaultSelection(catalog, settings);
+    const selection = defaultSelection(models, settings);
     const model = catalog?.providers
         .flatMap((provider) => provider.models.map((entry) => ({ provider, model: entry })))
         .find(
@@ -1259,14 +1260,26 @@ function documentLoading(
     );
 }
 
-/** The chosen default, falling back to whatever the catalog itself defaults to. */
+/**
+ * The chosen default while it is switched on, else the model a new session
+ * starts on, which passes over every switched-off model.
+ */
 function defaultSelection(
-    catalog: HappyAgentModelCatalog | undefined,
+    models: HappyAgentModelStoreSnapshot,
     settings: HappyAgentSettingsSnapshot,
 ): { providerId: string; modelId: string } {
+    if (
+        settings.defaultProviderId &&
+        settings.defaultModelId &&
+        !settings.disabledModels.has(
+            happyAgentModelKey(settings.defaultProviderId, settings.defaultModelId),
+        )
+    )
+        return { modelId: settings.defaultModelId, providerId: settings.defaultProviderId };
+    if (models.type !== "ready") return { modelId: "", providerId: "" };
     return {
-        modelId: settings.defaultModelId ?? catalog?.defaultModelId ?? "",
-        providerId: settings.defaultProviderId ?? catalog?.defaultProviderId ?? "",
+        modelId: models.defaultSelection.modelId,
+        providerId: models.defaultSelection.providerId,
     };
 }
 
@@ -1304,15 +1317,23 @@ function providerRows(
     return providers.map((provider) => ({
         enabled: provider.enabled,
         id: provider.id,
-        models: provider.models.map((model) => ({
-            contextWindow: model.contextWindow,
-            efforts: model.thinkingLevels.map(happyAgentThinkingLabel),
-            enabled: !settings.disabledModels.has(happyAgentModelKey(provider.id, model.id)),
-            id: happyAgentModelKey(provider.id, model.id),
-            isDefault: provider.id === selection.providerId && model.id === selection.modelId,
-            modelId: model.id,
-            name: model.name,
-        })),
+        models: provider.models.map((model) => {
+            const enabled = !settings.disabledModels.has(happyAgentModelKey(provider.id, model.id));
+            return {
+                contextWindow: model.contextWindow,
+                efforts: model.thinkingLevels.map(happyAgentThinkingLabel),
+                enabled,
+                id: happyAgentModelKey(provider.id, model.id),
+                // The default's switch is locked, so a switched-off model is
+                // never marked default: it would be locked off.
+                isDefault:
+                    enabled &&
+                    provider.id === selection.providerId &&
+                    model.id === selection.modelId,
+                modelId: model.id,
+                name: model.name,
+            };
+        }),
         name: providerAccountName(provider.id),
         saving: provider.saving,
         serviceTiers: [

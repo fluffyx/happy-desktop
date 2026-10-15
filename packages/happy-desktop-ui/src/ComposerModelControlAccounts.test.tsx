@@ -43,7 +43,6 @@ function Fixture(props: {
     notice?: ComposerModelAccountNotice;
     selectionModel?: ComposerModelChoice;
     onSelect?: (selection: ComposerModelSelection) => void;
-    onAccountsManage?: () => Promise<void>;
 }) {
     const [selection, setSelection] = useState(ON_EXTRA);
     return (
@@ -59,7 +58,6 @@ function Fixture(props: {
             <ComposerModelControl
                 accountNotice={props.notice}
                 data-testid="control"
-                onAccountsManage={props.onAccountsManage}
                 onSelect={(next) => {
                     setSelection(next);
                     props.onSelect?.(next);
@@ -182,11 +180,8 @@ it("marks an unavailable selection red and asks the Chief of Staff from its popo
     );
 }, 60000);
 
-it("puts Manage accounts directly above Latest benchmarks in the model list footer", async () => {
-    const onAccountsManage = vi.fn(() => Promise.resolve());
-    const view = render(() => (
-        <Fixture onAccountsManage={onAccountsManage} selectionModel={OPUS} />
-    ));
+it("ends the model list at its last model, with no footer below it", async () => {
+    const view = render(() => <Fixture selectionModel={OPUS} />);
     await view.ready();
     await userEvent.click(
         view.$('[data-happy-desktop-ui="composer-model-control-trigger"]').element,
@@ -194,29 +189,17 @@ it("puts Manage accounts directly above Latest benchmarks in the model list foot
     await userEvent.click(
         view.$('[data-happy-desktop-ui="composer-model-control-model-setting"]').element,
     );
-    const footer = view.$(".happy-composer-model-control__footer");
-    const children = Array.from(footer.element.children);
-    expect(
-        children.map(
-            (child) => child.getAttribute("data-happy-desktop-ui") ?? child.getAttribute("role"),
-        ),
-    ).toEqual([
-        "separator",
-        "composer-model-control-accounts-manage",
-        "composer-model-control-benchmarks",
-    ]);
-    const manage = view.$('[data-happy-desktop-ui="composer-model-control-accounts-manage"]');
-    const benchmarks = view.$('[data-happy-desktop-ui="composer-model-control-benchmarks"]');
-    expect(manage.element.textContent).toBe("Manage accounts");
-    expect(manage.bounds().x).toBe(benchmarks.bounds().x);
-    expect(manage.bounds().width).toBe(benchmarks.bounds().width);
-    expect(manage.bounds().height).toBe(benchmarks.bounds().height);
-    await userEvent.click(manage.element);
-    expect(onAccountsManage).toHaveBeenCalledTimes(1);
-    await vi.waitFor(() =>
-        expect(
-            view.container.querySelector('[data-happy-desktop-ui="composer-model-control-menu"]'),
-        ).toBeNull(),
+    const models = view.$('[data-happy-desktop-ui="composer-model-control-models"]');
+    // The scrolling list is all the panel holds: no separator or line follows it.
+    const list = view.$(".happy-composer-model-control__list");
+    expect(Array.from(models.element.children)).toEqual([list.element]);
+    expect(models.element.querySelector("a")).toBeNull();
+    expect(models.element.textContent).not.toContain("Manage accounts");
+    expect(models.element.textContent).not.toContain("Latest benchmarks");
+    // The last line the keyboard reaches is a model.
+    const lines = models.element.querySelectorAll<HTMLElement>('[data-menu-item="model"]');
+    expect(lines[lines.length - 1]!.getAttribute("data-happy-desktop-ui")).toBe(
+        "composer-model-control-row",
     );
 }, 60000);
 
@@ -298,8 +281,6 @@ it("maps hidden, switched-off, and missing accounts into the pill's notices", ()
         reason: "disabled",
         sessionId: "agent-1",
     });
-    void disabled.onAccountsManage!();
-    expect(ask).toHaveBeenLastCalledWith({ kind: "accountsManage" });
 
     const missing = happyAgentComposerModelControlProps(menusOn("missing", "gone"), {
         ...handlers,
@@ -315,5 +296,4 @@ it("maps hidden, switched-off, and missing accounts into the pill's notices", ()
     );
     expect(available.accountNotice).toBeUndefined();
     expect(available.selectionModel).toBeUndefined();
-    expect(available.onAccountsManage).toBeUndefined();
 });

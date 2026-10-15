@@ -125,11 +125,6 @@ export type ComposerModelControlProps = {
     /** Shown beside the pill when the selected account is not an ordinary choice. */
     accountNotice?: ComposerModelAccountNotice;
     /**
-     * Adds "Manage accounts" to the model list, above the benchmarks link. The
-     * menu closes once it settles; a rejection's message is shown under it.
-     */
-    onAccountsManage?(): Promise<void>;
-    /**
      * A model, its account, its effort, or several changed. Picking from a list
      * closes the menu; stepping with horizontal scroll or arrow keys keeps it open.
      */
@@ -139,8 +134,6 @@ export type ComposerModelControlProps = {
     preview?: ComposerModelControlPreview;
     style?: CSSProperties;
 };
-
-export const COMPOSER_MODEL_BENCHMARKS_URL = "https://happy.engineering/model-benchmarks";
 
 /** Breathing room kept between an opened list and the top of the pane. */
 const VIEWPORT_GAP = 16;
@@ -590,9 +583,6 @@ export function ComposerModelControl(props: ComposerModelControlProps) {
                   selected: true,
               }
             : undefined);
-    const [manage, setManage] = useState<{ pending: boolean; error?: string }>({
-        pending: false,
-    });
     const modelLabel = !hasModels
         ? "Models not configured"
         : (selectedModel?.label ?? selection?.model ?? "");
@@ -1039,66 +1029,6 @@ export function ComposerModelControl(props: ComposerModelControlProps) {
                                     })}
                                 </div>
                             </ScrollArea>
-                            <div className="happy-composer-model-control__footer">
-                                <div
-                                    className="happy-composer-model-control__separator"
-                                    role="separator"
-                                />
-                                {props.onAccountsManage ? (
-                                    <button
-                                        className="happy-composer-model-control__benchmarks"
-                                        data-happy-desktop-ui="composer-model-control-accounts-manage"
-                                        data-menu-item="model"
-                                        disabled={manage.pending}
-                                        onClick={() => {
-                                            const accountsManage = props.onAccountsManage;
-                                            if (!accountsManage) return;
-                                            setManage({ pending: true });
-                                            accountsManage().then(
-                                                () => {
-                                                    setManage({ pending: false });
-                                                    close();
-                                                },
-                                                (error: unknown) =>
-                                                    setManage({
-                                                        pending: false,
-                                                        error: failureMessage(
-                                                            error,
-                                                            "Could not open Chief of Staff.",
-                                                        ),
-                                                    }),
-                                            );
-                                        }}
-                                        type="button"
-                                    >
-                                        <span className="happy-composer-model-control__name">
-                                            Manage accounts
-                                        </span>
-                                    </button>
-                                ) : null}
-                                {manage.error ? (
-                                    <span
-                                        className="happy-composer-model-control__footer-error"
-                                        role="alert"
-                                    >
-                                        {manage.error}
-                                    </span>
-                                ) : null}
-                                <a
-                                    className="happy-composer-model-control__benchmarks"
-                                    data-happy-desktop-ui="composer-model-control-benchmarks"
-                                    data-menu-item="model"
-                                    href={COMPOSER_MODEL_BENCHMARKS_URL}
-                                    onClick={close}
-                                    rel="noreferrer"
-                                    target="_blank"
-                                >
-                                    <span className="happy-composer-model-control__name">
-                                        Latest benchmarks
-                                    </span>
-                                    <Octicon name="link-external" size={12} />
-                                </a>
-                            </div>
                             {accountsService ? renderAccounts(accountsService) : null}
                         </div>
                     ) : null}

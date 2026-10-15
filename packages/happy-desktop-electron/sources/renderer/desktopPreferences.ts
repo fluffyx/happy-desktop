@@ -1,4 +1,5 @@
 import type {
+    HappyAgentModelKey,
     HappyAgentModelPreferenceDocument,
     HappyAgentModelPreferencePersistence,
     HappyAgentPermissionMode,
@@ -18,6 +19,7 @@ import type {
     DesktopScrollbarVisibility,
     HappyDesktopBridge,
 } from "../shared/desktopContract";
+import { desktopModelSwitchesCreate } from "./desktopModelSwitches";
 
 const THINKING_LEVELS: ReadonlySet<string> = new Set([
     "off",
@@ -59,11 +61,19 @@ export function desktopPreferencesCreate(
     initial: DesktopConfig,
 ): DesktopPreferences {
     let config = initial;
+    // Models switched off in Settings. They are kept in the window's own
+    // storage, not the desktop document, so switching one never writes it.
+    const modelSwitches = desktopModelSwitchesCreate();
+    let disabledModels: readonly HappyAgentModelKey[] = modelSwitches.read();
     const preferenceListeners = new Set<() => void>();
+
+    const preferencesNotify = (): void => {
+        for (const listener of preferenceListeners) listener();
+    };
 
     const commit = (next: DesktopConfig): void => {
         config = next;
-        for (const listener of preferenceListeners) listener();
+        preferencesNotify();
         // Invoke immediately; the privileged store is the single serialization
         // authority, so every quick selection enters its ordered write queue.
         void bridge.desktopConfigWrite(next).catch((error: unknown) => {
@@ -72,7 +82,7 @@ export function desktopPreferencesCreate(
     };
 
     const preferencePersistence: HappyAgentModelPreferencePersistence = {
-        read: () => preferenceDocument(config),
+        read: () => preferenceDocument(config, disabledModels),
         write(document) {
             commit(configFromPreferenceDocument(config, document));
         },
@@ -98,7 +108,10 @@ export function desktopPreferencesCreate(
         initialAppearance: config.appearance,
         initialKeepAwake: config.keepAwake,
         initialScrollbarVisibility: config.scrollbarVisibility,
-        initialSettings: settingsInitial(config),
+        initialSettings: {
+            ...settingsInitial(config),
+            ...(disabledModels.length > 0 ? { disabledModels } : {}),
+        },
         preferencePersistence,
         titleShimmerPersistence,
         appearanceChanged(mode, scrollbarVisibility) {
@@ -111,6 +124,14 @@ export function desktopPreferencesCreate(
             commit({ ...config, keepAwake: mode });
         },
         settingsChanged(snapshot) {
+            if (
+                disabledModels.length !== snapshot.disabledModels.size ||
+                disabledModels.some((key) => !snapshot.disabledModels.has(key))
+            ) {
+                disabledModels = [...snapshot.disabledModels];
+                modelSwitches.write(disabledModels);
+                preferencesNotify();
+            }
             const nextEffort = snapshot.defaultEffort;
             const nextPermissionMode = snapshot.defaultPermissionMode;
             const nextDefault =
@@ -201,7 +222,10 @@ function settingsInitial(config: DesktopConfig): HappyAgentSettingsInitial {
     };
 }
 
-function preferenceDocument(config: DesktopConfig): HappyAgentModelPreferenceDocument {
+function preferenceDocument(
+    config: DesktopConfig,
+    disabledModels: readonly HappyAgentModelKey[],
+): HappyAgentModelPreferenceDocument {
     const preferences: {
         [providerId: string]: {
             [modelId: string]: {
@@ -233,6 +257,7 @@ function preferenceDocument(config: DesktopConfig): HappyAgentModelPreferenceDoc
         ...(config.lastPickedModel ? { lastPickedModel: config.lastPickedModel } : {}),
         defaultPermissionMode: permissionMode(config.defaultPermissionMode),
         preferences,
+        ...(disabledModels.length > 0 ? { disabledModels } : {}),
     };
 }
 
