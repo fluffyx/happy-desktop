@@ -379,6 +379,39 @@ it("starts new sessions on a switched-on model when the catalog default is switc
     expect(ready.menus.currentModelId).toBe("grok-4.7");
 });
 
+it("drops a switch the host no longer lists, even when another is listed twice", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const test = happyAgentModelKey("test-provider", "test-model");
+    const grok = happyAgentModelKey("grok", "grok-4.7");
+    let document: HappyAgentModelPreferenceDocument = {
+        preferences: {},
+        disabledModels: [test, grok],
+    };
+    const listeners = new Set<() => void>();
+    const models = happyAgentModelStoreCreate({
+        catalogRead: async () =>
+            happyAgentModelCatalogProject(
+                configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+            ),
+        preferencePersistence: {
+            read: () => document,
+            write: () => undefined,
+            subscribe: (listener) => {
+                listeners.add(listener);
+                return () => listeners.delete(listener);
+            },
+        },
+    });
+    disposables.push(models);
+    await models.load();
+
+    document = { preferences: {}, disabledModels: [test, test] };
+    for (const listener of listeners) listener();
+
+    const snapshot = models.get();
+    expect(snapshot.type === "ready" && [...snapshot.disabledModels]).toEqual([test]);
+});
+
 it("moves an open draft off a model switched off under it, keeping its access mode", () => {
     const daemon = fakeHappyAgentDaemonCreate();
     const catalog = happyAgentModelCatalogProject(
