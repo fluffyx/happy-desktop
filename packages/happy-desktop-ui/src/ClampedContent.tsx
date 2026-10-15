@@ -65,8 +65,7 @@ export function ClampedContent(props: ClampedContentProps) {
                     if (!content) return;
                     const target = event.target;
                     const bottom =
-                        target.getBoundingClientRect().bottom -
-                        content.getBoundingClientRect().top;
+                        target.getBoundingClientRect().bottom - content.getBoundingClientRect().top;
                     if (bottom <= props.collapsedHeight + CLIP_EPSILON) return;
                     flushSync(() => setExpanded(true));
                     target.scrollIntoView({ block: "nearest" });
