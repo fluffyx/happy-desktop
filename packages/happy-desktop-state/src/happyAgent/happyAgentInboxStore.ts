@@ -18,6 +18,7 @@ export interface HappyAgentInboxSourceItem {
     readonly id: string;
     readonly sessionId: string;
     readonly requestId: string;
+    readonly runId?: string;
     readonly scope?: HappyAgentSessionScope;
     readonly sessionTitle?: string;
     readonly questions: readonly HappyAgentUserInputQuestion[];
@@ -347,6 +348,7 @@ function inboxItemsProject(
             id: item.id as HappyAgentInboxItemId,
             sessionId: item.sessionId as HappyAgentSessionId,
             requestId: item.requestId,
+            ...(item.runId === undefined ? {} : { runId: item.runId }),
             ...(item.scope === undefined ? {} : { scope: item.scope }),
             ...(item.sessionTitle === undefined ? {} : { sessionTitle: item.sessionTitle }),
             questions: item.questions,

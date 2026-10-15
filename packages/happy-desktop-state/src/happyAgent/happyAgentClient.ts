@@ -61,6 +61,10 @@ import {
     type HappyAgentInboxStore,
 } from "./happyAgentInboxStore.js";
 import {
+    happyAgentInboxLeadInStoreCreate,
+    type HappyAgentInboxLeadInStore,
+} from "./happyAgentInboxLeadInStore.js";
+import {
     happyAgentInstructionsStoreCreate,
     type HappyAgentInstructionsStore,
 } from "./happyAgentInstructionsStore.js";
@@ -138,6 +142,11 @@ export interface HappyAgentWorkspaceClient {
      * an inbox that is empty for the wrong reason.
      */
     inbox(): HappyAgentInboxStore | undefined;
+    /**
+     * What each waiting question's agent said before asking, for the open
+     * inbox. Materialized on first access; it reads only while subscribed.
+     */
+    inboxLeadIns(): HappyAgentInboxLeadInStore;
     /**
      * The single provider-usage store for this Happy Agent: how much of each account's
      * plan its agents have spent. Materialized on first access and shared, so a
@@ -467,6 +476,7 @@ export function happyAgentWorkspaceClientCreate(
     let sessionListStore: HappyAgentSessionListStore | undefined;
     let agentIdentities: HappyAgentAgentIdentitySource | undefined;
     let inboxStore: HappyAgentInboxStore | undefined;
+    let inboxLeadInStore: HappyAgentInboxLeadInStore | undefined;
     let providerUsageStore: HappyAgentProviderUsageStore | undefined;
     let happyIntegrationStore: HappyAgentIntegrationStore | undefined;
     let cloudStore: HappyAgentCloudStore | undefined;
@@ -691,6 +701,11 @@ export function happyAgentWorkspaceClientCreate(
             });
             return inboxStore;
         },
+        inboxLeadIns() {
+            if (disposed) throw new Error("The Happy Agent client is disposed.");
+            inboxLeadInStore ??= happyAgentInboxLeadInStoreCreate({ client: deps.client });
+            return inboxLeadInStore;
+        },
         providerUsage() {
             if (disposed) throw new Error("The Happy Agent client is disposed.");
             const source = deps.providerUsageSource;
@@ -868,6 +883,8 @@ export function happyAgentWorkspaceClientCreate(
             sessionListStore = undefined;
             inboxStore?.[Symbol.dispose]();
             inboxStore = undefined;
+            inboxLeadInStore?.[Symbol.dispose]();
+            inboxLeadInStore = undefined;
             providerUsageStore?.[Symbol.dispose]();
             providerUsageStore = undefined;
             happyIntegrationStore?.[Symbol.dispose]();

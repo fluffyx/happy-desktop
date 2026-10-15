@@ -60,6 +60,7 @@ import type {
     HappyAgentProfileStore,
     HappyAgentInboxItem,
     HappyAgentInboxSnapshot,
+    HappyAgentInboxLeadInStore,
     HappyAgentInboxStore,
     HappyAgentInstructionsStore,
     HappyAgentSecurityPolicyStore,
@@ -112,6 +113,7 @@ import {
     happyAgentVersionAtLeast,
     HAPPY_AGENT_TASKS_VERSION,
     HAPPY_AGENT_TASK_CREATE_VERSION,
+    happyAgentInboxLeadInStoreNoop,
     happyAgentInboxStoreNoop,
     happyAgentNavigationOrderApply,
     happyAgentAvailabilityProject,
@@ -416,6 +418,8 @@ export interface AppHappyAgentSession {
      * than opening onto an empty queue that means nothing.
      */
     readonly inbox?: HappyAgentInboxStore;
+    /** What each waiting question's agent said before asking, read while the inbox is open. */
+    readonly inboxLeadIns?: HappyAgentInboxLeadInStore;
     /**
      * How much of each provider account's plan this machine has spent, read by
      * the Usage settings category. Absent when the machine reports no usage,
@@ -3013,6 +3017,7 @@ export function AppHappyAgentView(props: AppHappyAgentViewProps) {
                         projects={active.projects}
                         happyAgentId={active.id}
                         happyAgentOnline={activeHappyAgentOnline}
+                        leadIns={active.session.inboxLeadIns ?? happyAgentInboxLeadInStoreNoop}
                         snapshot={inbox}
                         store={active.session.inbox}
                         {...(activeAvailability?.refusal === undefined
@@ -3781,10 +3786,10 @@ function paletteCommandRun(
 }
 
 /**
- * One Happy Agent's inbox inside the window's shell. It subscribes to nothing: the
- * window already reads this store for the sidebar count, so the queue and the
- * badge are one subscription and can never disagree about how many questions
- * are waiting.
+ * One Happy Agent's inbox inside the window's shell. It does not subscribe to the
+ * queue: the window already reads that store for the sidebar count, so the queue
+ * and the badge are one subscription and can never disagree about how many
+ * questions are waiting. It does follow the lead-ins, which only this page shows.
  *
  * Naming an item's location and opening the session that asked are addressing
  * acts, which is why they live here rather than in the page: the page renders
@@ -3795,10 +3800,20 @@ function HappyAgentInboxSurface(props: {
     projects: readonly HappyAgentProjectGroup[];
     happyAgentId: string;
     happyAgentOnline: () => boolean;
+    leadIns: HappyAgentInboxLeadInStore;
     snapshot: HappyAgentInboxSnapshot;
     store: HappyAgentInboxStore;
     unavailable?: string;
 }) {
+    // The lead-ins are read only while this page is open: unlike the queue,
+    // nothing else shows them. Stating what is on screen publishes nothing in
+    // this render; each lead-in arrives through the subscription.
+    const leadIns = useSyncExternalStore(
+        props.leadIns.subscribe,
+        props.leadIns.get,
+        props.leadIns.get,
+    );
+    props.leadIns.itemsRequest(props.snapshot.pending);
     const locate = (item: HappyAgentInboxItem) => {
         const scope = item.scope;
         if (!scope) return undefined;
@@ -3812,6 +3827,10 @@ function HappyAgentInboxSurface(props: {
         <HappyAgentInboxPage
             answered={props.snapshot.answered}
             {...(props.snapshot.error ? { error: props.snapshot.error } : {})}
+            itemLeadIn={(item) => {
+                const leadIn = leadIns.get(item.id);
+                return leadIn?.type === "ready" ? leadIn.text : undefined;
+            }}
             itemLocation={locate}
             itemTime={(item) =>
                 inboxItemTime(item.status === "answered" ? item.resolvedAt : item.createdAt)

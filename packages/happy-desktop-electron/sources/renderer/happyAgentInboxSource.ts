@@ -187,6 +187,7 @@ function itemProject(
         id: `${question.agentId}/${question.id}`,
         sessionId: question.agentId,
         requestId: question.id,
+        ...(question.runId === null ? {} : { runId: question.runId }),
         ...(scope === undefined ? {} : { scope }),
         ...(asker?.title === undefined ? {} : { sessionTitle: asker.title }),
         questions: question.questions.map((prompt) => ({

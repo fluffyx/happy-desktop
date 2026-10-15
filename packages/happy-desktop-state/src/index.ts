@@ -43,6 +43,7 @@ export * from "./happyAgent/happyAgentIntegrationStore.js";
 export * from "./happyAgent/happyAgentCloudStore.js";
 export * from "./happyAgent/happyAgentTeamsStore.js";
 export * from "./happyAgent/happyAgentInboxStore.js";
+export * from "./happyAgent/happyAgentInboxLeadInStore.js";
 export * from "./artifacts/artifactTypes.js";
 export {
     happyAgentArtifactFilterMatches,

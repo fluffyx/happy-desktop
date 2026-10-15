@@ -1,6 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
-import { fakeHappyAgentDaemonCreate, type FakeHappyAgentDaemon } from "happy-desktop-state/testing";
+import {
+    fakeAgentMessage,
+    fakeHappyAgentDaemonCreate,
+    fakeRun,
+    type FakeHappyAgentDaemon,
+} from "happy-desktop-state/testing";
 import {
     connectHappyAgent,
     happyAgentInboxStoreCreate,
@@ -115,6 +120,7 @@ async function fixture(options: { readonly waiting?: boolean } = {}) {
         daemon,
         inbox,
         inboxUnsubscribe,
+        leadIns: session.inboxLeadIns,
         openChat,
     };
 }
@@ -272,4 +278,48 @@ it("keeps the answered list when the inbox is followed again", async () => {
         expect(f.inbox.get().pending.map((item) => item.requestId)).toEqual(["question-later"]),
     );
     expect(f.inbox.get().answered.map((item) => item.id)).toEqual([ITEM_ID]);
+});
+
+it("shows what the agent said before asking, read only while the inbox page follows it", async () => {
+    const f = await fixture();
+    f.daemon.historySet(AGENT_ID, [
+        fakeRun({
+            id: "run-migration",
+            status: "running",
+            messages: [
+                fakeAgentMessage({
+                    id: "message-lead-in",
+                    content: [
+                        { type: "reasoning", text: "Weighing the lock time." },
+                        {
+                            type: "text",
+                            text: "The permissions table holds **40 million** rows.",
+                        },
+                        {
+                            type: "tool_call",
+                            id: QUESTION_ID,
+                            name: "request_user_input",
+                            status: "running",
+                            arguments: {},
+                        } as never,
+                    ],
+                }),
+            ],
+        }),
+    ]);
+    f.ask();
+    await vi.waitFor(() => expect(f.inbox.get().pending).toHaveLength(1));
+    // The sidebar's subscription reads no transcripts.
+    expect(f.daemon.callCount("getMessages")).toBe(0);
+
+    subscriptions.push(f.leadIns.subscribe(() => {}));
+    f.leadIns.itemsRequest(f.inbox.get().pending);
+
+    await vi.waitFor(() =>
+        expect(f.leadIns.get().get(ITEM_ID)).toEqual({
+            type: "ready",
+            text: "The permissions table holds **40 million** rows.",
+        }),
+    );
+    expect(f.daemon.calls.find((call) => call.method === "getMessages")?.args[0]).toBe(AGENT_ID);
 });

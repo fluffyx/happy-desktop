@@ -1026,6 +1026,8 @@ export interface HappyAgentInboxItem {
     readonly id: HappyAgentInboxItemId;
     readonly sessionId: HappyAgentSessionId;
     readonly requestId: string;
+    /** The run waiting on the question, when the Happy Agent named one. */
+    readonly runId?: string;
     /** Absent only while the inbox has not yet resolved the asking session's catalog entry. */
     readonly scope?: HappyAgentSessionScope;
     /** The asking session's title, when it has earned one. */

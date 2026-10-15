@@ -28,6 +28,7 @@ import {
     type HappyAgentDebugLogInput,
     type HappyAgentDebugLogStore,
     type HappyAgentHost,
+    type HappyAgentInboxLeadInStore,
     type HappyAgentInboxStore,
     type HappyAgentIntegrationStore,
     type HappyAgentInstructionsStore,
@@ -114,6 +115,8 @@ export interface HappyAgentSession {
     readonly profile: () => HappyAgentProfileStore | undefined;
     /** Every question this Happy Agent's agents are waiting on. */
     readonly inbox: HappyAgentInboxStore | undefined;
+    /** What each waiting question's agent said before asking, read while the inbox is open. */
+    readonly inboxLeadIns: HappyAgentInboxLeadInStore;
     readonly providerUsage: HappyAgentProviderUsageStore | undefined;
     readonly providers: HappyAgentProvidersStore;
     readonly workspace: HappyAgentWorkspaceStore;
@@ -521,6 +524,7 @@ export function happyAgentConnectionOpen(input: {
                     models: client.models,
                     profile: () => profileStore,
                     inbox: client.inbox(),
+                    inboxLeadIns: client.inboxLeadIns(),
                     providerUsage: client.providerUsage(),
                     providers: client.providers(),
                     workspace: preparedWorkspace,
