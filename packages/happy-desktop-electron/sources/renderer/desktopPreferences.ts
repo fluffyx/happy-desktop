@@ -19,6 +19,7 @@ import type {
     DesktopScrollbarVisibility,
     HappyDesktopBridge,
 } from "../shared/desktopContract";
+import { desktopModelSwitchesCreate } from "./desktopModelSwitches";
 
 const THINKING_LEVELS: ReadonlySet<string> = new Set([
     "off",
@@ -60,9 +61,10 @@ export function desktopPreferencesCreate(
     initial: DesktopConfig,
 ): DesktopPreferences {
     let config = initial;
-    // Models switched off in Settings. Held for this run only: they are not
-    // part of the desktop document, so switching one never writes it.
-    let disabledModels: readonly HappyAgentModelKey[] = [];
+    // Models switched off in Settings. They are kept in the window's own
+    // storage, not the desktop document, so switching one never writes it.
+    const modelSwitches = desktopModelSwitchesCreate();
+    let disabledModels: readonly HappyAgentModelKey[] = modelSwitches.read();
     const preferenceListeners = new Set<() => void>();
 
     const preferencesNotify = (): void => {
@@ -106,7 +108,10 @@ export function desktopPreferencesCreate(
         initialAppearance: config.appearance,
         initialKeepAwake: config.keepAwake,
         initialScrollbarVisibility: config.scrollbarVisibility,
-        initialSettings: settingsInitial(config),
+        initialSettings: {
+            ...settingsInitial(config),
+            ...(disabledModels.length > 0 ? { disabledModels } : {}),
+        },
         preferencePersistence,
         titleShimmerPersistence,
         appearanceChanged(mode, scrollbarVisibility) {
@@ -124,6 +129,7 @@ export function desktopPreferencesCreate(
                 disabledModels.some((key) => !snapshot.disabledModels.has(key))
             ) {
                 disabledModels = [...snapshot.disabledModels];
+                modelSwitches.write(disabledModels);
                 preferencesNotify();
             }
             const nextEffort = snapshot.defaultEffort;

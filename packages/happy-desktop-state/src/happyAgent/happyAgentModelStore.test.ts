@@ -12,6 +12,7 @@ import {
     happyAgentModelStoreCreate,
     type HappyAgentModelStore,
     type HappyAgentModelPreferenceDocument,
+    type HappyAgentModelPreferencePersistence,
 } from "./happyAgentModelStore.js";
 import { happyAgentModelCatalogProject } from "./happyAgentProject.js";
 import { happyAgentSessionDraftStoreOwnedCreate } from "./happyAgentSessionDraftStore.js";
@@ -219,7 +220,10 @@ function modelIds(store: HappyAgentModelStore): readonly string[] {
     return snapshot.menus.modelOptions.map((option) => `${option.providerId}/${option.modelId}`);
 }
 
-async function harnessOpen(daemon: FakeHappyAgentDaemon = fakeHappyAgentDaemonCreate()) {
+async function harnessOpen(
+    daemon: FakeHappyAgentDaemon = fakeHappyAgentDaemonCreate(),
+    preferencePersistence?: HappyAgentModelPreferencePersistence,
+) {
     const connection = connectHappyAgent({
         endpoint: "http://happy-agent.test/",
         token: "token",
@@ -232,6 +236,7 @@ async function harnessOpen(daemon: FakeHappyAgentDaemon = fakeHappyAgentDaemonCr
         catalogRead: async () =>
             happyAgentModelCatalogProject((await daemon.client.getConfig()).config),
         sync: connection.sync,
+        ...(preferencePersistence ? { preferencePersistence } : {}),
     });
     disposables.push(models);
     await models.load();
@@ -377,6 +382,35 @@ it("starts new sessions on a switched-on model when the catalog default is switc
     expect(ready.defaultSelection).toMatchObject({ providerId: "grok", modelId: "grok-4.7" });
     expect(ready.lastUsedSelection).toMatchObject({ providerId: "grok", modelId: "grok-4.7" });
     expect(ready.menus.currentModelId).toBe("grok-4.7");
+});
+
+it("moves new sessions off a catalog default that changes to a switched-off model", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    daemon.configSet(configWithProvider(daemon.configGet(), "grok", "grok-4.7"));
+    const { models } = await harnessOpen(daemon, {
+        // No Settings default, so new sessions follow the catalog's.
+        read: () => ({
+            preferences: {},
+            disabledModels: [happyAgentModelKey("grok", "grok-4.7")],
+        }),
+        write: () => undefined,
+    });
+    const before = { providerId: "test-provider", modelId: "test-model" };
+    expect(models.get()).toMatchObject({ defaultSelection: before, lastUsedSelection: before });
+
+    // The daemon's own default moves to the model the reader switched off.
+    const config = daemon.configGet();
+    daemon.configSet({
+        ...config,
+        defaults: { ...config.defaults, providerId: "grok", modelId: "grok-4.7" },
+    });
+    daemon.eventEmit("config.updated", {});
+
+    await vi.waitFor(() =>
+        expect(models.get()).toMatchObject({ catalog: { defaultModelId: "grok-4.7" } }),
+    );
+    expect(models.get()).toMatchObject({ defaultSelection: before, lastUsedSelection: before });
+    expect(modelIds(models)).toEqual(["test-provider/test-model"]);
 });
 
 it("moves an open draft off a model switched off under it, keeping its access mode", () => {

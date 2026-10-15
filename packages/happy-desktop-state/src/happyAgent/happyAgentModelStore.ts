@@ -53,7 +53,7 @@ export interface HappyAgentModelPreferenceDocument {
     readonly preferences: HappyAgentModelPreferences;
     /**
      * Models switched off in Settings, which the pickers leave out and a new
-     * session does not start on. Hosts hold this in memory; it is not saved.
+     * session does not start on. Hosts save it so the switches survive a restart.
      */
     readonly disabledModels?: readonly HappyAgentModelKey[];
 }

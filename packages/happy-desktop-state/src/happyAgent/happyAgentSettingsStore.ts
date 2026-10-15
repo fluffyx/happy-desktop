@@ -67,7 +67,7 @@ export interface HappyAgentSettingsInitial {
     readonly defaultPermissionMode?: HappyAgentPermissionMode;
     readonly linkOpenPlacement?: HappyAgentLinkOpenPlacement;
     readonly previewUpdatesEnabled?: boolean;
-    /** Switches already made earlier in this run, for a store created again over them. */
+    /** Switches the reader made earlier, restored from the creator's storage. */
     readonly disabledModels?: readonly HappyAgentModelKey[];
 }
 
