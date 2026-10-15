@@ -627,6 +627,8 @@ export interface HappyAgentChatDeps {
      * them now and again on every change; the returned function stops it, and
      * the store calls it when disposed. The pickers and context gauge re-derive
      * from them; the session's own selection is the daemon's and is left alone.
+     * Omitting `disabledModels` keeps the switches the store already has; an
+     * empty set clears them.
      */
     readonly catalogFollow?: (
         listener: (
@@ -1063,7 +1065,7 @@ export function happyAgentChatStoreCreate(
         return pendingMutationIds.size > 0;
     };
 
-    const unsubscribeCatalog = deps.catalogFollow?.((next, nextDisabled) => {
+    const unsubscribeCatalog = deps.catalogFollow?.((next, nextDisabled = disabledModels) => {
         if (disposed || (next === catalog && nextDisabled === disabledModels)) return;
         catalog = next;
         disabledModels = nextDisabled;
