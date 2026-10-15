@@ -135,11 +135,4 @@ describe("Chief of Staff account requests", () => {
         expect(text).toContain("no longer configured");
         expect(text).not.toContain("Agent:");
     });
-
-    it("asks to manage connected accounts", () => {
-        const text = happyAgentChiefOfStaffRequestText({ kind: "accountsManage" });
-        expect(text.split("\n\n")[0]).toBe("Manage connected accounts");
-        expect(text).toContain('Use the "Accounts and models" recipe');
-        expect(text).not.toContain("multiple accounts");
-    });
 });

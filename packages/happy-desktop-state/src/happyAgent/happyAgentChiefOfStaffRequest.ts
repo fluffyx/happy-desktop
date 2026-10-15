@@ -16,7 +16,6 @@ export type HappyAgentChiefOfStaffRequest =
           /** The conversation set to it; absent for a conversation not yet started. */
           readonly sessionId?: HappyAgentSessionId;
       }
-    | { readonly kind: "accountsManage" }
     | {
           /** An update of this machine's Happy Agent stopped before it finished. */
           readonly kind: "updateFailed";
@@ -52,11 +51,6 @@ export function happyAgentChiefOfStaffRequestText(request: HappyAgentChiefOfStaf
                     ...(request.sessionId === undefined ? [] : [`Agent: ${request.sessionId}`]),
                 ].join("\n"),
                 'Please help me manage my connected accounts: bring this account back, or tell me which account to move the conversation to. Use the "Accounts and models" recipe, and ask before changing anything.',
-            ].join("\n\n");
-        case "accountsManage":
-            return [
-                "Manage connected accounts",
-                'I want to manage my connected accounts: add an account, pool accounts, or hide some from the picker. Use the "Accounts and models" recipe and help me set it up.',
             ].join("\n\n");
         case "updateFailed":
             return [

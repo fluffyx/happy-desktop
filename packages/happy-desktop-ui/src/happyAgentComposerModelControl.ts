@@ -137,13 +137,11 @@ export function happyAgentComposerModelControlProps(
     );
     const current = menus.currentOption;
     const accountNotice = accountNoticeOf(menus, handlers.sessionId, handlers.onChiefOfStaffAsk);
-    const ask = handlers.onChiefOfStaffAsk;
     return {
         disabled: handlers.disabled,
         services,
         ...(current === undefined || listed ? {} : { selectionModel: choiceOf(current) }),
         ...(accountNotice === undefined ? {} : { accountNotice }),
-        ...(ask === undefined ? {} : { onAccountsManage: () => ask({ kind: "accountsManage" }) }),
         selection: {
             service: current?.providerType ?? menus.currentProviderId,
             account: menus.currentProviderId,
