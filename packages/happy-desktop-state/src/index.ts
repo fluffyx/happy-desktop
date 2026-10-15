@@ -35,8 +35,12 @@ export * from "./happyAgent/happyAgentConnectionsStore.js";
 export * from "./happyAgent/happyAgentNodeStore.js";
 export * from "./happyAgent/happyAgentOnboardingStore.js";
 export * from "./happyAgent/happyAgentDebugLogStore.js";
+export * from "./happyAgent/happyAgentDeviceBridgeHost.js";
+export * from "./happyAgent/happyAgentDeviceBridgesStore.js";
+export * from "./happyAgent/happyAgentDeviceBridgeSupportStore.js";
 export * from "./happyAgent/happyAgentConversationAuthors.js";
 export * from "./happyAgent/happyAgentConversationProject.js";
+export * from "./happyAgent/happyAgentStreamingMarkdown.js";
 export * from "./happyAgent/happyAgentGroupAccess.js";
 export * from "./happyAgent/happyAgentHost.js";
 export * from "./happyAgent/happyAgentIntegrationStore.js";
@@ -70,7 +74,29 @@ export type {
     HappyAgentArtifactViewerStore,
 } from "./artifacts/artifactViewerStore.js";
 export type { HappyAgentArtifactPeopleStore } from "./artifacts/artifactPeopleStore.js";
+export type {
+    HappyAgentToolMediaDocumentContent,
+    HappyAgentToolMediaDocumentRef,
+    HappyAgentToolMediaDocumentSnapshot,
+    HappyAgentToolMediaDocumentStore,
+} from "./happyAgent/happyAgentToolMediaDocumentStore.js";
 export type { HappyAgentArtifacts } from "./artifacts/artifacts.js";
+export * from "./surfaces/surfaceTypes.js";
+export {
+    happyAgentSurfaceCatalogStoreNoop,
+    type HappyAgentSurfaceCatalogSnapshot,
+    type HappyAgentSurfaceCatalogStore,
+    type HappyAgentSurfaceCreateInput,
+    type HappyAgentSurfaceCreateState,
+    type HappyAgentSurfaceMembershipAction,
+} from "./surfaces/surfaceCatalogStore.js";
+export {
+    HAPPY_AGENT_TODO_TEXT_LIMIT,
+    type HappyAgentTodoEditing,
+    type HappyAgentTodoListSnapshot,
+    type HappyAgentTodoListStore,
+} from "./surfaces/surfaceTodoListStore.js";
+export type { HappyAgentSurfaces } from "./surfaces/surfaces.js";
 export type {
     HappyAgentArtifactTitle,
     HappyAgentArtifactTitlesSnapshot,
@@ -90,13 +116,22 @@ export {
     type HappyReferenceKind,
     type HappyReferenceSegment,
 } from "@slopus/happy-agent-client";
+export {
+    HAPPY_AGENT_FILE_LINK_READ_ONLY_REFUSAL,
+    happyAgentFileLinkParse,
+    type HappyAgentFileLink,
+    type HappyAgentFileLinkTarget,
+} from "./happyAgent/happyAgentFileLink.js";
 export * from "./happyAgent/happyAgentInstructionsStore.js";
 export * from "./happyAgent/happyAgentMenusStore.js";
 export * from "./happyAgent/happyAgentModelStore.js";
 export * from "./happyAgent/happyAgentNavigationOrderStore.js";
+export * from "./happyAgent/happyAgentChangeTiers.js";
+export * from "./happyAgent/happyAgentChangeTiersStore.js";
 export * from "./happyAgent/happyAgentPanelStore.js";
 export * from "./happyAgent/happyAgentProjectGroupProject.js";
 export * from "./happyAgent/happyAgentProjectRegistration.js";
+export * from "./happyAgent/happyAgentProfilePhoto.js";
 export * from "./happyAgent/happyAgentProfileStore.js";
 export * from "./happyAgent/happyAgentProviderUsageStore.js";
 export * from "./happyAgent/happyAgentProvidersStore.js";
@@ -105,6 +140,7 @@ export * from "./happyAgent/happyAgentSecretsStore.js";
 export * from "./happyAgent/happyAgentSessionListStore.js";
 export * from "./happyAgent/happyAgentSettingsStore.js";
 export * from "./happyAgent/happyAgentSidebarCollapseStore.js";
+export * from "./happyAgent/happyAgentSidebarSearchStore.js";
 export * from "./happyAgent/happyAgentSidebarVisibilityStore.js";
 export * from "./happyAgent/happyAgentChiefOfStaffRequest.js";
 export * from "./happyAgent/happyAgentSupport.js";

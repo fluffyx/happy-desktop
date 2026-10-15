@@ -79,6 +79,17 @@
     height: 28px;
 }
 
+/* A section heading after other rows keeps a 16px gap above it: its slot is
+   that much taller, and the heading sits at the slot's foot. */
+.happy-file-tree__virtual-row[data-separated],
+.happy-file-tree__section-frame {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    justify-content: flex-end;
+    height: 44px;
+}
+
 /* ---- Row -------------------------------------------------------------- */
 
 .happy-file-tree__row {
@@ -383,6 +394,63 @@
 .happy-file-tree__row[data-tone="ignored"] .happy-file-tree__icon,
 .happy-file-tree__row[data-tone="ignored"] .happy-file-tree__name {
     color: var(--text-secondary);
+}
+
+/* ---- Section headings ------------------------------------------------ */
+
+/* A tier of the change: a block of its own rather than more of the list. Its
+   heading is a quiet band in the app's grouped tone, a 16px gap above it parts
+   it from the rows before, and its file count sits at the trailing edge where
+   a row's stat would be — so no rule has to be drawn across the column to say
+   where one run of files ends and the next begins. */
+.happy-file-tree__section {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
+    height: 28px;
+    padding-right: var(--happy-panel-row-padding);
+    border-radius: var(--happy-radius-sm);
+    background: var(--groupped-background);
+    color: var(--text);
+    cursor: pointer;
+}
+
+.happy-file-tree__section:hover .happy-file-tree__chevron,
+.happy-file-tree__section:hover .happy-file-tree__section-count {
+    color: var(--text);
+}
+
+.happy-file-tree__section:focus-visible {
+    outline: 2px solid var(--radio-active);
+    outline-offset: -2px;
+}
+
+.happy-file-tree__section .happy-file-tree__chevron {
+    color: var(--text-secondary);
+}
+
+.happy-file-tree__section-name {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.happy-file-tree__section-count {
+    display: block;
+    flex: none;
+    color: var(--text-secondary);
+    font-family: var(--happy-font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 16px;
+    font-feature-settings: "tnum" 1;
 }
 
 /* ---- Paging, loading, and empty affordances -------------------------- */

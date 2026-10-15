@@ -1,5 +1,5 @@
 import { partitionComponentProps } from "./componentProps";
-import type { FileOpenHandler } from "./fileReference";
+import type { FileLinkOpenHandler, FileOpenHandler } from "./fileReference";
 import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import {
     Children,
@@ -19,7 +19,15 @@ import { happyLogoBlackUrl } from "./assets";
 import { AutomatedTag } from "./AutomatedTag";
 import { ReactionChip } from "./Badge";
 import { Icon, type IconName } from "./Icon";
-import { messageMediaSingleBox } from "./conversationRowHeight";
+import {
+    MEDIA_MOSAIC_MAX_WIDTH,
+    MESSAGE_MEDIA_MAX,
+    mediaMosaicLayout,
+    mediaMosaicStyle,
+    mediaMosaicTileStyle,
+    type MediaMosaicLayout,
+    type MediaMosaicTile,
+} from "./mediaMosaic";
 import type { MessageReferences } from "./messageReferences";
 import {
     MessageListDisclosureAnchorProvider,
@@ -63,24 +71,21 @@ export type MessageImage = {
     /** Intrinsic pixel dimensions — reserve a stable box before the image loads. */
     width?: number;
     height?: number;
+    /** The attachment's ThumbHash, whose header gives the shape when the dimensions are absent. */
+    thumbhash?: string;
 };
-/**
- * Inline box for a lone photo: the exact pixel box `messageMediaSingleBox`
- * computes from the image's own dimensions, so the layout is reserved up front and
- * nothing reflows when the bytes arrive — and the transcript's virtualizer, which
- * reserves the row from the same function, agrees with it. Multi-image tiles are
- * square via CSS and need none.
- */
-function mediaItemStyle(image: MessageImage, count: number): CSSProperties | undefined {
-    if (count !== 1) return undefined;
-    const box = messageMediaSingleBox(image);
-    return { width: `${box.width}px`, height: `${box.height}px` };
-}
 
-/** One image tile; without an open action it remains media, not a fake button. */
+/**
+ * One image tile at its frame in the message's photo mosaic: the box
+ * `mediaMosaicLayout` computes from every photo's own shape, so the layout is
+ * reserved up front and nothing reflows when the bytes arrive — and the
+ * transcript's virtualizer, which reserves the row from the same function,
+ * agrees with it. Without an open action it remains media, not a fake button.
+ */
 function MessageMediaItem(props: {
-    count: number;
     image: MessageImage;
+    layout: MediaMosaicLayout;
+    tile: MediaMosaicTile;
     onOpen?: (id: string) => void;
 }) {
     const content = props.image.url ? (
@@ -112,7 +117,7 @@ function MessageMediaItem(props: {
         "data-fixed": "",
         "data-media-id": props.image.id,
         "data-happy-desktop-ui": "message-media-item",
-        style: mediaItemStyle(props.image, props.count),
+        style: mediaMosaicTileStyle(props.layout, props.tile),
     } as const;
     return props.onOpen ? (
         <button
@@ -202,6 +207,11 @@ export type MessageProps = Omit<HTMLAttributes<HTMLDivElement>, "style"> & {
      * workspace behind it can honestly offer.
      */
     onFileOpen?: FileOpenHandler;
+    /**
+     * Opens a file a `happy-file:` link in this message names in another
+     * agent's or workspace's folder. Absent leaves such links inert.
+     */
+    onFileLinkOpen?: FileLinkOpenHandler;
     /**
      * Opens a web link this message carries where the reader asked for it —
      * the machine's browser or the side panel — from the link's context menu.
@@ -313,6 +323,7 @@ export function Message(props: MessageProps) {
         "images",
         "onImageOpen",
         "onFileOpen",
+        "onFileLinkOpen",
         "onLinkOpen",
         "linkOpenDefault",
         "references",
@@ -478,6 +489,7 @@ export function Message(props: MessageProps) {
                           local.onLinkOpen,
                           local.linkOpenDefault,
                           local.references,
+                          local.onFileLinkOpen,
                       )
                     : null}
                 {/* An empty generated reply keeps a non-breaking-space line box
@@ -527,6 +539,10 @@ export function Message(props: MessageProps) {
         local.own &&
         (bodyNode !== null ||
             (local.automated && (Boolean(local.images?.length) || hasAttachments())));
+    const shownImages = local.images?.slice(0, MESSAGE_MEDIA_MAX) ?? [];
+    /* Laid out at full size; a narrower column scales the frame, and the tiles
+       with it, exactly as the row model scales this layout to its measure. */
+    const mosaic = mediaMosaicLayout(shownImages, MEDIA_MOSAIC_MAX_WIDTH);
     const groupedIncomingLine =
         !local.own && grouped() && bodyNode !== null ? (
             <div
@@ -643,18 +659,20 @@ export function Message(props: MessageProps) {
                 ) : (
                     (groupedIncomingLine ?? bodyNode)
                 )}
-                {local.images && local.images.length > 0 ? (
+                {shownImages.length > 0 ? (
                     <div
                         className="happy-message__media"
-                        data-count={Math.min(local.images!.length, 4)}
+                        data-count={shownImages.length}
                         data-happy-desktop-ui="message-media"
+                        style={mediaMosaicStyle(mosaic)}
                     >
-                        {local.images!.slice(0, 4).map((image) => (
+                        {shownImages.map((image, position) => (
                             <MessageMediaItem
-                                count={Math.min(local.images!.length, 4)}
                                 image={image}
                                 key={image.id}
+                                layout={mosaic}
                                 onOpen={local.onImageOpen}
+                                tile={mosaic.tiles[position]!}
                             />
                         ))}
                     </div>
@@ -697,7 +715,11 @@ export type MessageListProps = {
      * transcript row.
      */
     footer?: ReactNode;
-    /** Height model supplied to the virtualizer for the stable footer row. */
+    /**
+     * Height model supplied to the virtualizer for the stable footer row. It
+     * reads state outside the rows, so it is asked on every commit, and so is
+     * the last row, which may read that same state as its successor.
+     */
     footerHeight?: number | ((width: number) => number);
     /** Bottom clearance represented inside the virtualizer's coordinate space. */
     paddingEnd?: number;
@@ -726,7 +748,8 @@ export type MessageListProps = {
     /**
      * The value each row is estimated from, one per child in order, compared
      * by identity. A row's estimate may read every row before it, the row after
-     * it, and whether it is the last row — nothing further ahead. When only
+     * it, and whether it is the last row — nothing further ahead. The last row
+     * may also read whatever `footerHeight` reads. When only
      * these values change, the model keeps every row before the one preceding
      * the first changed value and re-asks the rest, so appending to a long
      * transcript costs the rows that changed rather than the whole history.
@@ -1367,26 +1390,15 @@ export function MessageList(props: MessageListProps) {
                 reportRect(element.clientWidth, element.clientHeight);
             });
         };
-        const host = element.parentElement;
-        const overflowObserver =
-            host && targetWindow.MutationObserver
-                ? new targetWindow.MutationObserver(geometryChanged)
-                : undefined;
-        overflowObserver?.observe(host!, {
-            attributeFilter: ["data-scrollbar-overflow-x", "data-scrollbar-overflow-y"],
-            attributes: true,
-        });
         const observer = targetWindow.ResizeObserver
             ? new targetWindow.ResizeObserver(geometryChanged)
             : undefined;
-        /* Observe the viewport's content box, not its unchanged outer border
-           box. A vertical scrollbar changes clientWidth without changing the
-           border box; that width is the measure every virtual row actually
-           paints at and must rebuild the whole keyed size model. */
+        /* Observe the viewport's content box: that width is the measure every
+           virtual row actually paints at and must rebuild the whole keyed size
+           model. The overlaid scrollbar never changes it. */
         observer?.observe(element);
         return () => {
             observer?.unobserve(element);
-            overflowObserver?.disconnect();
         };
     };
     // TanStack Virtual deliberately owns mutable measurement functions; this leaf
@@ -1520,7 +1532,19 @@ export function MessageList(props: MessageListProps) {
                 from,
                 Math.max(0, Math.min(items.length, rowSizeModel.keys.length) - 1),
             );
-        /* The footer reads state outside the rows, so it is asked on every commit. */
+        /* The footer reads state outside the rows, so it is asked on every
+           commit, and so is the row above it, which reads the footer's state as
+           its successor: a live turn starting or ending changes those two rows,
+           not the history above them. */
+        const lastRow = footerIndex === undefined ? undefined : footerIndex - 1;
+        if (
+            lastRow !== undefined &&
+            lastRow >= 0 &&
+            from > lastRow &&
+            (rowSizeModel.keys[lastRow] !== itemKeyAt(lastRow) ||
+                rowSizeModel.sizes[lastRow] !== estimateItemSize(lastRow, rowWidth))
+        )
+            from = lastRow;
         if (
             footerIndex !== undefined &&
             from > footerIndex &&

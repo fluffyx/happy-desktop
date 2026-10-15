@@ -11,7 +11,10 @@ import type {
     Task,
 } from "@slopus/happy-agent-client";
 import type { HappyAgentDebugLogInput } from "../happyAgent/happyAgentDebugLogStore.js";
-import type { HappyAgentAvatarImage } from "../happyAgent/happyAgentTypes.js";
+import type {
+    HappyAgentAvatarImage,
+    HappyAgentSubtaskActivity,
+} from "../happyAgent/happyAgentTypes.js";
 import type { HappyAgentServiceTier } from "../happyAgentServiceTier.js";
 import type { HappyAgentSync } from "./happyAgentSync.js";
 import type { UserProfile } from "./userProfiles.js";
@@ -75,6 +78,28 @@ export type ToolPresentation =
           target: "web" | "x";
           query: string;
           sources?: readonly { url: string; title: string }[];
+      }
+    | {
+          kind: "media";
+          items: readonly {
+              kind: "image" | "video" | "document" | "file";
+              name: string;
+              mimeType: string;
+              size: number;
+              width?: number;
+              height?: number;
+              thumbhash?: string;
+              /** The item's bytes on this connection's authenticated origin. */
+              url: string;
+          }[];
+      }
+    | {
+          kind: "artifact";
+          artifactId: string;
+          version: number;
+          /** The daemon's artifact type, which grows with the product. */
+          artifactType: string;
+          title: string;
       };
 
 interface BaseChatElement {
@@ -519,6 +544,8 @@ export interface GroupSession {
      * what says so without reading another resource.
      */
     activeSubagents: number;
+    /** Direct interactive child work; hidden subagents remain covered by the total count. */
+    subtaskActivity?: HappyAgentSubtaskActivity;
     archived: boolean;
     /** When the host archived it, for recovery-history order. */
     archivedAt?: number;
@@ -534,6 +561,8 @@ export interface GroupSession {
     orderKey?: string;
     /** The session that spawned this one, for a subagent. Absent for a top-level session. */
     parentSessionId?: string;
+    /** Whether the agent's run is stopped on a question only the person can answer. */
+    pendingQuestion: boolean;
     permissionMode: string;
     scope:
         | { kind: "project"; projectId: string }

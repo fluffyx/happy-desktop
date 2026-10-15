@@ -67,6 +67,7 @@
 @import "./styles/menu.css";
 @import "./styles/menu-button.css";
 @import "./styles/modal.css";
+@import "./styles/photo-crop-dialog.css";
 @import "./styles/modal-overlay.css";
 @import "./styles/compose-modal.css";
 @import "./styles/command-palette.css";
@@ -104,6 +105,8 @@
 @import "./styles/document-surface.css";
 @import "./styles/media-gallery.css";
 @import "./styles/file-attachment.css";
+@import "./styles/result-card.css";
+@import "./styles/conversation-media.css";
 @import "./styles/emoji-picker.css";
 @import "./styles/splash-screen.css";
 @import "./styles/splash-cover.css";
@@ -138,10 +141,12 @@
 @import "./styles/conversation.css";
 @import "./styles/chat-conversation.css";
 @import "./styles/happy-agent-usage.css";
+@import "./styles/happy-agent-devices.css";
 @import "./styles/happy-agent-activity.css";
 @import "./styles/happy-agent-settings.css";
 @import "./styles/mobile-access-confirmation.css";
 @import "./styles/happy-agent-secret-settings.css";
+@import "./styles/happy-agent-file-tier-settings.css";
 @import "./styles/happy-agent-debug-log.css";
 @import "./styles/happy-agent-raw-state.css";
 @import "./styles/happy-agent-usage-settings.css";
@@ -152,6 +157,8 @@
 @import "./styles/happy-agent-create-task.css";
 @import "./styles/happy-agent-project-clone-dialog.css";
 @import "./styles/happy-agent-task-browse-dialog.css";
+@import "./styles/reordering-list.css";
+@import "./styles/happy-agent-surfaces.css";
 @import "./styles/workspace-lifecycle-notice.css";
 @import "./styles/connections.css";
 @import "./styles/window-chrome.css";

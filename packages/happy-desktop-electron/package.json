@@ -1,8 +1,8 @@
 {
     "name": "happy-desktop-electron",
-    "version": "0.0.95",
+    "version": "0.0.97",
     "private": true,
-    "description": "Happy Place macOS desktop app",
+    "description": "Happy Place desktop app",
     "author": "Slopus",
     "files": [
         "dist",
@@ -45,8 +45,9 @@
     },
     "dependencies": {
         "@sinclair/typebox": "^0.34.49",
-        "@slopus/happy-agent-client": "0.0.78",
+        "@slopus/happy-agent-client": "0.0.85",
         "electron-updater": "^6.8.9",
+        "usb": "^2.19.1",
         "ws": "^8.21.1",
         "yjs": "^13.6.31"
     },

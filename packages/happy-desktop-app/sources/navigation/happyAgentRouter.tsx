@@ -26,6 +26,7 @@ import type {
     HappyAgentFileTabKind,
     HappyAgentNavigationOrderStore,
     HappyAgentSidebarCollapseStore,
+    HappyAgentSidebarSearchStore,
     HappyAgentSidebarVisibilityStore,
     HappyAgentSessionId,
     HappyAgentSessionLocation,
@@ -111,6 +112,11 @@ export interface HappyAgentRouterContext {
      * Absent in a host that keeps no such record, which leaves every row open.
      */
     readonly sidebarCollapse?: HappyAgentSidebarCollapseStore;
+    /**
+     * What the sidebar's search field holds. Absent in a host that keeps none,
+     * which leaves the sidebar without a search field.
+     */
+    readonly sidebarSearch?: HappyAgentSidebarSearchStore;
     /** Whether this window's left side is folded away; shared by every connection. */
     readonly sidebarVisibility?: HappyAgentSidebarVisibilityStore;
     /**
@@ -402,6 +408,17 @@ const artifactRoute = createRoute({
 });
 
 /**
+ * One shared Surface — a todo list, or a type this build cannot show — on the
+ * machine that keeps it. The Happy Agent is in the address because the Surface
+ * is that machine's, the way its artifacts are.
+ */
+const surfaceRoute = createRoute({
+    component: HappyAgentSurfaceRoute,
+    getParentRoute: () => rootRoute,
+    path: "/surfaces/$happyAgentId/$surfaceId",
+});
+
+/**
  * The component workbench, addressed without a Happy Agent because it renders component
  * pages rather than anything a machine holds. The route is registered only in a
  * development build, which is also the only build whose sidebar offers it.
@@ -461,6 +478,7 @@ const routeTree = rootRoute.addChildren([
     inboxRoute,
     artifactsRoute,
     artifactRoute,
+    surfaceRoute,
     botCreateRoute,
     taskCreateRoute,
     ...(import.meta.env.DEV ? [blueprintRoute] : []),
@@ -484,6 +502,11 @@ function HappyAgentInboxRoute() {
  */
 function HappyAgentArtifactsRoute() {
     return <HappyAgentWorkspaceLayout artifacts />;
+}
+
+/** A Surface's address renders the same window, with the Surface in the content area. */
+function HappyAgentSurfaceRoute() {
+    return <HappyAgentWorkspaceLayout surface />;
 }
 
 /**
@@ -514,6 +537,7 @@ function HappyAgentWorkspaceLayout(
         blueprint?: boolean;
         botCreate?: boolean;
         inbox?: boolean;
+        surface?: boolean;
         taskCreate?: boolean;
     } = {},
 ) {
@@ -555,6 +579,7 @@ function HappyAgentWorkspaceLayout(
             {...(context.commandPalette ? { commandPalette: context.commandPalette } : {})}
             {...(context.navigationOrder ? { navigationOrder: context.navigationOrder } : {})}
             {...(context.sidebarCollapse ? { sidebarCollapse: context.sidebarCollapse } : {})}
+            {...(context.sidebarSearch ? { sidebarSearch: context.sidebarSearch } : {})}
             {...(context.sidebarVisibility ? { sidebarVisibility: context.sidebarVisibility } : {})}
             settings={context.settings}
             botCreateOpen={props.botCreate}
@@ -564,6 +589,15 @@ function HappyAgentWorkspaceLayout(
             {...(props.artifacts && params.artifactId !== undefined
                 ? { artifactId: params.artifactId }
                 : {})}
+            {...(props.surface && params.surfaceId !== undefined
+                ? { surfaceId: params.surfaceId }
+                : {})}
+            onSurfaceOpen={(happyAgentId, surfaceId) =>
+                void navigate({
+                    params: { happyAgentId, surfaceId },
+                    to: "/surfaces/$happyAgentId/$surfaceId",
+                })
+            }
             blueprintOpen={props.blueprint}
             // Offered only where the route exists, which is what puts the
             // workbench row in a development sidebar and nowhere else.

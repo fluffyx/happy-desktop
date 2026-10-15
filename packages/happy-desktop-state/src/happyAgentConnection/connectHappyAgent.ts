@@ -37,6 +37,7 @@ import { CHECKING_SERVER_COMPATIBILITY, serverCompatibility } from "./compatibil
 import { projectRegistrationError } from "./errors.js";
 import { deepEqual } from "../happyAgent/happyAgentSupport.js";
 import type { HappyAgentDebugLogInput } from "../happyAgent/happyAgentDebugLogStore.js";
+import { cuid2Create } from "../utils/cuid2Create.js";
 import {
     applyChanges,
     archivedAgentsMerge,
@@ -192,7 +193,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
     const wait = options.wait ?? abortableWait;
     const now = options.now ?? Date.now;
     const reportDebug = (entry: HappyAgentDebugLogInput): void => options.onDebugEntry?.(entry);
-    const nextId = createCuid2(now);
+    const nextId = cuid2Create(now);
     const sessions = new Map<string, SessionEntry>();
     const userSessions = new Map<string, Set<SessionEntry>>();
     const users = userProfilesCreate({
@@ -539,6 +540,9 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         return ordered;
     };
 
+    const toolCallMediaUrl = (agentId: string, toolCallId: string, index: number): string =>
+        client.toolCallMediaUrl(agentId, toolCallId, index);
+
     const projectionOf = (entry: SessionEntry): SessionProjectionInput | undefined => {
         if (entry.agent === undefined || config === undefined) return undefined;
         return {
@@ -546,6 +550,7 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             config,
             connection: groupsStore.getState().connection,
             endpoint,
+            mediaUrl: toolCallMediaUrl,
             hasMore: entry.hasMore,
             messages: [...entry.messages.values()],
             userProfiles: users.profiles,
@@ -690,12 +695,16 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
             if (agent !== undefined) return agent;
         }
         for (const workspace of workspaces) {
-            const agent = workspace.agents.find((candidate) => candidate.id === agentId);
-            if (agent !== undefined) return agent;
+            for (const root of workspace.agents) {
+                const agent = agentTreeFind(root, agentId);
+                if (agent !== undefined) return agent;
+            }
         }
         for (const project of projects) {
-            const agent = project.agents.find((candidate) => candidate.id === agentId);
-            if (agent !== undefined) return agent;
+            for (const root of project.agents) {
+                const agent = agentTreeFind(root, agentId);
+                if (agent !== undefined) return agent;
+            }
         }
         const materialized = sessions.get(agentId)?.agent;
         if (materialized !== undefined) return materialized;
@@ -714,20 +723,27 @@ export function connectHappyAgent(options: ConnectHappyAgentOptions): HappyAgent
         current.version === current.id ||
         current.version.localeCompare(updated.version) <= 0;
 
+    const ownerAgentReplace = <Owner extends { readonly id: string; readonly agents: Agent[] }>(
+        owner: Owner,
+        agent: Agent,
+    ): Owner => {
+        // A child may work in another workspace. Its event must still replace
+        // the embedded ancestry used by the original workspace's live marker.
+        const updated = owner.agents.map((root) => agentTreeUpdate(root, agent));
+        const agents =
+            owner.id === agent.workspaceId || updated.some((root) => root.id === agent.id)
+                ? (replaceResource(updated, agent) as Agent[])
+                : updated;
+        return agents.length === owner.agents.length &&
+            agents.every((root, index) => root === owner.agents[index])
+            ? owner
+            : { ...owner, agents };
+    };
+
     const replaceAgent = (agent: Agent): void => {
         groupsStore.setState((current) => ({
-            workspaces: current.workspaces.map((workspace) =>
-                workspace.id === agent.workspaceId ||
-                workspace.agents.some((candidate) => candidate.id === agent.id)
-                    ? { ...workspace, agents: replaceResource(workspace.agents, agent) as Agent[] }
-                    : workspace,
-            ),
-            projects: current.projects.map((project) =>
-                project.id === agent.workspaceId ||
-                project.agents.some((candidate) => candidate.id === agent.id)
-                    ? { ...project, agents: replaceResource(project.agents, agent) as Agent[] }
-                    : project,
-            ),
+            workspaces: current.workspaces.map((workspace) => ownerAgentReplace(workspace, agent)),
+            projects: current.projects.map((project) => ownerAgentReplace(project, agent)),
             // A bot's row is drawn from the agent embedded in the bot, so the
             // same versioned agent event has to reach that copy too — otherwise
             // the bot keeps reporting the status it was created with.
@@ -4187,6 +4203,13 @@ function messageBlockSame(previous: MessageBlock, next: MessageBlock): boolean {
                 previous.startedAt === next.startedAt &&
                 previous.trigger === next.trigger
             );
+        case "configuration":
+            return (
+                next.type === "configuration" &&
+                previous.beforeMessageId === next.beforeMessageId &&
+                deepEqual(previous.before, next.before) &&
+                deepEqual(previous.after, next.after)
+            );
     }
 }
 
@@ -4344,22 +4367,6 @@ function agentIdOfEvent(event: HappyAgentEvent): string | undefined {
         default:
             return undefined;
     }
-}
-
-function createCuid2(now: () => number): () => string {
-    const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
-    const letters = "abcdefghijklmnopqrstuvwxyz";
-    let counter = 0;
-    return () => {
-        const random = globalThis.crypto.getRandomValues(new Uint8Array(13));
-        counter = (counter + 1) % 46_656;
-        const time = Math.max(0, Math.floor(now())).toString(36).slice(-8).padStart(8, "0");
-        const count = counter.toString(36).padStart(3, "0");
-        let tail = "";
-        for (let index = 1; index < random.length; index += 1)
-            tail += digits[(random[index] ?? 0) % digits.length];
-        return `${letters[(random[0] ?? 0) % letters.length] ?? "a"}${time}${count}${tail}`;
-    };
 }
 
 function abortableWait(milliseconds: number, signal: AbortSignal): Promise<void> {

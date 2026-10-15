@@ -1,3 +1,8 @@
+import {
+    HAPPY_AGENT_CHANGE_TIERS_MAX,
+    type HappyAgentChangeTier,
+    type HappyAgentChangeTierId,
+} from "./happyAgentChangeTiers.js";
 import type { HappyAgentGroupId } from "./happyAgentTypes.js";
 import type { HappyAgentFileLayout, HappyAgentFileScope } from "./happyAgentWorkspaceStore.js";
 
@@ -35,7 +40,8 @@ export interface HappyAgentGroupViewPreferences {
 }
 
 /**
- * Every checkout this window remembers the arrangement of, by group id.
+ * Every checkout this window remembers the arrangement of, by group id, and the
+ * change tiers every Changes listing is split by.
  *
  * Keyed per group because that is the thing being arranged: a wide panel suits
  * the checkout whose diffs are wide, and forcing that width onto every other
@@ -43,6 +49,13 @@ export interface HappyAgentGroupViewPreferences {
  */
 export interface HappyAgentViewPreferencesDocument {
     readonly groups: Readonly<Record<string, HappyAgentGroupViewPreferences>>;
+    /**
+     * Sections the Changes listing splits secondary files into, in match order.
+     * One list for every project rather than one per project: which files
+     * someone counts as secondary is a habit of the reader's, and a pattern that
+     * matches nothing in a project simply leaves its tier hidden there.
+     */
+    readonly changeTiers: readonly HappyAgentChangeTier[];
 }
 
 /**
@@ -73,6 +86,10 @@ const GROUP_MAX = 256;
  * they are the arrangement the reader is actually looking at.
  */
 const FILE_TREE_PATH_MAX = 512;
+
+/** Bounds on one stored tier, so a record read back stays a record. */
+const TIER_PATTERNS_MAX = 128;
+const TIER_TEXT_MAX = 512;
 
 function scopeParse(value: unknown): HappyAgentFileScope | undefined {
     return value === "changed" || value === "all" ? value : undefined;
@@ -145,6 +162,65 @@ function groupSaysSomething(group: HappyAgentGroupViewPreferences): boolean {
     );
 }
 
+/**
+ * One stored tier, or nothing when it is not one. Unlike the arrangement
+ * fields, a tier's parts are read as a set: a tier without an id cannot be
+ * edited, and one without its patterns would claim nothing.
+ */
+function tierParse(value: unknown): HappyAgentChangeTier | undefined {
+    if (typeof value !== "object" || value === null) return undefined;
+    const raw = value as Record<string, unknown>;
+    if (typeof raw.id !== "string" || raw.id.length === 0 || raw.id.length > TIER_TEXT_MAX)
+        return undefined;
+    if (typeof raw.name !== "string" || !Array.isArray(raw.patterns)) return undefined;
+    return {
+        id: raw.id as HappyAgentChangeTierId,
+        name: raw.name.slice(0, TIER_TEXT_MAX),
+        patterns: raw.patterns
+            .filter((pattern): pattern is string => typeof pattern === "string")
+            .slice(0, TIER_PATTERNS_MAX)
+            .map((pattern) => pattern.slice(0, TIER_TEXT_MAX)),
+        collapsed: raw.collapsed === true,
+    };
+}
+
+/** Stored tiers, in order, keeping the first of any two that share an id. */
+function tiersParse(value: unknown, into: HappyAgentChangeTier[]): void {
+    if (!Array.isArray(value)) return;
+    for (const entry of value) {
+        const tier = tierParse(entry);
+        if (tier !== undefined && !into.some((kept) => kept.id === tier.id)) into.push(tier);
+    }
+}
+
+/** Whether two tiers would sort files identically under the same heading. */
+function tierSame(left: HappyAgentChangeTier, right: HappyAgentChangeTier): boolean {
+    return (
+        left.name === right.name &&
+        left.patterns.length === right.patterns.length &&
+        left.patterns.every((pattern, index) => pattern === right.patterns[index])
+    );
+}
+
+/**
+ * The tiers a record written while tiers were kept per project held, merged
+ * into one list in the order the record holds them. A tier repeated across
+ * projects — the same name over the same patterns — is kept once.
+ */
+function legacyTiersParse(projects: unknown): readonly HappyAgentChangeTier[] {
+    if (typeof projects !== "object" || projects === null) return [];
+    const merged: HappyAgentChangeTier[] = [];
+    for (const project of Object.values(projects as Record<string, unknown>)) {
+        if (typeof project !== "object" || project === null) continue;
+        const tiers: HappyAgentChangeTier[] = [];
+        tiersParse((project as { changeTiers?: unknown }).changeTiers, tiers);
+        for (const tier of tiers)
+            if (!merged.some((kept) => kept.id === tier.id || tierSame(kept, tier)))
+                merged.push(tier);
+    }
+    return merged;
+}
+
 export function happyAgentViewPreferencesParse(
     value: unknown,
 ): HappyAgentViewPreferencesDocument | undefined {
@@ -156,7 +232,14 @@ export function happyAgentViewPreferencesParse(
         const group = groupParse(entry);
         if (group) parsed[id] = group;
     }
-    return { groups: parsed };
+    const changeTiers: HappyAgentChangeTier[] = [];
+    tiersParse((value as { changeTiers?: unknown }).changeTiers, changeTiers);
+    // A record from before tiers were global kept them per project. Their
+    // tiers become the global list once, while it is still empty; the next
+    // write leaves the per-project field out, so it is never read again.
+    if (changeTiers.length === 0)
+        changeTiers.push(...legacyTiersParse((value as { projects?: unknown }).projects));
+    return { groups: parsed, changeTiers: changeTiers.slice(0, HAPPY_AGENT_CHANGE_TIERS_MAX) };
 }
 
 /**
@@ -192,7 +275,18 @@ export function happyAgentViewPreferencesUpdate(
     const ids = Object.keys(groups);
     if (ids.length > GROUP_MAX)
         for (const id of ids.slice(0, ids.length - GROUP_MAX)) delete groups[id];
-    return { groups };
+    return { groups, changeTiers: document.changeTiers };
 }
 
-export const HAPPY_AGENT_VIEW_PREFERENCES_EMPTY: HappyAgentViewPreferencesDocument = { groups: {} };
+/** The remembered arrangements with the change tiers replaced. */
+export function happyAgentViewPreferencesTiersUpdate(
+    document: HappyAgentViewPreferencesDocument,
+    changeTiers: readonly HappyAgentChangeTier[],
+): HappyAgentViewPreferencesDocument {
+    return { groups: document.groups, changeTiers };
+}
+
+export const HAPPY_AGENT_VIEW_PREFERENCES_EMPTY: HappyAgentViewPreferencesDocument = {
+    groups: {},
+    changeTiers: [],
+};

@@ -8,12 +8,13 @@ import {
     type ComponentPropsWithoutRef,
     type ReactNode,
 } from "react";
+import { happyAgentFileLinkParse } from "happy-desktop-state";
 import Markdown, { type Components, type ExtraProps, type UrlTransform } from "react-markdown";
 import { ContextMenu } from "./ContextMenu";
 import { filePreviewKind } from "./FilePreview";
 import { type MenuItem } from "./Menu";
 import { markdownFence, markdownFenceIsMermaid } from "./markdownFence";
-import { type FileOpenHandler } from "./fileReference";
+import { type FileLinkOpenHandler, type FileOpenHandler } from "./fileReference";
 import { markdownDocumentLinkTarget, markdownFileUrlTransform } from "./MarkdownDocument";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { FILE_REFERENCE_LINK_ATTRIBUTE } from "./messageFileReferences";
@@ -24,6 +25,10 @@ import {
     messageReferencesResolve,
     type MessageReferences,
 } from "./messageReferences";
+import {
+    markdownTableLayoutAt,
+    messageTextLayoutFontGenerationSubscribe,
+} from "./messageTextLayout";
 import { ScrollArea } from "./Scrollbar";
 import { ShimmerText } from "./ShimmerText";
 
@@ -66,6 +71,12 @@ const MarkdownLinkContext = createContext(false);
  * the app cannot honour.
  */
 const MarkdownFileOpenContext = createContext<FileOpenHandler | undefined>(undefined);
+/**
+ * Opens a file a `happy-file:` link names in another agent's or workspace's
+ * folder. Absent, such a link stays inert like any other target this surface
+ * cannot open.
+ */
+const MarkdownFileLinkOpenContext = createContext<FileLinkOpenHandler | undefined>(undefined);
 /** Where the reader asked a web link to open from its context menu. */
 export type LinkOpenPlacement = "browser" | "panel";
 /**
@@ -168,6 +179,8 @@ const MarkdownTrailingContext = createContext<{
 const MarkdownGenerationStatusContext = createContext<MessageGenerationStatus | undefined>(
     undefined,
 );
+/** The Markdown being rendered; a table re-reads its own AST from it by offset. */
+const MarkdownSourceContext = createContext("");
 type MarkdownImageProps = ComponentPropsWithoutRef<"img"> & ExtraProps;
 /**
  * A Markdown image is rendered as a safe labelled link, never an `<img>`: an
@@ -218,6 +231,7 @@ const MarkdownLink = ({
     const reference = references === undefined ? undefined : messageReferenceFromHref(href);
     const safe = safeHref(href);
     const onFileOpen = useContext(MarkdownFileOpenContext);
+    const onFileLinkOpen = useContext(MarkdownFileLinkOpenContext);
     const onLinkOpen = useContext(MarkdownLinkOpenContext);
     const linkOpenDefault = useContext(MarkdownLinkDefaultContext);
     // The link's own context menu, while it is up: where the pointer asked
@@ -228,6 +242,35 @@ const MarkdownLink = ({
             <MarkdownReferenceLink href={href!} reference={reference} references={references}>
                 {children}
             </MarkdownReferenceLink>
+        );
+    // A link into another workspace's folder carries that folder, so it opens
+    // the same file wherever the message is read. Its scheme means nothing to
+    // the browser or the OS, so no click may hand it to either.
+    const fileLink =
+        safe === undefined && typeof href === "string" ? happyAgentFileLinkParse(href) : undefined;
+    if (
+        fileLink !== undefined &&
+        onFileLinkOpen !== undefined &&
+        filePreviewKind(fileLink.path) !== "binary"
+    )
+        return (
+            <a
+                className="happy-message__md-link happy-message__md-file"
+                data-happy-desktop-ui="message-md-file"
+                data-path={fileLink.path}
+                href={href}
+                onClick={(event) => {
+                    event.preventDefault();
+                    onFileLinkOpen(fileLink);
+                }}
+                onAuxClick={(event) => {
+                    event.preventDefault();
+                    if (event.button === 1) onFileLinkOpen(fileLink);
+                }}
+                onDragStart={(event) => event.preventDefault()}
+            >
+                <MarkdownLinkContext.Provider value={true}>{children}</MarkdownLinkContext.Provider>
+            </a>
         );
     const target = safe === undefined ? markdownDocumentLinkTarget(href) : undefined;
     // Only a file this product can actually show is offered as a click. An
@@ -371,28 +414,91 @@ const MarkdownPre = ({
             axes="horizontal"
             className="happy-message__code-block"
             data-happy-desktop-ui="message-code-block"
-            placement="overlay"
             viewportClassName="happy-message__code-block-viewport"
         >
             <pre {...props}>{children}</pre>
         </ScrollArea>
     );
 };
+/** Cells in the header row, which is how many columns the table renders. */
+function markdownTableColumnCount(node: ExtraProps["node"]): number {
+    const head = node?.children.find(
+        (child) => child.type === "element" && child.tagName === "thead",
+    );
+    const row =
+        head?.type === "element"
+            ? head.children.find((child) => child.type === "element" && child.tagName === "tr")
+            : undefined;
+    return row?.type === "element"
+        ? row.children.filter((child) => child.type === "element").length
+        : 0;
+}
+/**
+ * A table wraps its cells at column widths solved by `markdownTableLayoutAt`,
+ * the same solve the virtual list sized this row with. The solve needs the
+ * scrollport's real measure, which only exists once it is laid out, so the ref
+ * writes the widths during commit — before the first paint — and again
+ * whenever that measure or the installed font changes.
+ */
 const MarkdownTable = ({
     children,
-    node: _node,
+    node,
     ...props
-}: ComponentPropsWithoutRef<"table"> & ExtraProps) => (
-    <ScrollArea
-        axes="horizontal"
-        className="happy-message__table-scroll"
-        data-happy-desktop-ui="message-table-scroll"
-        placement="overlay"
-        viewportClassName="happy-message__table-scroll-viewport"
-    >
-        <table {...props}>{children}</table>
-    </ScrollArea>
-);
+}: ComponentPropsWithoutRef<"table"> & ExtraProps) => {
+    const source = useContext(MarkdownSourceContext);
+    const offset = node?.position?.start.offset;
+    const columns = markdownTableColumnCount(node);
+    const tableRef = (table: HTMLTableElement | null) => {
+        // ScrollArea renders its children directly in the scroll viewport.
+        const viewport = table?.parentElement;
+        if (!table || !viewport || offset === undefined) return;
+        let applied = "";
+        const apply = () => {
+            const measure = Number.parseFloat(getComputedStyle(viewport).width);
+            if (!(measure > 0)) return;
+            const layout = markdownTableLayoutAt(source, offset, measure);
+            if (!layout) return;
+            const key = layout.columnWidths.join(",");
+            if (key === applied) return;
+            applied = key;
+            table.style.width = `${String(layout.width)}px`;
+            for (const [index, col] of table
+                .querySelectorAll<HTMLTableColElement>(":scope > colgroup > col")
+                .entries())
+                col.style.width = `${String(layout.columnWidths[index] ?? 0)}px`;
+            table.dataset.layout = "solved";
+        };
+        apply();
+        const observer = new ResizeObserver(apply);
+        observer.observe(viewport);
+        const unsubscribe = messageTextLayoutFontGenerationSubscribe(() => {
+            applied = "";
+            apply();
+        });
+        return () => {
+            observer.disconnect();
+            unsubscribe();
+        };
+    };
+    return (
+        <ScrollArea
+            axes="horizontal"
+            className="happy-message__table-scroll"
+            data-happy-desktop-ui="message-table-scroll"
+            viewportClassName="happy-message__table-scroll-viewport"
+        >
+            <table {...props} ref={tableRef}>
+                <colgroup>
+                    {Array.from({ length: columns }, (_, index) => (
+                        // Columns are positions, not entities: the nth `<col>` is the nth column.
+                        <col key={index} />
+                    ))}
+                </colgroup>
+                {children}
+            </table>
+        </ScrollArea>
+    );
+};
 /** Footnote references stay in normal inline flow so their AST label uses the
  * same line box and font metrics as the surrounding paragraph. */
 const MarkdownSup = ({
@@ -440,7 +546,8 @@ const messageUrlTransform: UrlTransform = (url, key, node) =>
  * content is injected into the final paragraph's inline flow so it cannot wrap
  * independently at the paragraph boundary. `onFileOpen` turns a link that names
  * a workspace file into a click that opens Happy's own viewer instead of an
- * inert anchor. `onLinkOpen` gives a web link a context menu offering the
+ * inert anchor, and `onFileLinkOpen` does the same for a `happy-file:` link
+ * into another agent's or workspace's folder. `onLinkOpen` gives a web link a context menu offering the
  * machine's browser or the side panel. `references` resolves the Happy
  * reference tags an agent wrote to their live titles; without it each reads as
  * inert placeholder text, and a tag never shows raw.
@@ -453,34 +560,39 @@ export function renderMessageMarkdown(
     onLinkOpen?: LinkOpenHandler,
     linkOpenDefault?: LinkOpenPlacement,
     references?: MessageReferences,
+    onFileLinkOpen?: FileLinkOpenHandler,
 ): ReactNode {
     const text = messageReferencesResolve(source, references, generationStatus === "streaming");
     return (
-        <MarkdownGenerationStatusContext.Provider value={generationStatus}>
-            <MarkdownTrailingContext.Provider
-                value={
-                    trailing === undefined
-                        ? null
-                        : { endOffset: text.trimEnd().length, node: trailing }
-                }
-            >
-                <MarkdownReferencesContext.Provider value={references}>
-                    <MarkdownFileOpenContext.Provider value={onFileOpen}>
-                        <MarkdownLinkOpenContext.Provider value={onLinkOpen}>
-                            <MarkdownLinkDefaultContext.Provider value={linkOpenDefault}>
-                                <MemoMarkdown
-                                    components={markdownComponents}
-                                    urlTransform={messageUrlTransform}
-                                    remarkPlugins={MESSAGE_MARKDOWN_REMARK_PLUGINS}
-                                    skipHtml
-                                >
-                                    {text}
-                                </MemoMarkdown>
-                            </MarkdownLinkDefaultContext.Provider>
-                        </MarkdownLinkOpenContext.Provider>
-                    </MarkdownFileOpenContext.Provider>
-                </MarkdownReferencesContext.Provider>
-            </MarkdownTrailingContext.Provider>
-        </MarkdownGenerationStatusContext.Provider>
+        <MarkdownSourceContext.Provider value={text}>
+            <MarkdownGenerationStatusContext.Provider value={generationStatus}>
+                <MarkdownTrailingContext.Provider
+                    value={
+                        trailing === undefined
+                            ? null
+                            : { endOffset: text.trimEnd().length, node: trailing }
+                    }
+                >
+                    <MarkdownReferencesContext.Provider value={references}>
+                        <MarkdownFileOpenContext.Provider value={onFileOpen}>
+                            <MarkdownFileLinkOpenContext.Provider value={onFileLinkOpen}>
+                                <MarkdownLinkOpenContext.Provider value={onLinkOpen}>
+                                    <MarkdownLinkDefaultContext.Provider value={linkOpenDefault}>
+                                        <MemoMarkdown
+                                            components={markdownComponents}
+                                            urlTransform={messageUrlTransform}
+                                            remarkPlugins={MESSAGE_MARKDOWN_REMARK_PLUGINS}
+                                            skipHtml
+                                        >
+                                            {text}
+                                        </MemoMarkdown>
+                                    </MarkdownLinkDefaultContext.Provider>
+                                </MarkdownLinkOpenContext.Provider>
+                            </MarkdownFileLinkOpenContext.Provider>
+                        </MarkdownFileOpenContext.Provider>
+                    </MarkdownReferencesContext.Provider>
+                </MarkdownTrailingContext.Provider>
+            </MarkdownGenerationStatusContext.Provider>
+        </MarkdownSourceContext.Provider>
     );
 }

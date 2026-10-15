@@ -1,5 +1,5 @@
 import { type CSSProperties, type ReactNode, useState, useSyncExternalStore } from "react";
-import type { FileOpenHandler } from "./fileReference";
+import type { FileLinkOpenHandler, FileOpenHandler } from "./fileReference";
 import type { LinkOpenHandler, LinkOpenPlacement } from "./MessageMarkdown";
 import type { MessageReferences } from "./messageReferences";
 import {
@@ -35,6 +35,7 @@ import {
 } from "./conversationMessageGrouped";
 import {
     contentWidth,
+    conversationReferencesSignature,
     conversationRowHeight,
     conversationRowHeightCacheCreate,
     type ConversationRowHeightCache,
@@ -48,6 +49,7 @@ import {
 import type { HappyAgentUserInputAnswerMap } from "./HappyAgentUserInputPrompt";
 import { ScrollArea } from "./Scrollbar";
 import { Spinner } from "./Spinner";
+import { toolCallStillGlyph } from "./toolCallStillGlyph";
 import { WindowOverlay } from "./WindowOverlay";
 
 export type ConversationViewProps = {
@@ -193,6 +195,8 @@ export type ConversationViewProps = {
     onAttachmentOpen?: ConversationEntryViewProps["onAttachmentOpen"];
     /** Opens one tool entry in the workspace's replaceable Preview tab. */
     onToolSelect?: (entryId: string, tool: ConversationToolCall) => void;
+    /** Opens one file a tool call presented: a picture full size, a file in its preview. */
+    onToolMediaOpen?: ConversationEntryViewProps["onToolMediaOpen"];
     /** Opens a child session from an inline delegated-agent row. */
     onDelegationSelect?: ConversationEntryViewProps["onDelegationSelect"];
     /** Reference epoch millis used by delegated-agent timers. */
@@ -204,6 +208,12 @@ export type ConversationViewProps = {
      * workspace behind it has nothing to open.
      */
     onFileOpen?: FileOpenHandler;
+    /**
+     * Opens a file a `happy-file:` link in a message names in another agent's
+     * or workspace's folder, beside this transcript. Absent leaves such links
+     * inert.
+     */
+    onFileLinkOpen?: FileLinkOpenHandler;
     /**
      * Opens a web link a message carries where the reader chose from the
      * link's context menu: the machine's browser or the side panel. Absent
@@ -328,6 +338,29 @@ function conversationPendingSteering(entries: readonly ConversationEntry[]): {
         : { transcript: entries.slice(0, start), queued: entries.slice(start) };
 }
 
+/**
+ * Whether the running turn is only sitting out a scheduled wait: at least one
+ * wait call is in flight and nothing else in the transcript is still running.
+ */
+function conversationScheduledWait(transcript: readonly ConversationEntry[]): boolean {
+    let waiting = false;
+    for (const entry of transcript) {
+        if (entry.kind !== "agentActivity") continue;
+        const activity = entry.activity;
+        if (activity.kind === "tool") {
+            if (activity.tool.status !== "running") continue;
+            if (toolCallStillGlyph(activity.tool.toolName) !== "clock") return false;
+            waiting = true;
+        } else if (
+            (activity.kind === "shell" && activity.running) ||
+            (activity.kind === "labeled" && activity.status === "running") ||
+            (activity.kind === "reasoning" && activity.streaming)
+        )
+            return false;
+    }
+    return waiting;
+}
+
 function elapsedFormat(ms: number): string {
     const seconds = Math.floor(ms / 1000);
     if (seconds < 60) return `${seconds}s`;
@@ -428,6 +461,13 @@ export function ConversationView(props: ConversationViewProps) {
      * work it reports was set going by the turn above it.
      */
     const delegating = props.running !== true && !awaitingInput && (props.delegatedAgents ?? 0) > 0;
+    /* A wait whose end the owner did not supply still is not work: the footer
+       takes a still clock rather than the loader. */
+    const scheduledWait =
+        props.running === true &&
+        !awaitingInput &&
+        props.workingWait === undefined &&
+        conversationScheduledWait(transcript);
     /*
      * An unanswered question keeps the footer after the run that asked it
      * stops. The turn is not over — it is waiting on the reader — and the one
@@ -468,6 +508,7 @@ export function ConversationView(props: ConversationViewProps) {
             }
             phase={delegating ? "delegating" : props.workingPhase}
             wait={delegating ? undefined : props.workingWait}
+            waiting={scheduledWait}
         />
     );
     /**
@@ -596,16 +637,16 @@ export function ConversationView(props: ConversationViewProps) {
                 </ScrollArea>
             ) : (
                 <MessageList
+                    /* Inputs every row's estimate may read. The live status is
+                       not one: only the final row reads it, as its successor,
+                       and the list asks that row again with the footer. */
                     estimateDependencies={[
                         props.errorAssistance,
                         props.errorAssistanceUnavailable,
                         props.viewerId,
                         props.activityTreatment,
-                        statusVisible,
-                        workingStatusStartsGroup,
-                        props.activityControl !== undefined,
                         rowExpansion,
-                        props.references,
+                        conversationReferencesSignature(transcript, props.references),
                     ]}
                     estimateRowSize={(index, width) =>
                         conversationRowHeight(
@@ -752,9 +793,15 @@ export function ConversationView(props: ConversationViewProps) {
                                         : undefined
                                 }
                                 onToolSelect={props.onToolSelect}
+                                {...(props.onToolMediaOpen
+                                    ? { onToolMediaOpen: props.onToolMediaOpen }
+                                    : {})}
                                 onDelegationSelect={props.onDelegationSelect}
                                 now={props.now}
                                 {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+                                {...(props.onFileLinkOpen
+                                    ? { onFileLinkOpen: props.onFileLinkOpen }
+                                    : {})}
                                 {...(props.onLinkOpen ? { onLinkOpen: props.onLinkOpen } : {})}
                                 {...(props.references ? { references: props.references } : {})}
                                 {...(props.linkOpenDefault

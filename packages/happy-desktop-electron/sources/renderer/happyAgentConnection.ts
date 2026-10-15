@@ -38,6 +38,7 @@ import {
     type HappyAgentSecurityPolicyStore,
     type HappyAgentSecretsStore,
     type HappyAgentArtifacts,
+    type HappyAgentSurfaces,
     type HappyAgentSessionLocation,
     type HappyAgentWorkspaceMemoryDocument,
     type HappyAgentWorkspaceMemoryPersistence,
@@ -45,7 +46,7 @@ import {
     type ServerCompatibility,
     type TerminalColorScheme,
 } from "happy-desktop-state";
-import { completionChimePlay } from "./completionChime";
+import { imageCropOpen } from "happy-desktop-ui";
 import { desktopViewPreferencesPersistence } from "./desktopViewPreferences";
 import { desktopWelcomePersistence } from "./desktopWelcome";
 import {
@@ -117,6 +118,8 @@ export interface HappyAgentSession {
     readonly secrets: () => HappyAgentSecretsStore;
     /** This Happy Agent's published artifacts, materialized as their surfaces open. */
     readonly artifacts: HappyAgentArtifacts;
+    /** This Happy Agent's shared Surfaces, such as todo lists, materialized as they open. */
+    readonly surfaces: HappyAgentSurfaces;
     readonly clock: HappyAgentClockStore;
 }
 
@@ -136,6 +139,12 @@ export interface HappyAgentSessionDeps {
     ) => void;
     /** A reader-initiated act this connection's workspace finished. */
     readonly activity?: (activity: HappyAgentActivity) => void;
+    /**
+     * A top-level session on this connection finished a turn. Delegated
+     * subagent runs never arrive here; whether the window says anything about
+     * it is the owner's to decide.
+     */
+    readonly sessionFinished?: (sessionId: string) => void;
     /** Announces that this connection's session is ready or has been replaced. */
     readonly changed: () => void;
     readonly unavailable?: (error: unknown) => void;
@@ -321,6 +330,8 @@ export function happyAgentConnectionOpen(input: {
     readonly happyAgentHttpUrl: string;
     readonly client?: HappyAgentClient;
     readonly hostServicesUrl?: string;
+    /** Whether this computer's USB devices and ports can be bridged to this Happy Agent. */
+    readonly deviceBridges?: boolean;
     /**
      * The window's appearance right now, read again for every terminal this
      * connection opens. A terminal is started in it and keeps it afterwards.
@@ -368,7 +379,9 @@ export function happyAgentConnectionOpen(input: {
             input.deps.compatibility?.(mismatch);
             input.deps.changed();
         },
-        onTopLevelSessionFinished: () => completionChimePlay(),
+        onTopLevelSessionFinished: (sessionId) => {
+            if (!disposed) input.deps.sessionFinished?.(sessionId);
+        },
     });
     const profile = happyAgentProfileSourceCreate(directClient, agentConnection.sync, () => {
         if (!session) agentConnection.retry();
@@ -377,6 +390,7 @@ export function happyAgentConnectionOpen(input: {
     const hostServices = happyAgentHostServicesCreate(
         input.hostServicesUrl ?? input.happyAgentHttpUrl,
         input.happyAgentHttpUrl,
+        { deviceBridges: input.deviceBridges ?? false },
     );
     const welcome = welcomeStoreCreate(desktopWelcomePersistence(input.happyAgentId));
     const onboarding = happyAgentOnboardingStoreCreate(directClient, agentConnection.sync, {
@@ -397,6 +411,7 @@ export function happyAgentConnectionOpen(input: {
         workspaceMemoryPersistence: workspaceMemoryPersistence(input.happyAgentId),
         catalogSource,
         profileActions: profile.actions,
+        profilePhotoCodec: { open: imageCropOpen },
         profileSource: profile.source,
         providerUsageSource: happyAgentUsageSourceCreate(directClient),
         transcriptConnect: happyAgentTranscriptConnectCreate(agentConnection),
@@ -520,6 +535,7 @@ export function happyAgentConnectionOpen(input: {
                     securityPolicy: client.securityPolicy(),
                     secrets: () => client.secrets(),
                     artifacts: client.artifacts(),
+                    surfaces: client.surfaces(),
                     clock: happyAgentClockStoreCreate(),
                 };
                 debugEntry({

@@ -30,6 +30,7 @@ import { Menu, type MenuItem } from "./Menu";
 import { ShimmerText } from "./ShimmerText";
 import { Spinner } from "./Spinner";
 import { ScrollArea } from "./Scrollbar";
+import { TextField } from "./TextField";
 /** One control on a row: its glyph, what it does, and when it shows. */
 export type SidebarItemAction = {
     icon: IconName;
@@ -103,6 +104,11 @@ export type SidebarItem = {
     labelShimmer?: boolean;
     meta?: string;
     /**
+     * How many open things the row holds — a todo list's unfinished todos —
+     * as a quiet number at its trailing edge. Absent or zero shows nothing.
+     */
+    count?: number;
+    /**
      * A control at the trailing edge of the row, reported through
      * `onItemAction`. `reveal: "hover"` keeps it out of the way until the row is
      * hovered or the control is focused, for something destructive; the default
@@ -122,9 +128,11 @@ export type SidebarItem = {
      * `working` spins in the leading slot; `waiting` shows a highlighted clock
      * there instead — the row's agent is inside a scheduled wait, deliberately
      * doing nothing. Waiting is the lower-priority state: a row whose sessions
-     * do real work reports `working`.
+     * do real work reports `working`. `awaitingInput` shows a highlighted
+     * question mark: the row's agent stopped to ask the reader something, and
+     * nothing moves until they answer, so it outranks both.
      */
-    status?: "ready" | "working" | "waiting";
+    status?: "ready" | "working" | "waiting" | "awaitingInput";
     /**
      * Where the thing behind this row is in its own life, as distinct from what
      * is happening inside it: `creating` while it is still being made,
@@ -210,6 +218,25 @@ export type SidebarSectionAction = {
     reveal?: "hover" | "always";
     /** The window chord that does the same thing, shown under the control on hover. */
     shortcut?: KeyboardShortcut;
+};
+
+/** The one control in the sidebar's own heading, beside the window's collapse control. */
+export type SidebarHeaderAction = {
+    icon: IconName;
+    label: string;
+    /** Keeps the control in its place while the act is unavailable. */
+    disabled?: boolean;
+};
+
+/**
+ * The search field under the sidebar's header, above the list. The sidebar
+ * only draws it: the caller holds what is typed and decides which rows it
+ * leaves.
+ */
+export type SidebarSearch = {
+    value: string;
+    placeholder: string;
+    onValueChange: (value: string) => void;
 };
 
 /**
@@ -322,6 +349,15 @@ export type SidebarProps = Omit<HTMLAttributes<HTMLElement>, "style"> & {
     headerAccessory?: ReactNode;
     /** Compact context anchored at the trailing edge of the 56px top heading. */
     headerTrailing?: ReactNode;
+    /**
+     * A control at the very end of the heading, reported through
+     * `onHeaderAction`. Hosted in a collapsible shell it sits just before the
+     * shell's collapse control, as a pair of the same size.
+     */
+    headerAction?: SidebarHeaderAction;
+    onHeaderAction?: () => void;
+    /** A search field under the heading, above everything the sidebar lists. */
+    search?: SidebarSearch;
     /**
      * Drill-down mode: replaces the brand/title heading with a back button to
      * the left of `title`, and animates the body in. Use for a pushed detail
@@ -627,7 +663,21 @@ function dragUnitsOf(
     index: number,
 ): { units: readonly (readonly number[])[]; parentId?: string } {
     const depth = items[index]?.depth ?? 0;
-    if (depth === 0) return { units: blocksOf(items) };
+    if (depth === 0) {
+        // A row that cannot be moved holds its place, so it is nobody's peer
+        // either: a drag arranges the unbroken run of movable rows around the
+        // one it started on, and never carries a row past a fixed one or
+        // pushes a fixed one aside.
+        const blocks = blocksOf(items);
+        const movable = (block: readonly number[]): boolean =>
+            items[block[0]!]?.reorderable !== false;
+        const at = blocks.findIndex((block) => block.includes(index));
+        let first = at;
+        while (first > 0 && movable(blocks[first - 1]!)) first -= 1;
+        let last = at;
+        while (last < blocks.length - 1 && movable(blocks[last + 1]!)) last += 1;
+        return { units: blocks.slice(first, last + 1) };
+    }
     let parent = index - 1;
     while (parent >= 0 && (items[parent]!.depth ?? 0) >= depth) parent -= 1;
     const siblings: number[] = [];
@@ -1002,6 +1052,8 @@ function SidebarRow({
     const showLifecycle = () => lifecycle() !== undefined && item().lifecycleLabel !== undefined;
     const showMeta = () =>
         item().meta !== undefined && !unread() && !mentioned() && !showStatus() && !showLifecycle();
+    const showCount = () =>
+        (item().count ?? 0) > 0 && !unread() && !mentioned() && !showStatus() && !showLifecycle();
     /*
      * A place that is being made, or has work running inside it, says so in its
      * own name: the name shimmers for as long as that lasts. It is the same
@@ -1055,6 +1107,13 @@ function SidebarRow({
                 icon: "clock",
                 label: `${item().label} is waiting`,
                 lifecycle: "waiting",
+            };
+        if (item().status === "awaitingInput")
+            return {
+                kind: "glyph",
+                icon: "question",
+                label: `${item().label} is waiting for your answer`,
+                lifecycle: "awaitingInput",
             };
         return undefined;
     };
@@ -1367,7 +1426,8 @@ function SidebarRow({
                     {item().meta}
                 </span>
             ) : null}
-            {((state, controls, stats, swaps) =>
+
+            {((state, controls, stats, swaps, count) =>
                 /* One lane at the trailing edge, and everything in it is ranged
                    right. The Git delta is the last thing in flow, so at rest it
                    ends the row on the same column as the marks above and below
@@ -1377,7 +1437,7 @@ function SidebarRow({
                    controls are laid over the lane rather than placed in it, so
                    arriving and leaving costs no reflow: what they cover is
                    hidden where it stands. */
-                state || controls || stats ? (
+                state || controls || stats || count !== undefined ? (
                     <span
                         className="happy-sidebar__item-trailing"
                         data-happy-desktop-ui="sidebar-item-trailing"
@@ -1387,6 +1447,14 @@ function SidebarRow({
                             minWidth: trailingLaneMinWidth(),
                         }}
                     >
+                        {count !== undefined ? (
+                            <span
+                                className="happy-sidebar__item-count"
+                                data-happy-desktop-ui="sidebar-item-count"
+                            >
+                                {String(count)}
+                            </span>
+                        ) : null}
                         {stats ? (
                             /* Abbreviated for the column, exact for the reader
                                who is listening rather than looking. */
@@ -1421,6 +1489,7 @@ function SidebarRow({
                 trailingActions().length > 0,
                 hasChangeStats() ? item().changeStats! : undefined,
                 swapsTrailing(),
+                showCount() ? item().count : undefined,
             )}
         </button>
     );
@@ -1442,10 +1511,12 @@ export function Sidebar(props: SidebarProps) {
         "composeLabel",
         "footer",
         "headerAccessory",
+        "headerAction",
         "headerTrailing",
         "itemMenuItems",
         "onActionReorder",
         "onBack",
+        "onHeaderAction",
         "onCompose",
         "onItemSelect",
         "onItemAction",
@@ -1456,6 +1527,7 @@ export function Sidebar(props: SidebarProps) {
         "numberShortcuts",
         "numberShortcutTargets",
         "onSectionAction",
+        "search",
         "sections",
         "style",
         "subtitle",
@@ -1615,6 +1687,8 @@ export function Sidebar(props: SidebarProps) {
     // one left silent.
     const [announcements, setAnnouncements] = useState<readonly [string, string]>(["", ""]);
     const [announceSlot, setAnnounceSlot] = useState(0);
+    // Whether rows sit under the header; the header then fades into the list.
+    const [scrolled, setScrolled] = useState(false);
     const moveAnnounce = (text: string): void => {
         const slot = announceSlot === 0 ? 1 : 0;
         setAnnounceSlot(slot);
@@ -1996,22 +2070,13 @@ export function Sidebar(props: SidebarProps) {
             y: event.clientY,
         });
     };
-    // A heading with nothing to say: no product mark, no title, no drill-down,
-    // nothing trailing. The band still stands where the window needs a drag
-    // lane; the shell decides whether it may fold away.
-    const headingEmpty =
-        !local.onBack &&
-        !local.brand &&
-        local.title === undefined &&
-        !local.subtitle &&
-        !local.headerTrailing;
     return (
         <nav
             {...rest}
             className={["happy-sidebar", local.className].filter(Boolean).join(" ")}
             data-back={local.onBack ? "" : undefined}
-            data-heading-empty={headingEmpty ? "" : undefined}
             data-happy-desktop-ui="sidebar"
+            data-scrolled={scrolled ? "" : undefined}
             style={local.style}
         >
             <header className="happy-sidebar__header" data-happy-desktop-ui="sidebar-header">
@@ -2075,7 +2140,45 @@ export function Sidebar(props: SidebarProps) {
                         {local.headerTrailing}
                     </div>
                 ) : null}
+                {local.headerAction ? (
+                    <button
+                        aria-label={local.headerAction.label}
+                        className="happy-sidebar__header-action"
+                        data-happy-desktop-ui="sidebar-header-action"
+                        disabled={local.headerAction.disabled}
+                        onClick={local.onHeaderAction}
+                        title={local.headerAction.label}
+                        type="button"
+                    >
+                        <Icon name={local.headerAction.icon} size={16} />
+                    </button>
+                ) : null}
             </header>
+            {local.search ? (
+                // Escape empties a search that holds anything, which puts the
+                // sidebar's usual contents back.
+                <div
+                    className="happy-sidebar__search"
+                    data-happy-desktop-ui="sidebar-search"
+                    onKeyDown={(event) => {
+                        if (event.key !== "Escape" || !local.search?.value) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        local.search.onValueChange("");
+                    }}
+                >
+                    <TextField
+                        aria-label={local.search.placeholder}
+                        fullWidth
+                        leadingIcon="search"
+                        onValueChange={local.search.onValueChange}
+                        placeholder={local.search.placeholder}
+                        size="small"
+                        type="search"
+                        value={local.search.value}
+                    />
+                </div>
+            ) : null}
             {local.headerAccessory ? (
                 <div
                     className="happy-sidebar__header-accessory"
@@ -2089,6 +2192,9 @@ export function Sidebar(props: SidebarProps) {
                 data-happy-desktop-ui="sidebar-body"
                 data-scrollbar-rows=""
                 viewportClassName="happy-sidebar__body-viewport"
+                viewportProps={{
+                    onScroll: (event) => setScrolled(event.currentTarget.scrollTop > 0),
+                }}
             >
                 <div
                     className="happy-sidebar__body-content"

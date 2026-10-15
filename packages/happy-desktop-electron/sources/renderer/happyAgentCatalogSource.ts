@@ -363,6 +363,10 @@ function conversationProject(session: GroupSession): HappyAgentConversationSumma
         ...(serviceTier ? { serviceTier } : {}),
         status: session.status as HappyAgentSessionStatus,
         activeSubagentCount: session.activeSubagents,
+        ...(session.subtaskActivity === undefined
+            ? {}
+            : { subtaskActivity: session.subtaskActivity }),
+        pendingQuestion: session.pendingQuestion,
         ...(session.wait === undefined
             ? {}
             : { wait: { startedAt: session.wait.startedAt, dueAt: session.wait.dueAt } }),

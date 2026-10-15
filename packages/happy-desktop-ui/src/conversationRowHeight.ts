@@ -3,7 +3,9 @@ import {
     type AgentTurnTraceSummary,
     type ConversationEntry,
     type ConversationErrorAssistance,
+    type ConversationMediaItem,
     type ConversationRequest,
+    type HappyReference,
 } from "happy-desktop-state";
 import {
     conversationAgentRowStartsGroup,
@@ -28,6 +30,7 @@ import {
     type MessageTextLayoutCache,
 } from "./messageTextLayout";
 import {
+    messageReferencesNamed,
     messageReferencesResolve,
     messageReferencesSignature,
     type MessageReferences,
@@ -36,6 +39,13 @@ import { SYSTEM_NOTIFICATION_HEIGHT } from "./systemNotification";
 import { agentTraceMetaStats, agentTraceMetaTitle } from "./agentTraceMeta";
 import { conversationErrorTitle } from "./conversationErrorTitle";
 import { conversationErrorAssistanceText } from "./conversationErrorAssistanceText";
+import {
+    MEDIA_SINGLE_MAX_W,
+    MESSAGE_MEDIA_MAX,
+    mediaMosaicLayout,
+    messageMediaSingleBox,
+    type MediaMosaicImage,
+} from "./mediaMosaic";
 
 /**
  * Height of one conversation row, computed from the entry and the list's measure
@@ -119,6 +129,48 @@ function rowHeightCached(
     cachedEntry.variants[key] = { value };
     return value;
 }
+const NO_REFERENCES: readonly HappyReference[] = [];
+/* The references each entry's laid-out body names. An entry is immutable, so
+   its parse lives exactly as long as the entry does. */
+const entryReferences = new WeakMap<ConversationEntry, readonly HappyReference[]>();
+function conversationEntryReferences(entry: ConversationEntry): readonly HappyReference[] {
+    const text =
+        entry.kind === "message"
+            ? entry.message.text
+            : entry.kind === "agentActivity" &&
+                (entry.activity.kind === "reasoning" || entry.activity.kind === "agentMessage")
+              ? entry.activity.text
+              : undefined;
+    if (text === undefined) return NO_REFERENCES;
+    let named = entryReferences.get(entry);
+    if (!named) {
+        named = messageReferencesNamed(text);
+        entryReferences.set(entry, named);
+    }
+    return named;
+}
+/**
+ * What every reference the rows of `entries` are laid out with reads as now,
+ * once per distinct reference. Row heights read nothing else from
+ * `MessageReferences`, so this changes when one of those titles does, or a
+ * reference is named for the first time — not on every new `references`
+ * object an owner happens to be handed.
+ */
+export function conversationReferencesSignature(
+    entries: readonly ConversationEntry[],
+    references: MessageReferences | undefined,
+): string {
+    const seen = new Set<string>();
+    let signature = "";
+    for (const entry of entries)
+        for (const reference of conversationEntryReferences(entry)) {
+            const key = `${reference.kind}/${reference.id}/${String(reference.version)}/${reference.workspaceId ?? ""}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            signature += `${key}\u0000${messageReferencesSignature([reference], references)}\u0000`;
+        }
+    return signature;
+}
 /**
  * `--happy-chat-measure`. Both surfaces centre their scrolling column at this
  * readable measure — `.happy-conversation` in `conversation.css`, and
@@ -165,23 +217,9 @@ const GROUPED_TRAILING_META_SEPARATOR = 2;
 /** Gaps around the optional two-pixel separator inside trace metadata. */
 const TRACE_META_GAPS = 12;
 const TRACE_META_SEPARATOR = 2;
-/** `.happy-message__media` — top margin, inter-tile gap, and its own cap. */
-const MEDIA_GAP = 4;
+/** `.happy-message__media` — its top margin under a body, and without one. */
 const MEDIA_MARGIN = 8;
 const MEDIA_MARGIN_BARE = 4;
-const MEDIA_MAX_WIDTH = 420;
-const MEDIA_SINGLE_MAX_W = 380;
-const MEDIA_SINGLE_MAX_H = 320;
-/**
- * The narrowest a lone photo is drawn once its height is capped. A page-tall
- * screenshot scaled whole would arrive as an unreadable 90px sliver, so past this
- * ratio the box keeps a usable width and the image crops — the click that opens
- * it full size is right there.
- */
-const MEDIA_SINGLE_MIN_W = 240;
-/** Box for a lone image whose format hid its dimensions: 240 × 4:3. */
-const MEDIA_FALLBACK_W = 240;
-const MEDIA_FALLBACK_H = 180;
 /** Linked attachment cards: 64px cards, 4px gaps, and the message slot's top inset. */
 const ATTACHMENT_CARD_HEIGHT = 64;
 const ATTACHMENT_CARD_GAP = 4;
@@ -245,52 +283,75 @@ export function contentWidth(width: number): number {
     return Math.min(width, CHAT_MEASURE);
 }
 /**
- * The box a lone photo is drawn in, from its intrinsic pixel size alone.
- *
- * Scaling down is the only transform: an image smaller than the cap keeps its own
- * size rather than being blown up past its detail. Larger, it scales to
- * `MEDIA_SINGLE_MAX_W`, and if that leaves it taller than `MEDIA_SINGLE_MAX_H` the
- * height is capped — by scaling further down, or, once that would take the width
- * below `MEDIA_SINGLE_MIN_W`, by holding that width and letting the painted image
- * crop into it. This is the single source of that arithmetic: `Message` styles the
- * element with it and this module reserves the row for it, and the two disagreeing
- * is a visible jump the moment the image loads.
- */
-export function messageMediaSingleBox(image: {
-    readonly width?: number;
-    readonly height?: number;
-}): { readonly width: number; readonly height: number } {
-    if (!image.width || !image.height) return { width: MEDIA_FALLBACK_W, height: MEDIA_FALLBACK_H };
-    const ratio = image.width / image.height;
-    const width = Math.min(image.width, MEDIA_SINGLE_MAX_W);
-    const height = width / ratio;
-    if (height <= MEDIA_SINGLE_MAX_H)
-        return { width: Math.round(width), height: Math.round(height) };
-    return {
-        width: Math.round(
-            Math.min(Math.max(MEDIA_SINGLE_MAX_H * ratio, MEDIA_SINGLE_MIN_W), width),
-        ),
-        height: MEDIA_SINGLE_MAX_H,
-    };
-}
-/**
- * Painted height of a message's image grid. A lone photo reserves the exact box
- * `messageMediaSingleBox` computes; a 2–4 tile grid is two square columns. An own
- * message's grid uses the same capped content measure, so this arithmetic is
- * also the height the virtual row reserves.
+ * Painted height of a message's photos: at most four, laid out by
+ * `mediaMosaicLayout` at the width the message's content column gives them,
+ * which is also what `Message` paints.
  */
 function mediaHeight(
-    images: readonly { readonly width?: number; readonly height?: number }[],
+    images: readonly MediaMosaicImage[],
     measure: number,
     hasBody: boolean,
 ): number {
     const margin = hasBody ? MEDIA_MARGIN : MEDIA_MARGIN_BARE;
-    const count = Math.min(images.length, 4);
-    if (count === 1) return margin + messageMediaSingleBox(images[0]!).height;
-    const column = (Math.min(measure, MEDIA_MAX_WIDTH) - MEDIA_GAP) / 2;
-    const rows = Math.ceil(count / 2);
-    return margin + rows * column + (rows - 1) * MEDIA_GAP;
+    return margin + mediaMosaicLayout(images.slice(0, MESSAGE_MEDIA_MAX), measure).height;
 }
+/**
+ * `.happy-conversation-media`: the blocks a tool call's presented files stack
+ * into, the gap between them, and the 8px gap that separates them from the
+ * call's own line.
+ */
+const TOOL_MEDIA_GAP = 8;
+/** A file or document presented by a tool is one 64px `ResultCard`. */
+const RESULT_CARD_HEIGHT = 64;
+/** A recording whose producer stated no frame size takes a 16:9 box at the photo cap. */
+const MEDIA_VIDEO_FALLBACK_W = MEDIA_SINGLE_MAX_W;
+const MEDIA_VIDEO_FALLBACK_H = Math.round((MEDIA_SINGLE_MAX_W * 9) / 16);
+
+/** The box an inline recording is drawn in: its own frame like a photo, or 16:9. */
+export function conversationMediaVideoBox(item: {
+    readonly width?: number;
+    readonly height?: number;
+}): { readonly width: number; readonly height: number } {
+    if (!item.width || !item.height)
+        return { width: MEDIA_VIDEO_FALLBACK_W, height: MEDIA_VIDEO_FALLBACK_H };
+    return messageMediaSingleBox(item);
+}
+
+/**
+ * Painted height of the files one tool call presented, laid out the way
+ * `ConversationMedia` lays them out: every image together first, as one
+ * `mediaMosaicLayout`, then each recording at its frame, then one card per
+ * document or file.
+ */
+export function conversationMediaHeight(
+    items: readonly ConversationMediaItem[],
+    measure: number,
+): number {
+    const images = items.filter((item) => item.kind === "image");
+    const blocks: number[] = [];
+    if (images.length > 0) blocks.push(mediaMosaicLayout(images, measure).height);
+    for (const item of items)
+        if (item.kind === "video") blocks.push(conversationMediaVideoBox(item).height);
+        else if (item.kind !== "image") blocks.push(RESULT_CARD_HEIGHT);
+    if (blocks.length === 0) return 0;
+    return blocks.reduce((total, block) => total + block, 0) + (blocks.length - 1) * TOOL_MEDIA_GAP;
+}
+
+/**
+ * What a tool call's result adds beneath its line, from its presentation
+ * alone: presented files, or the card for the artifact it published. Zero for
+ * every other call, which stays one line.
+ */
+function toolResultHeight(entry: ConversationEntry, measure: number): number {
+    if (entry.kind !== "agentActivity" || entry.activity.kind !== "tool") return 0;
+    const tool = entry.activity.tool;
+    const presentation = tool.presentation;
+    if (presentation?.type === "media" && presentation.items.length > 0)
+        return TOOL_MEDIA_GAP + conversationMediaHeight(presentation.items, measure);
+    if (presentation?.type === "artifact") return TOOL_MEDIA_GAP + RESULT_CARD_HEIGHT;
+    return 0;
+}
+
 /** Which of the three author treatments a message row takes. */
 export type MessageTreatment = "agent" | "incoming" | "own";
 /**
@@ -344,14 +405,23 @@ export function steeringNoticeRowHeight(
         STEERING_QUOTE_MARGIN
     );
 }
-/** Height of a message's image grid at the measure its treatment leaves it. */
+/**
+ * The width a message's content column has, which its photos are laid out in:
+ * the row padding alone, before any bubble cap. An agent's body has no bubble,
+ * so its column is its body measure.
+ */
+function messageContentMeasure(width: number, treatment: MessageTreatment): number {
+    if (treatment === "agent") return width - AGENT_INSET;
+    return width - (treatment === "incoming" ? INCOMING_INSET : OWN_INSET);
+}
+/** Height of a message's photos at the measure its treatment leaves them. */
 export function messageMediaHeight(
-    images: readonly { readonly width?: number; readonly height?: number }[],
+    images: readonly MediaMosaicImage[],
     width: number,
     treatment: MessageTreatment,
     hasBody: boolean,
 ): number {
-    return mediaHeight(images, messageBodyMeasure(width, treatment, ""), hasBody);
+    return mediaHeight(images, messageContentMeasure(width, treatment), hasBody);
 }
 /**
  * Height of a message row: its chrome for the author treatment and grouping,
@@ -541,49 +611,61 @@ export function conversationRowHeight(
         const activityInset = startsGroup
             ? AGENT_INSET
             : ACTIVITY_ROW_INSET[context.activityTreatment ?? "detailed"];
-        const activityHeight =
-            entry.activity.kind === "shell"
-                ? expanded && entry.activity.output.trim().length > 0
-                    ? SHELL_ACTIVITY_CHROME +
-                      monoOutputTextHeight(
-                          entry.activity.output,
-                          width - activityInset - SHELL_ACTIVITY_OUTPUT_INSET,
-                          cache?.text,
-                          entry.activity.running,
-                      )
-                    : ACTIVITY_HEIGHT.reasoning
-                : entry.activity.kind === "reasoning" && expanded
-                  ? REASONING_ACTIVITY_CHROME +
-                    markdownBodyHeight(
-                        messageReferencesResolve(entry.activity.text, context.references, false),
-                        width - activityInset - 16,
-                        cache?.text,
-                        0,
-                        true,
-                        entry.activity.streaming,
-                    )
-                  : entry.activity.kind === "agentMessage" && expanded
-                    ? AGENT_MESSAGE_ACTIVITY_CHROME +
-                      markdownBodyHeight(
-                          messageReferencesResolve(entry.activity.text, context.references, false),
-                          width - activityInset - 16,
-                          cache?.text,
-                      )
-                    : conversationActivityHeight(entry.activity.kind);
+        /* The output and body are laid out only on a miss: on a hit, the entry
+           and everything its height reads are already in the key. */
         return rowHeightCached(
             cache,
             entry,
-            `activity:${context.surface}:${context.activityTreatment ?? "detailed"}:${String(width)}:${expanded ? "expanded" : "collapsed"}:${startsGroup ? "lead" : "plain"}:${
-                entry.activity.kind === "reasoning" || entry.activity.kind === "agentMessage"
-                    ? messageReferencesSignature(entry.activity.text, context.references)
-                    : ""
-            }`,
-            () =>
-                activityHeight === undefined
-                    ? undefined
-                    : startsGroup
-                      ? ACTIVITY_LEAD_CHROME + ACTIVITY_LEAD_RUN_SEPARATION + activityHeight
-                      : activityHeight,
+            `activity:${context.surface}:${context.activityTreatment ?? "detailed"}:${String(width)}:${expanded ? "expanded" : "collapsed"}:${startsGroup ? "lead" : "plain"}:${messageReferencesSignature(
+                conversationEntryReferences(entry),
+                context.references,
+            )}`,
+            () => {
+                const activityHeight =
+                    entry.activity.kind === "shell"
+                        ? expanded && entry.activity.output.trim().length > 0
+                            ? SHELL_ACTIVITY_CHROME +
+                              monoOutputTextHeight(
+                                  entry.activity.output,
+                                  width - activityInset - SHELL_ACTIVITY_OUTPUT_INSET,
+                                  cache?.text,
+                                  entry.activity.running,
+                              )
+                            : ACTIVITY_HEIGHT.reasoning
+                        : entry.activity.kind === "reasoning" && expanded
+                          ? REASONING_ACTIVITY_CHROME +
+                            markdownBodyHeight(
+                                messageReferencesResolve(
+                                    entry.activity.text,
+                                    context.references,
+                                    false,
+                                ),
+                                width - activityInset - 16,
+                                cache?.text,
+                                0,
+                                true,
+                                entry.activity.streaming,
+                            )
+                          : entry.activity.kind === "agentMessage" && expanded
+                            ? AGENT_MESSAGE_ACTIVITY_CHROME +
+                              markdownBodyHeight(
+                                  messageReferencesResolve(
+                                      entry.activity.text,
+                                      context.references,
+                                      false,
+                                  ),
+                                  width - activityInset - 16,
+                                  cache?.text,
+                              )
+                            : entry.activity.kind === "tool"
+                              ? ACTIVITY_HEIGHT.tool +
+                                toolResultHeight(entry, width - activityInset)
+                              : conversationActivityHeight(entry.activity.kind);
+                if (activityHeight === undefined) return undefined;
+                return startsGroup
+                    ? ACTIVITY_LEAD_CHROME + ACTIVITY_LEAD_RUN_SEPARATION + activityHeight
+                    : activityHeight;
+            },
         );
     }
     /* A settled footer owns the clearance above it when prior activity exists. */
@@ -709,7 +791,7 @@ export function conversationRowHeight(
         resumesAfterActivity ? "resumed" : "continuous",
         precedesActivity ? "continues" : closedByStatus ? "closing" : "open",
         // What the body's references read as: a title changing re-sizes the row.
-        messageReferencesSignature(message.text, context.references),
+        messageReferencesSignature(conversationEntryReferences(entry), context.references),
     ].join(":");
     return rowHeightCached(cache, entry, cacheKey, () => {
         const time = messageTimeSample(message.createdAt);
@@ -746,14 +828,17 @@ export function conversationRowHeight(
                 (grouped
                     ? CONVERSATION_AGENT_PADDING_BOTTOM.grouped
                     : CONVERSATION_AGENT_PADDING_BOTTOM.leading);
-        const images: { readonly width?: number; readonly height?: number }[] = [];
+        const images: MediaMosaicImage[] = [];
         let cards = 0;
         for (const attachment of message.attachments) {
-            if (
-                attachment.kind === "inlineImage" ||
-                (attachment.attachmentKind === "image" && attachment.openUrl !== undefined)
-            ) {
+            if (attachment.kind === "inlineImage") {
                 images.push({ width: attachment.width, height: attachment.height });
+            } else if (attachment.attachmentKind === "image" && attachment.openUrl !== undefined) {
+                images.push({
+                    width: attachment.width,
+                    height: attachment.height,
+                    ...(attachment.thumbhash ? { thumbhash: attachment.thumbhash } : {}),
+                });
             } else {
                 cards += 1;
             }

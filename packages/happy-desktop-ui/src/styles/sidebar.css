@@ -120,6 +120,57 @@
     min-width: 0;
 }
 
+/* The heading's own control: the same 28px box, radius, and tone as the
+   shell's collapse control it sits beside, so the two read as one pair. */
+.happy-sidebar__header-action {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 28px;
+    height: 28px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--header-tint-secondary);
+    cursor: pointer;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+
+.happy-sidebar__header-action:hover:not(:disabled) {
+    background: var(--surface-pressed);
+    color: var(--text);
+}
+
+.happy-sidebar__header-action:focus-visible {
+    outline: 2px solid var(--surface-selected);
+    outline-offset: 1px;
+}
+
+.happy-sidebar__header-action:disabled {
+    cursor: default;
+    opacity: 0.4;
+}
+
+/* The search field sits on the rows' own inset, so its edges line up with a
+   row's highlight below it; the body's top inset is the gap under it. It stands
+   on a surface of its own so it reads against the sidebar. */
+.happy-sidebar__search {
+    display: flex;
+    flex: none;
+    min-width: 0;
+    padding: 0 var(--happy-panel-inset);
+}
+
+.happy-sidebar__search .happy-text-field__control {
+    border-color: var(--sidebar-search-border);
+    background: var(--sidebar-search-background);
+}
+
 .happy-sidebar__header-trailing {
     display: flex;
     flex: 0 1 auto;
@@ -173,7 +224,12 @@
     outline-offset: -2px;
 }
 
+/* A drill-down title names a place, not user content, so it never truncates:
+   the column's minimum width already holds it past the traffic lights' safe
+   area. */
 .happy-sidebar__title--back {
+    flex: none;
+    overflow: visible;
     font-weight: 700;
 }
 
@@ -223,6 +279,30 @@
 .happy-sidebar__body {
     flex: 1;
     min-height: 0;
+}
+
+/* No line between the header and the list. Once rows scroll under the header,
+   a short fade in the sidebar's own tone takes the edge instead; at the top
+   there is nothing. Masked rather than a gradient to transparent, which would
+   tint grey (see .happy-floating-dock__scrim). */
+.happy-sidebar__body::before {
+    content: "";
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 16px;
+    background: var(--groupped-background);
+    -webkit-mask-image: linear-gradient(to bottom, black, transparent);
+    mask-image: linear-gradient(to bottom, black, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease;
+}
+
+.happy-sidebar[data-scrolled] > .happy-sidebar__body::before {
+    opacity: 1;
 }
 
 .happy-sidebar__body-viewport {
@@ -706,10 +786,15 @@
     pointer-events: none;
 }
 
-/* Accent-tinted, so a row whose agent is deliberately doing nothing still stands
-   apart from an idle one without the spinner's claim that work is happening. */
+/* A wait is the same quiet report as the working spinner, in the spinner's own
+   muted ink; only the motion is gone. A question is the one thing here that
+   needs the reader, so it is the one mark in red. */
 .happy-sidebar__item-activity[data-activity="waiting"] {
-    color: var(--text-link);
+    color: var(--text-secondary);
+}
+
+.happy-sidebar__item-activity[data-activity="awaitingInput"] {
+    color: var(--status-error);
 }
 
 .happy-sidebar__item-activity[data-activity="failed"] {
@@ -1018,7 +1103,9 @@
     .happy-sidebar__item-change-stats
     > [data-tone],
 .happy-sidebar__item:hover .happy-sidebar__item-trailing[data-swaps] .happy-sidebar__item-activity,
-.happy-sidebar__item-trailing[data-swaps]:focus-within .happy-sidebar__item-activity {
+.happy-sidebar__item-trailing[data-swaps]:focus-within .happy-sidebar__item-activity,
+.happy-sidebar__item:hover .happy-sidebar__item-trailing[data-swaps] .happy-sidebar__item-count,
+.happy-sidebar__item-trailing[data-swaps]:focus-within .happy-sidebar__item-count {
     visibility: hidden;
 }
 
@@ -1049,6 +1136,21 @@
     line-height: 16px;
     text-overflow: ellipsis;
     white-space: nowrap;
+    transform: translateY(var(--happy-sidebar-meta-optical-y, 0px));
+}
+
+/* A count of what is open in the row reads as quietly as its meta, in figures
+   that keep their width as the number changes. It is the first mark in the
+   trailing lane, so at rest it ends the row on the column the other rows' marks
+   end on, and a control laid over the lane covers it. */
+.happy-sidebar__item-count {
+    display: block;
+    flex: none;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    line-height: 16px;
     transform: translateY(var(--happy-sidebar-meta-optical-y, 0px));
 }
 

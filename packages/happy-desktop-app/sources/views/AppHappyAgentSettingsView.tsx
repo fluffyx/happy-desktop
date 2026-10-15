@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from "react";
 import type {
     AppearanceStore,
+    HappyAgentChangeTiersSnapshot,
+    HappyAgentChangeTiersStore,
     ExperimentsStore,
     ProjectsVisibilityStore,
     GptLiveStore,
@@ -23,6 +25,7 @@ import type {
     UsageAnalyticsStore,
 } from "happy-desktop-state";
 import {
+    HAPPY_AGENT_CHANGE_TIERS_MAX,
     HAPPY_AGENT_INSTRUCTIONS_MAX_BYTES,
     HAPPY_AGENT_SECURITY_POLICY_MAX_BYTES,
     happyAgentModelKey,
@@ -52,6 +55,7 @@ import {
     HappyAgentGeneralSettings,
     HappyAgentDebugLogPanel,
     HappyAgentDebugSettings,
+    HappyAgentFileTierSettings,
     HappyAgentInstructionsSettings,
     HappyAgentMobileSettings,
     HappyAgentProviderSettings,
@@ -77,6 +81,8 @@ export const HAPPY_AGENT_SETTINGS_CATEGORIES: readonly HappyAgentSettingsCategor
     { icon: "settings", id: "general", label: "General" },
     // Local author identity and the optional WorkOS account share one category.
     { icon: "users", id: "account", label: "Account" },
+    // How each project's changes are split into tiers in the Changes listing.
+    { icon: "file-diff", id: "file-tiers", label: "File tiers" },
     { icon: "doc", id: "instructions", label: "Instructions" },
     { icon: "lock", id: "secrets", label: "Secrets" },
     { icon: "globe", id: "providers", label: "Providers" },
@@ -277,6 +283,7 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
     general: "How this window looks and what a new session starts with",
     "mobile-access": "This Happy Agent's connection to Happy Mobile",
     account: "Local author identity and Happy account connection",
+    "file-tiers": "Which changed files every project lists apart, below the rest of a change",
     instructions: "Machine-wide agent guidance and permission-review policy",
     secrets: "Write-only environment bundles this Happy Agent can provide to agents",
     providers: "Every model provider this Happy Agent daemon knows about",
@@ -518,6 +525,14 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
         clockStore?.get ?? clockStopped,
         clockStore?.get ?? clockStopped,
     );
+    // Tiers are one list for the window, remembered by the host's workspace;
+    // every machine's Changes is split by these.
+    const changeTiersStore = host?.session?.workspace.changeTiers;
+    const changeTiers = useSyncExternalStore(
+        changeTiersStore?.subscribe ?? noSubscribe,
+        changeTiersStore?.get ?? changeTiersNone,
+        changeTiersStore?.get ?? changeTiersNone,
+    );
     const windowStateStore = props.windowState ?? happyAgentWindowStoreNoop;
     const windowState = useSyncExternalStore(
         windowStateStore.subscribe,
@@ -724,9 +739,33 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                             if (happyAgentOnline()) void profileStore.profileSave();
                         }}
                         saving={profile.saving}
-                        {...(profile.photo === undefined
+                        // Photo changes are not held back while the Happy Agent
+                        // looks offline: picking and cropping are local, and a
+                        // send that cannot reach it says so in the dialog.
+                        onPhotoChoose={(file) => void profileStore.photoChoose(file)}
+                        onPhotoCropCancel={() => profileStore.photoCropCancel()}
+                        onPhotoCropConfirm={(region) => void profileStore.photoCropConfirm(region)}
+                        onPhotoRemove={() => void profileStore.photoRemove()}
+                        photoRemoving={profile.photoActivity === "removing"}
+                        photoUploading={profile.photoActivity === "uploading"}
+                        {...(profile.photo === undefined ? {} : { photo: profile.photo })}
+                        // While a crop is open its dialog says why a send failed.
+                        {...(profile.photoCrop
+                            ? {
+                                  photoCrop: {
+                                      source: profile.photoCrop,
+                                      saving: profile.photoActivity === "uploading",
+                                      ...(profile.photoError ? { error: profile.photoError } : {}),
+                                  },
+                              }
+                            : profile.photoError
+                              ? { photoError: profile.photoError }
+                              : {})}
+                        // A team member's first save is what creates them, and
+                        // a photo belongs to someone who already exists.
+                        {...(profile.saved
                             ? {}
-                            : { imageUrl: profile.photo.imageUrl })}
+                            : { photoUnavailable: "Save your name first, then add a photo" })}
                         {...(profile.error ? { error: profile.error.message } : {})}
                         {...(profile.saveError ? { saveError: profile.saveError } : {})}
                         {...(unavailable === undefined ? {} : { unavailable })}
@@ -747,6 +786,8 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                         {...(unavailable === undefined ? {} : { unavailable })}
                     />
                 </>
+            ) : section === "file-tiers" ? (
+                fileTierSettings(changeTiers, changeTiersStore, unavailable)
             ) : section === "instructions" ? (
                 <HappyAgentInstructionsSettings
                     documents={[
@@ -1083,6 +1124,36 @@ const INSTRUCTIONS_PATH = "~/Happy/Config/AGENTS.md";
 const SECURITY_POLICY_PATH = "~/Happy/Config/SECURITY.md";
 
 const noSubscribe = () => () => undefined;
+const changeTiersEmpty: HappyAgentChangeTiersSnapshot = { tiers: [] };
+const changeTiersNone = (): HappyAgentChangeTiersSnapshot => changeTiersEmpty;
+
+/**
+ * The File tiers category: the window's one list of tiers, as cards. The tiers
+ * are kept on this machine, so they stay editable while the host reconnects;
+ * only a host with no workspace yet leaves nothing to edit.
+ */
+function fileTierSettings(
+    snapshot: HappyAgentChangeTiersSnapshot,
+    store: HappyAgentChangeTiersStore | undefined,
+    unavailable: string | undefined,
+) {
+    return (
+        <HappyAgentFileTierSettings
+            canAdd={store !== undefined && snapshot.tiers.length < HAPPY_AGENT_CHANGE_TIERS_MAX}
+            onTierAdd={() => store?.tierAdd()}
+            onTierMove={(tierId, direction) => store?.tierMove(tierId, direction)}
+            onTierNameChange={(tierId, name) => store?.tierNameUpdate(tierId, name)}
+            onTierPatternsChange={(tierId, patterns) => store?.tierPatternsUpdate(tierId, patterns)}
+            onTierRemove={(tierId) => store?.tierRemove(tierId)}
+            tiers={snapshot.tiers.map((tier) => ({
+                id: tier.id,
+                name: tier.name,
+                patterns: tier.patterns,
+            }))}
+            {...(store === undefined && unavailable !== undefined ? { unavailable } : {})}
+        />
+    );
+}
 const UNLOADED = { type: "loading" } as const;
 const modelsUnloaded = () => UNLOADED;
 /** Stands in while no Happy Agent on this machine is connected to read the time from. */

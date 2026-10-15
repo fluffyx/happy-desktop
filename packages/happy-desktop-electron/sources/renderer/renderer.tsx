@@ -32,6 +32,7 @@ import {
     welcomeStoreCreate,
     happyAgentNavigationOrderStoreCreate,
     happyAgentSidebarCollapseStoreCreate,
+    happyAgentSidebarSearchStoreCreate,
     happyAgentSidebarVisibilityStoreCreate,
     happyAgentSettingsStoreCreate,
     type AppearanceStore,
@@ -44,6 +45,7 @@ import {
     type WelcomeStore,
     type HappyAgentNavigationOrderStore,
     type HappyAgentSidebarCollapseStore,
+    type HappyAgentSidebarSearchStore,
     type HappyAgentSidebarVisibilityStore,
     type HappyAgentSettingsStore,
     type TitleShimmerStore,
@@ -61,6 +63,7 @@ import {
     ZoomIndicator,
     ConnectionShell,
     ConnectionSurface,
+    happyAgentSurfaceBackdropsPreload,
     type BrowserContentRenderer,
     type HtmlPreviewRenderer,
     type LivePerformanceStore,
@@ -78,6 +81,8 @@ import {
 } from "../shared/desktopContract";
 import { desktopStartRequestFromValues, desktopStartupValues } from "./desktopStartupModel";
 import { dockUnreadPublish } from "./dockUnread";
+import { completionChimePlay } from "./completionChime";
+import { happyAgentDirectoryListed, happyAgentListedConversations } from "./happyAgentListed";
 import { happyAgentDirectoryAgentWorking, keepAwakePublish } from "./keepAwake";
 import { desktopRuntimeStoreCreate, type DesktopRuntimeStore } from "./runtimeStore";
 import {
@@ -312,6 +317,7 @@ function HappyAgentBoundary(props: {
     router: HappyAgentRouter;
     navigationOrder: HappyAgentNavigationOrderStore;
     sidebarCollapse: HappyAgentSidebarCollapseStore;
+    sidebarSearch: HappyAgentSidebarSearchStore;
     sidebarVisibility: HappyAgentSidebarVisibilityStore;
     happyAgents: HappyAgentDirectoryStore;
     settings: HappyAgentSettingsStore;
@@ -361,6 +367,7 @@ function HappyAgentBoundary(props: {
                 keepAwake: props.keepAwake,
                 navigationOrder: props.navigationOrder,
                 sidebarCollapse: props.sidebarCollapse,
+                sidebarSearch: props.sidebarSearch,
                 sidebarVisibility: props.sidebarVisibility,
                 platform: props.platform,
                 happyAgents: props.happyAgents,
@@ -483,6 +490,7 @@ interface DesktopRendererProps {
     keepAwake: KeepAwakeStore;
     navigationOrder: HappyAgentNavigationOrderStore;
     sidebarCollapse: HappyAgentSidebarCollapseStore;
+    sidebarSearch: HappyAgentSidebarSearchStore;
     sidebarVisibility: HappyAgentSidebarVisibilityStore;
     platform: "desktop" | "web";
     happyAgentRouter: HappyAgentRouter;
@@ -558,15 +566,15 @@ function DesktopScreens(props: DesktopRendererProps) {
         props.happyAgents.get,
         props.happyAgents.get,
     );
-    const windowState = useSyncExternalStore(
-        props.windowState.subscribe,
-        props.windowState.get,
-        props.windowState.get,
-    );
     const sidebarVisibility = useSyncExternalStore(
         props.sidebarVisibility.subscribe,
         props.sidebarVisibility.get,
         props.sidebarVisibility.get,
+    );
+    const projectsVisibility = useSyncExternalStore(
+        props.projectsVisibility.subscribe,
+        props.projectsVisibility.get,
+        props.projectsVisibility.get,
     );
     const main = props.connectionUis.get(LOCAL_HAPPY_AGENT_ID);
     const surfaceWindowState = props.surfaceWindowState;
@@ -574,37 +582,23 @@ function DesktopScreens(props: DesktopRendererProps) {
     // usable, and the update is told on a card in the local sidebar's footer.
     return (
         <ConnectionShell
-            items={directory.happyAgents.map((entry) => ({
-                id: entry.id,
-                // The rail names a machine the way its own daemon does. The
-                // host's roster name stands in until that daemon has answered.
-                label: entry.node?.name ?? entry.label,
-                local: entry.id === LOCAL_HAPPY_AGENT_ID,
-                status: entry.status,
-                working:
-                    entry.bots.some((bot) => bot.conversation.activity === "running") ||
-                    entry.projects.some(
-                        (project) =>
-                            project.conversations.some(
-                                (conversation) => conversation.activity === "running",
-                            ) ||
-                            project.worktrees.some((worktree) =>
-                                worktree.conversations.some(
-                                    (conversation) => conversation.activity === "running",
-                                ),
-                            ),
-                    ),
-                unread:
-                    entry.bots.some((bot) => bot.conversation.unread) ||
-                    entry.projects.some(
-                        (project) =>
-                            project.conversations.some((conversation) => conversation.unread) ||
-                            project.worktrees.some((worktree) =>
-                                worktree.conversations.some((conversation) => conversation.unread),
-                            ),
-                    ),
-                ...(entry.node?.avatar ? { avatar: entry.node.avatar } : {}),
-            }))}
+            items={directory.happyAgents.map((entry) => {
+                // Only what this window's sidebar lists can spin the tile or
+                // light its dot, the same set the Dock counts and the chime
+                // speaks for.
+                const listed = happyAgentListedConversations(entry, projectsVisibility);
+                return {
+                    id: entry.id,
+                    // The rail names a machine the way its own daemon does. The
+                    // host's roster name stands in until that daemon has answered.
+                    label: entry.node?.name ?? entry.label,
+                    local: entry.id === LOCAL_HAPPY_AGENT_ID,
+                    status: entry.status,
+                    working: listed.some((conversation) => conversation.activity === "running"),
+                    unread: listed.some((conversation) => conversation.unread),
+                    ...(entry.node?.avatar ? { avatar: entry.node.avatar } : {}),
+                };
+            })}
             selectedId={directory.activeHappyAgentId ?? LOCAL_HAPPY_AGENT_ID}
             onSelect={props.happyAgents.happyAgentActivate}
             onReorder={
@@ -616,7 +610,7 @@ function DesktopScreens(props: DesktopRendererProps) {
             }
             reordering={directory.reordering}
             reorderError={directory.reorderError}
-            windowControls={props.platform === "desktop" && !windowState.fullScreen}
+            windowControls={props.platform === "desktop"}
             collapsed={sidebarVisibility.hidden}
             error={directory.error}
         >
@@ -660,6 +654,7 @@ function DesktopScreens(props: DesktopRendererProps) {
                                 mediaWindow={props.mediaWindow}
                                 navigationOrder={ui.navigationOrder}
                                 sidebarCollapse={ui.sidebarCollapse}
+                                sidebarSearch={ui.sidebarSearch}
                                 sidebarVisibility={ui.sidebarVisibility}
                                 platform={props.platform}
                                 router={ui.router}
@@ -879,6 +874,7 @@ function DesktopRuntimeContent(
             usageAnalytics={props.usageAnalytics}
             navigationOrder={props.navigationOrder}
             sidebarCollapse={props.sidebarCollapse}
+            sidebarSearch={props.sidebarSearch}
             sidebarVisibility={props.sidebarVisibility}
             platform={props.platform}
             router={props.happyAgentRouter}
@@ -897,6 +893,9 @@ const browserLocal =
     document.querySelector('meta[name="happy-browser-local"]')?.getAttribute("content") === "1";
 const bridge = window.happyDesktop ?? (browserLocal ? browserDevBridgeCreate() : undefined);
 const root = createRoot(document.getElementById("root")!);
+// A todo list is laid over a picture; fetching and decoding both of them now
+// means opening a list paints its background with it instead of a frame later.
+happyAgentSurfaceBackdropsPreload();
 
 /* The View menu owns zooming, so `bridge` is the only thing that hears of it.
    What is counted is how many times zoom was asked for, not what it came to:
@@ -1046,6 +1045,10 @@ if (mediaPreviewBridge) {
         // folded away. Also the window's own: switching machines does not
         // bring the sidebar back, and the rail beside it goes with it.
         const sidebarVisibility = happyAgentSidebarVisibilityStoreCreate();
+        // What the sidebar's search field holds. Transient like the command
+        // palette below: a search is a question in progress, not a place to
+        // come back to, so nothing is persisted.
+        const sidebarSearch = happyAgentSidebarSearchStoreCreate();
         // Whether this window offers the features that are not finished yet. It
         // is kept beside the arrangement above and for the same reason: it says
         // what this installation shows, so no machine has a say in it.
@@ -1113,6 +1116,20 @@ if (mediaPreviewBridge) {
                     groupId,
                 ),
             activity: (happyAgentId, activity) => analytics.activity(happyAgentId, activity),
+            // A finished turn is announced only for a conversation the sidebar
+            // lists: an unjoined task or a session in hidden projects is out of
+            // sight, and out of earshot with it.
+            sessionFinished: (happyAgentId, sessionId) => {
+                if (
+                    happyAgentDirectoryListed(
+                        happyAgents.get(),
+                        projectsVisibility.get(),
+                        happyAgentId,
+                        sessionId,
+                    )
+                )
+                    completionChimePlay();
+            },
             subtasksForget: (happyAgentId, removed, open) =>
                 happyAgentRouterSubtasksForget(
                     connectionUis.get(happyAgentId)?.router ?? happyAgentRouter,
@@ -1239,6 +1256,7 @@ if (mediaPreviewBridge) {
                                       commandPalette,
                                       navigationOrder,
                                       sidebarCollapse,
+                                      sidebarSearch,
                                   },
                               }
                             : {}),
@@ -1275,7 +1293,9 @@ if (mediaPreviewBridge) {
         // about the screen that happens to be open, so the Dock is marked from
         // the same directory the sidebar reads rather than from any one Happy Agent.
         appDisposers.push(
-            dockUnreadPublish(happyAgents, (count) => desktopBridge.dockUnreadSet(count)),
+            dockUnreadPublish(happyAgents, projectsVisibility, (count) =>
+                desktopBridge.dockUnreadSet(count),
+            ),
         );
         // Whether this computer is held out of sleep is likewise a fact about
         // the whole window: the choice is the window's, and what the agents are
@@ -1327,6 +1347,7 @@ if (mediaPreviewBridge) {
                         keepAwake={keepAwake}
                         navigationOrder={navigationOrder}
                         sidebarCollapse={sidebarCollapse}
+                        sidebarSearch={sidebarSearch}
                         sidebarVisibility={sidebarVisibility}
                         // Only the Electron window hides its title bar; the browser
                         // development server renders the same tree with web chrome.

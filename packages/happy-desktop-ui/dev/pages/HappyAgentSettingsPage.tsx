@@ -1,9 +1,11 @@
+import { useState } from "react";
 import type { HappyAgentProviderUsageEntry } from "happy-desktop-state";
 import {
     DesktopMobileSetup,
     HappyAgentAccountSettings,
     HappyAgentDebugLogPanel,
     HappyAgentDebugSettings,
+    HappyAgentFileTierSettings,
     HappyAgentGeneralSettings,
     HappyAgentInstructionsSettings,
     HappyAgentMobileSettings,
@@ -14,6 +16,8 @@ import {
     HappyAgentSettingsShell,
     GptLiveSettings,
     HappyAgentUsageSettings,
+    type HappyAgentFileTierRow,
+    type HappyAgentProfileSettingsProps,
     type HappyAgentProviderRow,
     type HappyAgentSecretRow,
     type HappyAgentSettingsCategory,
@@ -26,6 +30,7 @@ export const componentNumber = "P-012";
 const categories: readonly HappyAgentSettingsCategory[] = [
     { icon: "settings", id: "general", label: "General" },
     { icon: "users", id: "account", label: "Account" },
+    { icon: "file-diff", id: "file-tiers", label: "File tiers" },
     { icon: "doc", id: "instructions", label: "Instructions" },
     { icon: "lock", id: "secrets", label: "Secrets" },
     { icon: "globe", id: "providers", label: "Providers" },
@@ -394,6 +399,112 @@ const secrets: readonly HappyAgentSecretRow[] = [
 
 const noop = () => undefined;
 
+const fileTiersDescription =
+    "Which changed files every project lists apart, below the rest of a change";
+
+const fileTierRows: readonly HappyAgentFileTierRow[] = [
+    { id: "tests", name: "Tests", patterns: ["*.test.ts", "*.test.tsx"] },
+    { id: "text", name: "Text fixtures", patterns: ["*.text.ts"] },
+    { id: "docs", name: "Docs", patterns: ["docs/", "*.md"] },
+];
+
+/** The File tiers category wired to its own state, so every control answers. */
+function FileTierSettingsSpecimen(props: {
+    detail: string;
+    label: string;
+    number: string;
+    tiers: readonly HappyAgentFileTierRow[];
+}) {
+    const [tiers, tiersSet] = useState(props.tiers);
+    const [added, addedSet] = useState(0);
+    return (
+        <FullScreenSpecimen detail={props.detail} label={props.label} number={props.number}>
+            <HappyAgentSettingsShell
+                activeCategoryId="file-tiers"
+                categories={categories}
+                description={fileTiersDescription}
+                onCategorySelect={noop}
+                onClose={noop}
+                title="File tiers"
+            >
+                <HappyAgentFileTierSettings
+                    onTierAdd={() => {
+                        addedSet(added + 1);
+                        tiersSet([
+                            ...tiers,
+                            { id: `new-${String(added)}`, name: "", patterns: [] },
+                        ]);
+                    }}
+                    onTierMove={(tierId, direction) => {
+                        const index = tiers.findIndex((tier) => tier.id === tierId);
+                        const target = direction === "earlier" ? index - 1 : index + 1;
+                        if (index === -1 || target < 0 || target >= tiers.length) return;
+                        const next = [...tiers];
+                        next[index] = tiers[target]!;
+                        next[target] = tiers[index]!;
+                        tiersSet(next);
+                    }}
+                    onTierNameChange={(tierId, name) =>
+                        tiersSet(
+                            tiers.map((tier) => (tier.id === tierId ? { ...tier, name } : tier)),
+                        )
+                    }
+                    onTierPatternsChange={(tierId, patterns) =>
+                        tiersSet(
+                            tiers.map((tier) =>
+                                tier.id === tierId ? { ...tier, patterns } : tier,
+                            ),
+                        )
+                    }
+                    onTierRemove={(tierId) => tiersSet(tiers.filter((tier) => tier.id !== tierId))}
+                    tiers={tiers}
+                />
+            </HappyAgentSettingsShell>
+        </FullScreenSpecimen>
+    );
+}
+
+/** A generated, fictional portrait standing in for an uploaded profile photo. */
+const profilePhoto = {
+    imageUrl: new URL("../assets/profile-photo.webp", import.meta.url).href,
+    thumbhash: "HfkJRw53iVdwioiHeYZot3iIiAK3CHIJ",
+};
+
+/** One profile state inside the account category, so each photo state reads in place. */
+function ProfileSpecimen(props: {
+    readonly detail: string;
+    readonly label: string;
+    readonly number: string;
+    readonly profile: Partial<HappyAgentProfileSettingsProps>;
+}) {
+    return (
+        <FullScreenSpecimen detail={props.detail} label={props.label} number={props.number}>
+            <HappyAgentSettingsShell
+                activeCategoryId="account"
+                categories={categories}
+                description={accountDescription}
+                onCategorySelect={noop}
+                onClose={noop}
+                title="Account"
+            >
+                <HappyAgentProfileSettings
+                    email="steve@korshakov.com"
+                    name="Steve Korshakov"
+                    onEmailChange={noop}
+                    onNameChange={noop}
+                    onPhotoChoose={noop}
+                    onPhotoCropCancel={noop}
+                    onPhotoCropConfirm={noop}
+                    onPhotoRemove={noop}
+                    onRevert={noop}
+                    onSave={noop}
+                    {...props.profile}
+                />
+            </HappyAgentSettingsShell>
+        </FullScreenSpecimen>
+    );
+}
+
 export function HappyAgentSettingsBlueprintPage() {
     return (
         <ComponentPage
@@ -420,6 +531,10 @@ export function HappyAgentSettingsBlueprintPage() {
                         name="Steve Korshakov"
                         onEmailChange={noop}
                         onNameChange={noop}
+                        onPhotoChoose={noop}
+                        onPhotoCropCancel={noop}
+                        onPhotoCropConfirm={noop}
+                        onPhotoRemove={noop}
                         onRevert={noop}
                         onSave={noop}
                     />
@@ -827,12 +942,66 @@ export function HappyAgentSettingsBlueprintPage() {
                         name="Steve Korshakov"
                         onEmailChange={noop}
                         onNameChange={noop}
+                        onPhotoChoose={noop}
+                        onPhotoCropCancel={noop}
+                        onPhotoCropConfirm={noop}
+                        onPhotoRemove={noop}
                         onRevert={noop}
                         onSave={noop}
                         saveError="Enter the email used for Git commits."
                     />
                 </HappyAgentSettingsShell>
             </FullScreenSpecimen>
+            <ProfileSpecimen
+                detail="A stored photo, read and shown on the avatar, with removal beside the picker"
+                label="Happy Agent settings — profile photo"
+                number="02c"
+                profile={{ photo: profilePhoto }}
+            />
+            <ProfileSpecimen
+                detail="The photo's bytes are still being read: its ThumbHash stands in on the avatar"
+                label="Happy Agent settings — profile photo loading"
+                number="02d"
+                profile={{ photo: { thumbhash: profilePhoto.thumbhash } }}
+            />
+            <ProfileSpecimen
+                detail="A chosen photo is being sent; the picker carries the spinner and removal waits"
+                label="Happy Agent settings — profile photo uploading"
+                number="02e"
+                profile={{ photo: profilePhoto, photoUploading: true }}
+            />
+            <ProfileSpecimen
+                detail="The last photo change was refused, and the stored photo is unchanged"
+                label="Happy Agent settings — profile photo refused"
+                number="02f"
+                profile={{
+                    photo: profilePhoto,
+                    photoError: "The profile photo must be no larger than 8 MiB.",
+                }}
+            />
+            <ProfileSpecimen
+                detail="No profile is stored yet, so a photo has no one to belong to until the first save"
+                label="Happy Agent settings — profile photo before the first save"
+                number="02g"
+                profile={{
+                    dirty: true,
+                    email: "",
+                    name: "Steve",
+                    photoUnavailable: "Save your name first, then add a photo",
+                }}
+            />
+            <FileTierSettingsSpecimen
+                detail="File tiers: one global list, a card per tier in match order — name, patterns, reorder, remove"
+                label="Happy Agent settings — file tiers"
+                number="02f"
+                tiers={fileTierRows}
+            />
+            <FileTierSettingsSpecimen
+                detail="File tiers with none yet: every changed file is listed together"
+                label="Happy Agent settings — file tiers empty"
+                number="02f-empty"
+                tiers={[]}
+            />
             <FullScreenSpecimen
                 detail="Secrets category: safe metadata lists write-only environment bundles without exposing values"
                 label="Happy Agent settings — secrets"

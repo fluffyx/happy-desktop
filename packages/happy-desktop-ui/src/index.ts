@@ -234,6 +234,7 @@ export {
 export {
     fileReferenceFragment,
     fileReferenceSplit,
+    type FileLinkOpenHandler,
     type FileOpenHandler,
     type FileReference,
 } from "./fileReference";
@@ -282,11 +283,13 @@ export { haptic, type HapticSignal } from "./haptics";
 export {
     Sidebar,
     sidebarReorderMove,
+    type SidebarHeaderAction,
     type SidebarItem,
     type SidebarItemAction,
     type SidebarNumberShortcutTarget,
     type SidebarProps,
     type SidebarReorder,
+    type SidebarSearch,
     type SidebarSection,
 } from "./Sidebar";
 export {
@@ -372,6 +375,7 @@ export {
     type CommandPickerProps,
 } from "./CommandPicker";
 export { HappyAgentUsagePanel, type HappyAgentUsagePanelProps } from "./HappyAgentUsagePanel";
+export { HappyAgentDevicesPanel, type HappyAgentDevicesPanelProps } from "./HappyAgentDevicesPanel";
 export {
     HappyAgentProjectSettingsDialog,
     type HappyAgentProjectComputeChoice,
@@ -503,6 +507,27 @@ export { MenuButton, type MenuButtonProps } from "./MenuButton";
 export { Modal, type ModalProps, type ModalSize, type ModalTone } from "./Modal";
 export { ModalOverlay, type ModalOverlayProps } from "./ModalOverlay";
 export {
+    IMAGE_CROP_MAX_ZOOM,
+    imageCropClamp,
+    imageCropEdge,
+    imageCropInitial,
+    imageCropOpen,
+    imageCropPan,
+    imageCropRegion,
+    imageCropZoom,
+    type ImageCropRegion,
+    type ImageCropSize,
+    type ImageCropSource,
+    type ImageCropView,
+} from "./imageCrop";
+export {
+    PROFILE_PHOTO_CROP_FRAME,
+    PROFILE_PHOTO_CROP_STAGE,
+    ProfilePhotoCropDialog,
+    type ProfilePhotoCropDialogProps,
+    type ProfilePhotoCropSource,
+} from "./ProfilePhotoCropDialog";
+export {
     DefaultAgentForm,
     type DefaultAgentFormProps,
     DEFAULT_AGENT_LUCKY_LABEL,
@@ -631,6 +656,15 @@ export {
     type FileAttachmentProps,
     type FileAttachmentVariant,
 } from "./FileAttachment";
+export { ResultCard, type ResultCardProps } from "./ResultCard";
+export {
+    ConversationMedia,
+    MediaImageTile,
+    MediaVideoTile,
+    type ConversationMediaProps,
+    type MediaImageTileProps,
+    type MediaVideoTileProps,
+} from "./ConversationMedia";
 export { type EmojiItem, EmojiPicker, type EmojiPickerProps } from "./EmojiPicker";
 export { TerminalPanel, type TerminalPanelProps } from "./TerminalPanel";
 export {
@@ -669,6 +703,36 @@ export {
     type HappyAgentArtifactViewerProps,
 } from "./pages/artifacts/HappyAgentArtifactViewer";
 export { artifactHtmlDocument } from "./pages/artifacts/artifactHtmlDocument";
+export { REORDERING_LIST_STATIC, ReorderingList, type ReorderingListProps } from "./ReorderingList";
+export {
+    SurfaceAvatar,
+    SurfaceMemberStack,
+    surfaceMembersText,
+    surfaceTypeLabel,
+    type HappyAgentSurfaceMemberView,
+    type HappyAgentSurfacePicture,
+    type HappyAgentSurfaceView,
+    type SurfaceAvatarProps,
+} from "./pages/surfaces/surfacePresentation";
+export {
+    HappyAgentSurfaceHeader,
+    type HappyAgentSurfaceHeaderProps,
+} from "./pages/surfaces/HappyAgentSurfaceHeader";
+export { HappyAgentTodoRow, type HappyAgentTodoRowProps } from "./pages/surfaces/HappyAgentTodoRow";
+export {
+    HappyAgentTodoSurfacePage,
+    type HappyAgentTodoSurfacePageProps,
+} from "./pages/surfaces/HappyAgentTodoSurfacePage";
+export {
+    HappyAgentSurfaceUnsupportedPage,
+    type HappyAgentSurfaceUnsupportedPageProps,
+} from "./pages/surfaces/HappyAgentSurfaceUnsupportedPage";
+export {
+    HappyAgentSurfaceCreateDialog,
+    type HappyAgentSurfaceCreateDialogProps,
+    type HappyAgentSurfaceCreateInput,
+} from "./pages/surfaces/HappyAgentSurfaceCreateDialog";
+export { happyAgentSurfaceBackdropsPreload } from "./pages/surfaces/surfaceBackdropsPreload";
 export {
     HappyAgentSettingsSection,
     HappyAgentSettingsShell,
@@ -733,6 +797,12 @@ export {
     type HappyAgentProviderStatus,
 } from "./pages/settings/HappyAgentProviderSettings";
 export {
+    HappyAgentFileTierSettings,
+    type HappyAgentFileTierMoveDirection,
+    type HappyAgentFileTierRow,
+    type HappyAgentFileTierSettingsProps,
+} from "./pages/settings/HappyAgentFileTierSettings";
+export {
     HappyAgentSecretSettings,
     type HappyAgentSecretCreateInput,
     type HappyAgentSecretRow,
@@ -746,6 +816,7 @@ export {
 } from "./pages/settings/HappyAgentSecretCreateDialog";
 export {
     HappyAgentProfileSettings,
+    type HappyAgentProfileSettingsPhoto,
     type HappyAgentProfileSettingsProps,
 } from "./pages/settings/HappyAgentProfileSettings";
 export {

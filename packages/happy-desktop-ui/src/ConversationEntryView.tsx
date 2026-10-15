@@ -1,5 +1,5 @@
 import { type CSSProperties, type ReactNode } from "react";
-import type { FileOpenHandler } from "./fileReference";
+import type { FileLinkOpenHandler, FileOpenHandler } from "./fileReference";
 import type { LinkOpenHandler, LinkOpenPlacement } from "./MessageMarkdown";
 import type { MessageReferences } from "./messageReferences";
 import { thumbhashDataUrl } from "./thumbhashDataUrl";
@@ -66,12 +66,16 @@ export type ConversationEntryViewProps = {
     onAttachmentOpen?: (attachment: ConversationLinkedAttachment) => void;
     /** Opens this entry's tool call in an owner-provided preview surface. */
     onToolSelect?: (entryId: string, tool: ConversationToolCall) => void;
+    /** Opens one file this entry's tool call presented, by its media position. */
+    onToolMediaOpen?: (entryId: string, tool: ConversationToolCall, index: number) => void;
     /** Opens one child session represented by a delegated-agent entry. */
     onDelegationSelect?: (sessionId: string) => void;
     /** Reference epoch millis used by live delegated-agent timers. */
     now?: number;
     /** Opens a workspace file named by a tool call or linked from a message. */
     onFileOpen?: FileOpenHandler;
+    /** Opens a file a `happy-file:` link in a message names in another workspace. */
+    onFileLinkOpen?: FileLinkOpenHandler;
     /** Opens a web link from a message where its context menu asked for it. */
     onLinkOpen?: LinkOpenHandler;
     /** Which of the two places a plain click on a link goes, marked in its menu. */
@@ -227,6 +231,12 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
                         : undefined
                 }
                 {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+                {...(props.onToolMediaOpen
+                    ? {
+                          onMediaOpen: (tool: ConversationToolCall, index: number) =>
+                              props.onToolMediaOpen?.(entry.id, tool, index),
+                      }
+                    : {})}
                 {...(props.references ? { references: props.references } : {})}
                 singleLine={entry.activity.kind === "tool"}
                 time={
@@ -446,6 +456,7 @@ export function ConversationEntryView(props: ConversationEntryViewProps) {
                     : undefined
             }
             {...(props.onFileOpen ? { onFileOpen: props.onFileOpen } : {})}
+            {...(props.onFileLinkOpen ? { onFileLinkOpen: props.onFileLinkOpen } : {})}
             {...(props.onLinkOpen ? { onLinkOpen: props.onLinkOpen } : {})}
             {...(props.linkOpenDefault ? { linkOpenDefault: props.linkOpenDefault } : {})}
             {...(props.references ? { references: props.references } : {})}
@@ -505,7 +516,10 @@ function imagesOf(attachments: readonly ConversationAttachment[]): readonly Mess
                 url: attachment.openUrl,
                 alt: attachment.name,
                 ...(attachment.thumbhash
-                    ? { placeholderUrl: thumbhashDataUrl(attachment.thumbhash) }
+                    ? {
+                          placeholderUrl: thumbhashDataUrl(attachment.thumbhash),
+                          thumbhash: attachment.thumbhash,
+                      }
                     : {}),
                 ...(attachment.width !== undefined ? { width: attachment.width } : {}),
                 ...(attachment.height !== undefined ? { height: attachment.height } : {}),

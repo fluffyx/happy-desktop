@@ -20,6 +20,8 @@ import type {
     Workspace,
 } from "@slopus/happy-agent-client";
 import { happyAgentServiceTierFromWire } from "../happyAgentServiceTier.js";
+import { happyAgentConversationActivityProject } from "../happyAgent/happyAgentConversationAuthors.js";
+import type { HappyAgentSubtaskActivity } from "../happyAgent/happyAgentTypes.js";
 import type { UserProfile } from "./userProfiles.js";
 import type {
     BotGroup,
@@ -48,6 +50,11 @@ export interface SessionProjectionInput {
     config: DaemonConfig;
     connection: SessionState["connection"];
     endpoint: string;
+    /**
+     * Where this connection serves the bytes of one item a completed tool call
+     * presented, on the same authenticated origin as every other image it names.
+     */
+    mediaUrl: (agentId: string, toolCallId: string, index: number) => string;
     hasMore: boolean;
     messages: readonly TranscriptMessage[];
     userProfiles?: ReadonlyMap<string, UserProfile>;
@@ -275,6 +282,7 @@ function projectQuestionElement(question: Question): Extract<ChatElement, { kind
 
 export function projectElements(input: SessionProjectionInput): readonly ChatElement[] {
     const reader: TranscriptReader = {
+        mediaUrl: input.mediaUrl,
         agentId: input.agent.id,
         parentAgentId: input.agent.parentAgentId,
         userProfiles: input.userProfiles,
@@ -770,6 +778,39 @@ const groupSessionCache = new WeakMap<
     }
 >();
 
+// One child event replaces its ancestry, so unchanged branches retain their
+// rollup. Bots and workspaces share this projection without walking trees twice.
+const subtaskActivityCache = new WeakMap<Agent, HappyAgentSubtaskActivity>();
+
+function subtaskActivityOf(agent: Agent): HappyAgentSubtaskActivity | undefined {
+    const children = (agent.subtasks ?? []).filter((child) => child.archivedAt === null);
+    if (children.length === 0) return undefined;
+    const cached = subtaskActivityCache.get(agent);
+    if (cached) return cached;
+    const activities = children.map((child) =>
+        happyAgentConversationActivityProject({
+            status: child.status === "idle" ? "idle" : "running",
+            pendingQuestion: child.pendingQuestionId !== null,
+            activeSubagentCount: child.subagents.running,
+            subtaskActivity: subtaskActivityOf(child),
+            ...(child.wait == null ? {} : { wait: child.wait }),
+        }),
+    );
+    const activity = activities.includes("awaitingInput")
+        ? "awaitingInput"
+        : activities.includes("running")
+          ? "running"
+          : activities.includes("waiting")
+            ? "waiting"
+            : "idle";
+    const value: HappyAgentSubtaskActivity = {
+        activity,
+        running: children.filter((child) => child.status !== "idle").length,
+    };
+    subtaskActivityCache.set(agent, value);
+    return value;
+}
+
 function projectAgent(
     agent: Agent,
     workspace: Workspace | undefined,
@@ -796,6 +837,7 @@ function projectAgent(
         return cached.value;
     const mode = modeOf(config, draft, storedMode);
     const serviceTier = happyAgentServiceTierFromWire(mode.serviceTier);
+    const subtaskActivity = subtaskActivityOf(agent);
     // A bot's one conversation is scoped to the bot. Only a project's workspace
     // can answer with a project, so the bot case is decided before that.
     const scope =
@@ -806,6 +848,7 @@ function projectAgent(
               : ({ kind: "workspace", projectId, workspaceId: agent.workspaceId } as const);
     const value: GroupSession = {
         activeSubagents: agent.subagents.running,
+        ...(subtaskActivity === undefined ? {} : { subtaskActivity }),
         archived: agent.archivedAt !== null,
         ...(agent.archivedAt === null ? {} : { archivedAt: agent.archivedAt }),
         createdAt: agent.createdAt,
@@ -826,11 +869,13 @@ function projectAgent(
         // it never has to be guessed at from where a session did or did not turn
         // up.
         ...(agent.parentAgentId === null ? {} : { parentSessionId: agent.parentAgentId }),
+        pendingQuestion: agent.pendingQuestionId !== null,
         permissionMode: mode.permissionMode,
         scope,
         providerId: mode.providerId,
         ...(serviceTier === undefined ? {} : { serviceTier }),
         status: agent.status === "idle" ? "idle" : "running",
+        ...(agent.wait == null ? {} : { wait: agent.wait }),
         ...(agent.title === null ? {} : { title: agent.title }),
         trackUnread: true,
         ...(agent.unread === null
@@ -930,6 +975,8 @@ interface MessageElements {
  * and would defeat the memory below.
  */
 interface TranscriptReader {
+    /** Stable for the connection's life, so it takes no part in the memory below. */
+    readonly mediaUrl: SessionProjectionInput["mediaUrl"];
     readonly userProfiles?: ReadonlyMap<string, UserProfile>;
     readonly currentUserId?: string;
     readonly agentId: string;
@@ -1106,7 +1153,11 @@ function messageElementsProject(
                 ...(block.result === undefined ? {} : { result: stringify(block.result) }),
                 ...(block.presentation === undefined
                     ? {}
-                    : { presentation: projectToolPresentation(block.presentation) }),
+                    : {
+                          presentation: projectToolPresentation(block.presentation, (index) =>
+                              reader.mediaUrl(reader.agentId, block.id, index),
+                          ),
+                      }),
                 // Only a reviewed call carries elevation, and only the granted
                 // one is worth carrying: "not elevated" is the ordinary case
                 // every unreviewed call is already in.
@@ -1208,6 +1259,7 @@ function usageTotal(usage: UsageBreakdown): number {
 
 function projectToolPresentation(
     presentation: NonNullable<Extract<MessageBlock, { type: "tool_call" }>["presentation"]>,
+    mediaUrl: (index: number) => string,
 ): ToolPresentation {
     switch (presentation.type) {
         case "agent_spawn":
@@ -1259,6 +1311,45 @@ function projectToolPresentation(
                 query: presentation.query,
                 ...(presentation.sources === undefined ? {} : { sources: presentation.sources }),
             };
+        case "media":
+            // The array position is the item's index on the bytes route.
+            return {
+                kind: "media",
+                items: presentation.items.map((item, index) => ({
+                    kind: mediaKindProject(item.kind),
+                    name: item.name,
+                    mimeType: item.mimeType,
+                    size: item.size,
+                    ...(item.width === undefined ? {} : { width: item.width }),
+                    ...(item.height === undefined ? {} : { height: item.height }),
+                    ...(item.thumbhash === undefined ? {} : { thumbhash: item.thumbhash }),
+                    url: mediaUrl(index),
+                })),
+            };
+        case "artifact":
+            return {
+                kind: "artifact",
+                artifactId: presentation.artifactId,
+                version: presentation.version,
+                artifactType: presentation.artifactType,
+                title: presentation.title,
+            };
+    }
+}
+
+/**
+ * The kind of one presented item as this build can show it. The daemon's set
+ * grows with the product, and anything this build has no inline face for is
+ * still a file the reader can open.
+ */
+function mediaKindProject(kind: string): "image" | "video" | "document" | "file" {
+    switch (kind) {
+        case "image":
+        case "video":
+        case "document":
+            return kind;
+        default:
+            return "file";
     }
 }
 
@@ -1336,6 +1427,13 @@ function modelDefinitionsProject(config: DaemonConfig): readonly unknown[] {
 }
 
 function activityOf(agent: Agent): SessionState["activity"] {
+    if (agent.wait != null)
+        return {
+            kind: "executing_tool_call",
+            label: "Waiting",
+            since: agent.wait.startedAt,
+            wait: agent.wait,
+        };
     const since = agent.updatedAt;
     switch (agent.status) {
         case "thinking":
