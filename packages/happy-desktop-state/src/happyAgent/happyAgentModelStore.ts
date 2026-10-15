@@ -177,9 +177,12 @@ export function happyAgentModelStoreCreate(
     const documentAdopt = (next: HappyAgentModelPreferenceDocument): void => {
         document = next;
         preferences = next.preferences;
-        const listed = next.disabledModels ?? [];
-        if (listed.length !== disabledModels.size || listed.some((key) => !disabledModels.has(key)))
-            disabledModels = new Set(listed);
+        const listed = new Set(next.disabledModels);
+        if (
+            listed.size !== disabledModels.size ||
+            [...listed].some((key) => !disabledModels.has(key))
+        )
+            disabledModels = listed;
     };
 
     const preferencesReconcile = (): void => {

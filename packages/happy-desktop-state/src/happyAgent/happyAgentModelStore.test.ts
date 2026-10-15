@@ -413,6 +413,39 @@ it("moves new sessions off a catalog default that changes to a switched-off mode
     expect(modelIds(models)).toEqual(["test-provider/test-model"]);
 });
 
+it("drops a switch the host no longer lists, even when another is listed twice", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const test = happyAgentModelKey("test-provider", "test-model");
+    const grok = happyAgentModelKey("grok", "grok-4.7");
+    let document: HappyAgentModelPreferenceDocument = {
+        preferences: {},
+        disabledModels: [test, grok],
+    };
+    const listeners = new Set<() => void>();
+    const models = happyAgentModelStoreCreate({
+        catalogRead: async () =>
+            happyAgentModelCatalogProject(
+                configWithProvider(daemon.configGet(), "grok", "grok-4.7"),
+            ),
+        preferencePersistence: {
+            read: () => document,
+            write: () => undefined,
+            subscribe: (listener) => {
+                listeners.add(listener);
+                return () => listeners.delete(listener);
+            },
+        },
+    });
+    disposables.push(models);
+    await models.load();
+
+    document = { preferences: {}, disabledModels: [test, test] };
+    for (const listener of listeners) listener();
+
+    const snapshot = models.get();
+    expect(snapshot.type === "ready" && [...snapshot.disabledModels]).toEqual([test]);
+});
+
 it("moves an open draft off a model switched off under it, keeping its access mode", () => {
     const daemon = fakeHappyAgentDaemonCreate();
     const catalog = happyAgentModelCatalogProject(
@@ -538,4 +571,41 @@ it("refreshes an open conversation's pickers from a changed catalog without swit
     expect(actions.switchModel).not.toHaveBeenCalled();
     expect(actions.setEffort).not.toHaveBeenCalled();
     expect(actions.setServiceTier).not.toHaveBeenCalled();
+});
+
+it("keeps an open conversation's switched-off models when the catalog changes without naming them", async () => {
+    const daemon = fakeHappyAgentDaemonCreate();
+    const config = configWithProvider(daemon.configGet(), "grok", "grok-4.7");
+    const state = await sessionStateRead({ providerId: "grok", modelId: "grok-4.7" });
+    let deliver: Parameters<NonNullable<HappyAgentChatDeps["catalogFollow"]>>[0] | undefined;
+    const chat = happyAgentChatStoreCreate(state.sessionId as HappyAgentSessionId, {
+        catalog: happyAgentModelCatalogProject(config),
+        catalogFollow: (listener) => {
+            deliver = listener;
+            return () => undefined;
+        },
+        transcriptConnect: ({ onChange }) => {
+            onChange([], state, []);
+            return { close: () => undefined, loadMore: () => undefined };
+        },
+        connectActions: {} as HappyAgentChatDeps["connectActions"],
+        connectMutationSubscribe: () => () => undefined,
+    });
+    disposables.push(chat);
+    chat.subscribe(() => undefined);
+    const offered = () =>
+        chat.get().menus?.modelOptions.map((option) => `${option.providerId}/${option.modelId}`);
+
+    deliver!(
+        happyAgentModelCatalogProject(config),
+        new Set([happyAgentModelKey("test-provider", "test-model")]),
+    );
+    expect(offered()).toEqual(["grok/grok-4.7"]);
+
+    deliver!(happyAgentModelCatalogProject(config));
+    expect(offered()).toEqual(["grok/grok-4.7"]);
+
+    // An empty set is how a caller clears them.
+    deliver!(happyAgentModelCatalogProject(config), new Set());
+    expect(offered()).toEqual(["test-provider/test-model", "grok/grok-4.7"]);
 });
