@@ -1261,14 +1261,20 @@ function documentLoading(
 }
 
 /**
- * The chosen default, falling back to the model a new session starts on, which
- * passes over a catalog default that has been switched off.
+ * The chosen default while it is switched on, else the model a new session
+ * starts on, which passes over every switched-off model.
  */
 function defaultSelection(
     models: HappyAgentModelStoreSnapshot,
     settings: HappyAgentSettingsSnapshot,
 ): { providerId: string; modelId: string } {
-    if (settings.defaultProviderId && settings.defaultModelId)
+    if (
+        settings.defaultProviderId &&
+        settings.defaultModelId &&
+        !settings.disabledModels.has(
+            happyAgentModelKey(settings.defaultProviderId, settings.defaultModelId),
+        )
+    )
         return { modelId: settings.defaultModelId, providerId: settings.defaultProviderId };
     if (models.type !== "ready") return { modelId: "", providerId: "" };
     return {
