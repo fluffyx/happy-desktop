@@ -51,9 +51,9 @@ describe("local-only voice draft provenance", () => {
             output: (event) => events.push(event),
         });
         composer.getState().composerInput({ type: "voiceTextAppended", text: "/abort" });
-        composer.getState().commandInvoke("abort");
+        composer.getState().commandInvoke("abort", "steer");
         expect(events).toEqual([]);
-        composer.getState().textSubmit();
+        composer.getState().textSubmit("steer");
         expect(events).toMatchObject([{ type: "textSubmitted", text: "/abort" }]);
         expect(composer.getState().voiceDraft).toBe(true);
     });
@@ -62,7 +62,7 @@ describe("local-only voice draft provenance", () => {
         const composer = composerStoreCreate("session");
         composer.getState().composerInput({ type: "voiceTextAppended", text: "Reviewed text" });
         const revision = composer.getState().revision;
-        composer.getState().textSubmit();
+        composer.getState().textSubmit("steer");
         composer.getState().textUpdate("New local text");
         composer.getState().composerInput({ type: "submissionConfirmed", revision });
         expect(composer.getState()).toMatchObject({ voiceDraft: true, text: "New local text" });
