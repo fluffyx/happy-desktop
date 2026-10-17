@@ -382,7 +382,11 @@ export interface ConversationMessageEntry {
     readonly source: "server" | "local";
     /** Explicit send acceptance for daemon-projected user rows; voice never shares optimistic text. */
     readonly pendingSend?: boolean;
-    readonly delivery: "sending" | "pending_steering" | "sent" | "failed";
+    /**
+     * `pending_steering` is read at the agent's next step; `pending_queue` waits
+     * for the run to finish. Both are waiting on the agent, not on the network.
+     */
+    readonly delivery: "sending" | "pending_steering" | "pending_queue" | "sent" | "failed";
     readonly clientMutationId?: string;
     readonly error?: UserError;
     /**

@@ -3,7 +3,6 @@ import type {
     Bot,
     HappyAgentClient,
     HappyAgentEvent,
-    MessageBlock,
     MessageMode,
     MutationId,
     Project,
@@ -118,7 +117,8 @@ export interface UserMessageElement extends BaseChatElement {
     identity: string | null;
     userId?: string;
     profile?: UserProfile;
-    delivery: "pending_steering" | "sent";
+    /** A pending message is not yet accepted; its kind says when it will be. */
+    delivery: "pending_steering" | "pending_queue" | "sent";
     text: string;
     attachments?: readonly { data: string; mediaType: string }[];
     source?: "notification";
@@ -447,9 +447,6 @@ export interface SessionState {
     };
     models: readonly unknown[];
     pendingUserInputs: readonly UserInputRequest[];
-    pendingSteeringMessages: readonly {
-        message: { id: string; blocks: readonly MessageBlock[] };
-    }[];
     /** Complete ordered command catalog for this focused agent. */
     slashCommands: readonly SlashCommand[];
     tasks: readonly {
@@ -802,6 +799,15 @@ export interface HappyAgentGroupsConnection {
     close: () => void;
 }
 
+/**
+ * How a message sent while the agent is working is delivered: steering is
+ * read at the agent's next step and ends the current run there; a queued
+ * message waits until the run finishes. On an idle agent the two are the same.
+ * This is Happy Agent's own `delivery`, carried unchanged from the keypress to
+ * the wire.
+ */
+export type MessageDelivery = "steer" | "queue";
+
 export interface SendMessageInput {
     content?: readonly (
         | { type: "text"; text: string }
@@ -809,6 +815,8 @@ export interface SendMessageInput {
         | SendMessageToolCallRequest
     )[];
     text: string;
+    /** Chosen by whoever sent it; the connection never infers it from agent status. */
+    delivery: MessageDelivery;
 }
 
 /**
@@ -953,9 +961,9 @@ export interface HappyAgentConnection {
     createSession(input: CreateSessionInput, checkoutReady?: Promise<unknown>): MutationId;
     sessionCreationWait(sessionId: string): Promise<void>;
     markSessionRead(sessionId: string): MutationId;
-    sendMessage(sessionId: string, message: string | SendMessageInput): MutationId;
+    sendMessage(sessionId: string, message: SendMessageInput): MutationId;
     /** Same send/idempotency path, resolving only after authoritative acceptance. */
-    sendMessageConfirmed(sessionId: string, message: string | SendMessageInput): Promise<void>;
+    sendMessageConfirmed(sessionId: string, message: SendMessageInput): Promise<void>;
     /** Invokes one slash command under the session's current composer selection. */
     invokeSlashCommand(sessionId: string, name: string, argumentsValue?: string): MutationId;
     stopBackgroundProcess(sessionId: string, projectedProcessId: number): MutationId;

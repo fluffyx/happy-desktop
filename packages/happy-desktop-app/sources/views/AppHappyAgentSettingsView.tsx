@@ -5,6 +5,9 @@ import type {
     HappyAgentChangeTiersStore,
     ExperimentsStore,
     ProjectsVisibilityStore,
+    SendBehaviorStore,
+    MessageDelivery,
+    SendKey,
     GptLiveStore,
     HappyAgentInstructionsSnapshot,
     HappyAgentDebugLogSnapshot,
@@ -33,6 +36,7 @@ import {
     happyAgentThinkingLabel,
     experimentsStoreNoop,
     projectsVisibilityStoreNoop,
+    sendBehaviorStoreNoop,
     gptLiveStoreNoop,
     happyAgentCloudStoreNoop,
     happyAgentAvailabilityProject,
@@ -322,6 +326,11 @@ export interface AppHappyAgentSettingsViewProps {
      * host that remembers no such choice, which offers no control for it.
      */
     projectsVisibility?: ProjectsVisibilityStore;
+    /**
+     * How this window sends a message while the agent works. Absent in a host
+     * that remembers no such choice, which offers no control for it.
+     */
+    sendBehavior?: SendBehaviorStore;
     /** Whether this window sends product analytics events. Absent where it sends none. */
     usageAnalytics?: UsageAnalyticsStore;
     gptLive?: GptLiveStore;
@@ -376,6 +385,12 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
         projectsVisibilityStore.subscribe,
         projectsVisibilityStore.get,
         projectsVisibilityStore.get,
+    );
+    const sendBehaviorStore = props.sendBehavior ?? sendBehaviorStoreNoop;
+    const sendBehavior = useSyncExternalStore(
+        sendBehaviorStore.subscribe,
+        sendBehaviorStore.get,
+        sendBehaviorStore.get,
     );
     const usageAnalyticsStore = props.usageAnalytics ?? usageAnalyticsAbsent;
     const usageAnalytics = useSyncExternalStore(
@@ -951,6 +966,16 @@ export function AppHappyAgentSettingsView(props: AppHappyAgentSettingsViewProps)
                               projectsHidden: projectsVisibility.projectsHidden,
                               onProjectsHiddenChange: (hidden: boolean) =>
                                   projectsVisibilityStore.projectsHiddenUpdate(hidden),
+                          }
+                        : {})}
+                    {...(props.sendBehavior
+                        ? {
+                              sendKey: sendBehavior.sendKey,
+                              onSendKeyChange: (sendKey: SendKey) =>
+                                  sendBehaviorStore.sendKeyUpdate(sendKey),
+                              followUp: sendBehavior.followUp,
+                              onFollowUpChange: (followUp: MessageDelivery) =>
+                                  sendBehaviorStore.followUpUpdate(followUp),
                           }
                         : {})}
                     onDefaultModelChange={(key) => {

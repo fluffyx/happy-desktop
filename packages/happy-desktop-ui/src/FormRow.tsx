@@ -8,6 +8,11 @@ export type FormRowProps = {
     style?: CSSProperties;
     label: string;
     description?: string;
+    /**
+     * A second, richer line under the description: a fact about the setting
+     * that needs more than words, such as the key that does the opposite.
+     */
+    detail?: ReactNode;
     htmlFor?: string;
     control: ReactNode;
     layout?: FormRowLayout;
@@ -15,7 +20,7 @@ export type FormRowProps = {
 };
 /**
  * C-029 FormRow — a settings row. A left-aligned label + optional muted
- * description on the leading side and a trailing control slot (a TextField,
+ * description (and an optional richer detail line) on the leading side and a trailing control slot (a TextField,
  * Select, Switch, Button, …). `inline` places the control to the right of the
  * text; `stacked` places it on its own line below the text. A hairline bottom
  * divider lets rows stack into a settings list without extra chrome.
@@ -26,6 +31,7 @@ export function FormRow(props: FormRowProps) {
         "className",
         "control",
         "description",
+        "detail",
         "htmlFor",
         "label",
         "layout",
@@ -56,6 +62,14 @@ export function FormRow(props: FormRowProps) {
                         data-happy-desktop-ui="form-row-description"
                     >
                         {local.description}
+                    </span>
+                ) : null}
+                {local.detail ? (
+                    <span
+                        className="happy-form-row__detail"
+                        data-happy-desktop-ui="form-row-detail"
+                    >
+                        {local.detail}
                     </span>
                 ) : null}
             </div>

@@ -26,6 +26,7 @@ import {
 } from "./happyAgentFileLink.js";
 import type { ConversationSummary } from "../conversation/conversationSummary.js";
 import type { Loadable } from "../conversation/loadable.js";
+import type { MessageDelivery } from "../happyAgentConnection/types.js";
 import { UserError } from "../types.js";
 import {
     composerStoreCreate,
@@ -126,7 +127,6 @@ import type {
     HappyAgentProjectCompute,
     HappyAgentProjectSettingsState,
     HappyAgentProjectId,
-    HappyAgentQueuedMessage,
     HappyAgentContextGauge,
     HappyAgentOpenInTarget,
     HappyAgentWorkspaceFiles,
@@ -257,7 +257,6 @@ export interface HappyAgentConversationSnapshot {
     readonly transcriptComplete: boolean;
     readonly loadingMore: boolean;
     readonly loadMoreError?: string;
-    readonly queuedMessages: readonly HappyAgentQueuedMessage[];
     readonly requestSubmissions: HappyAgentChatSnapshot["requestSubmissions"];
     readonly requestSelections: HappyAgentChatSnapshot["requestSelections"];
     readonly tasks: readonly HappyAgentTodo[];
@@ -1794,8 +1793,8 @@ export interface HappyAgentWorkspaceStore {
     // Composer actions for the open conversation (no draft lives in React).
     composerTextUpdate(text: string): void;
     composerFocusUpdate(focused: boolean): void;
-    composerTextSubmit(): void;
-    composerCommandInvoke(commandId: string): void;
+    composerTextSubmit(delivery: MessageDelivery): void;
+    composerCommandInvoke(commandId: string, delivery: MessageDelivery): void;
     /**
      * Attaches picked, pasted, or dropped files to the addressed draft. Small
      * images are prepared inline; larger media and ordinary files retain their
@@ -1908,7 +1907,7 @@ export interface HappyAgentWorkspaceStore {
      * the host refuses is reported as an unsent message, with the host's
      * reason, and can be retried from the composer.
      */
-    botCreateTaskSend(): void;
+    botCreateTaskSend(delivery: MessageDelivery): void;
     /**
      * Makes the bot without saying anything to it. The composer's text and
      * attachments follow the reader into the conversation as its draft, in the
@@ -1944,7 +1943,7 @@ export interface HappyAgentWorkspaceStore {
      * the reader's own list, and its conversation is reported through
      * `conversationOpenRequested` with that message already in it.
      */
-    taskCreateMessageSend(): void;
+    taskCreateMessageSend(delivery: MessageDelivery): void;
     /** Makes the task without saying anything to it, as `botCreateSubmit` does a bot. */
     taskCreateSubmit(): Promise<void>;
     /** Opens the name dialog for a task. Any member may rename it. */
@@ -2808,7 +2807,6 @@ export function happyAgentWorkspaceStoreCreate(
             transcriptComplete: chat.transcriptComplete,
             loadingMore: chat.loadingMore,
             ...(chat.loadMoreError ? { loadMoreError: chat.loadMoreError } : {}),
-            queuedMessages: chat.queuedMessages,
             requestSubmissions: chat.requestSubmissions,
             requestSelections: chat.requestSelections,
             tasks: chat.tasks,
@@ -4550,6 +4548,7 @@ export function happyAgentWorkspaceStoreCreate(
         commandId: string,
         argumentsValue: string | undefined,
         revision: number | undefined,
+        delivery: MessageDelivery,
     ): void => {
         const run = () =>
             withChatStore((store) => {
@@ -4562,7 +4561,7 @@ export function happyAgentWorkspaceStoreCreate(
                             new Error(`/${commandId} does not accept arguments.`),
                         );
                     return writeGuard(openGroupConversationRefusal(), () =>
-                        store.slashCommandInvoke(commandId, argumentsValue),
+                        store.slashCommandInvoke(commandId, argumentsValue, delivery),
                     );
                 }
                 if (argumentsValue !== undefined)
@@ -4846,6 +4845,7 @@ export function happyAgentWorkspaceStoreCreate(
                                 await target.voiceMessageSendConfirmed(
                                     event.text,
                                     state.session.value.permissionMode,
+                                    event.delivery,
                                 );
                                 activityRecord({
                                     kind: "messageSent",
@@ -4875,7 +4875,7 @@ export function happyAgentWorkspaceStoreCreate(
                                     event.attachments,
                                 );
                                 const session = await withChatStore(async (store) => {
-                                    await store.messageSend(text, images);
+                                    await store.messageSend(text, images, event.delivery);
                                     return store.get().session;
                                 });
                                 activityRecord({
@@ -4898,7 +4898,13 @@ export function happyAgentWorkspaceStoreCreate(
                             void withChatStore((store) =>
                                 store.draftSet("", nextDraftUpdatedAt(), draftOrigin),
                             ).catch(() => undefined);
-                        commandRun(created, event.commandId, event.arguments, event.revision);
+                        commandRun(
+                            created,
+                            event.commandId,
+                            event.arguments,
+                            event.revision,
+                            event.delivery,
+                        );
                         return;
                     case "mentionQueryUpdated": {
                         const requestGeneration = ++mentionGeneration;
@@ -5244,6 +5250,7 @@ export function happyAgentWorkspaceStoreCreate(
         text: string,
         attachments: readonly ComposerAttachment[],
         selection: HappyAgentSelection | undefined,
+        delivery: MessageDelivery,
     ): Promise<HappyAgentSessionLocation> => {
         const refusal = groupConversationRefusalFind(groupId);
         if (refusal) return Promise.reject(new Error(refusal));
@@ -5281,7 +5288,7 @@ export function happyAgentWorkspaceStoreCreate(
                 const placed = await attachmentsPlace(location.groupId, text, attachments);
                 const acquired = await client.chat(location.sessionId);
                 try {
-                    await acquired.store.messageSend(placed, images);
+                    await acquired.store.messageSend(placed, images, delivery);
                 } finally {
                     acquired[Symbol.dispose]();
                 }
@@ -5393,6 +5400,11 @@ export function happyAgentWorkspaceStoreCreate(
         readonly attachments: readonly ComposerAttachment[];
     }
 
+    /** A first message being sent, with the delivery its send key chose. */
+    interface BotCreateSend extends BotCreateMessage {
+        readonly delivery: MessageDelivery;
+    }
+
     /**
      * Puts a whole draft, words and files, into a conversation ahead of the
      * reader. The words are seeded into the composer that conversation will
@@ -5427,7 +5439,7 @@ export function happyAgentWorkspaceStoreCreate(
      * host's reason when the bot could not be made, having put the draft back
      * the way it was so the reader can try again rather than retype.
      */
-    const botCreateRun = async (message: BotCreateMessage | undefined): Promise<void> => {
+    const botCreateRun = async (message: BotCreateSend | undefined): Promise<void> => {
         const pending = botCreateDraft;
         const paint = botCreatePaint;
         const kind = createKind;
@@ -5539,7 +5551,9 @@ export function happyAgentWorkspaceStoreCreate(
                 message.text,
                 message.attachments,
             );
-            await withAddressedChat(location.sessionId, (store) => store.messageSend(text, images));
+            await withAddressedChat(location.sessionId, (store) =>
+                store.messageSend(text, images, message.delivery),
+            );
             activityRecord({
                 kind: "messageSent",
                 // A bot made from here is always the reader's own, never a system bot.
@@ -5597,7 +5611,12 @@ export function happyAgentWorkspaceStoreCreate(
                 submitting(
                     created,
                     event.revision,
-                    () => botCreateRun({ text: event.text, attachments: event.attachments }),
+                    () =>
+                        botCreateRun({
+                            text: event.text,
+                            attachments: event.attachments,
+                            delivery: event.delivery,
+                        }),
                     event.attachments,
                 );
             },
@@ -6701,6 +6720,7 @@ export function happyAgentWorkspaceStoreCreate(
                                         event.text,
                                         event.attachments,
                                         selection,
+                                        event.delivery,
                                     );
                                     // Sent, so there is nothing left to come back
                                     // to. Navigation releases this composer before
@@ -6755,11 +6775,13 @@ export function happyAgentWorkspaceStoreCreate(
         },
         messageSendCurrent: (message) =>
             writeGuard(openGroupConversationRefusal(), () =>
-                withChat((store) => store.messageSend(message, [])),
+                withChat((store) => store.messageSend(message, [], AUTHORED_DELIVERY)),
             ),
         messageSend: (sessionId, message) =>
             writeGuard(sessionConversationRefusal(sessionId), () =>
-                withAddressedChat(sessionId, (store) => store.messageSend(message, [])),
+                withAddressedChat(sessionId, (store) =>
+                    store.messageSend(message, [], AUTHORED_DELIVERY),
+                ),
             ),
         errorAssistanceRequest(entryId) {
             if (disposed || !openId || conversation.type !== "ready") return;
@@ -6984,7 +7006,7 @@ export function happyAgentWorkspaceStoreCreate(
             output({ type: "conversationOpenRequested", location });
             if (input.prompt?.trim()) {
                 await withAddressedChat(location.sessionId, (store) =>
-                    store.messageSend(input.prompt!, []),
+                    store.messageSend(input.prompt!, [], AUTHORED_DELIVERY),
                 );
             }
         },
@@ -7225,7 +7247,9 @@ export function happyAgentWorkspaceStoreCreate(
             const settings = await list.projectSettingsRead(projectId);
             const prompt = settings.initialPrompt;
             if (disposed || prompt === undefined || prompt.trim().length === 0) return;
-            await withAddressedChat(location.sessionId, (store) => store.messageSend(prompt, []));
+            await withAddressedChat(location.sessionId, (store) =>
+                store.messageSend(prompt, [], AUTHORED_DELIVERY),
+            );
         },
         worktreeArchive: (projectId, worktreeId) => list.worktreeArchive(projectId, worktreeId),
         worktreeReorder: (projectId, worktreeId, afterId) =>
@@ -7673,8 +7697,10 @@ export function happyAgentWorkspaceStoreCreate(
         composerTextUpdate: (text) => (groupComposer ?? composer)?.getState().textUpdate(text),
         composerFocusUpdate: (focused) =>
             (groupComposer ?? composer)?.getState().focusUpdate(focused),
-        composerTextSubmit: () => (groupComposer ?? composer)?.getState().textSubmit(),
-        composerCommandInvoke: (commandId) => composer?.getState().commandInvoke(commandId),
+        composerTextSubmit: (delivery) =>
+            (groupComposer ?? composer)?.getState().textSubmit(delivery),
+        composerCommandInvoke: (commandId, delivery) =>
+            composer?.getState().commandInvoke(commandId, delivery),
         composerAttachmentsAdd(files) {
             const target = groupComposer ?? composer;
             if (target) attachmentsAddTo(target, files);
@@ -7789,9 +7815,9 @@ export function happyAgentWorkspaceStoreCreate(
         taskCreateServiceTierUpdate(tier) {
             if (createKind === "task") botCreateSessionDraft?.serviceTierUpdate(tier);
         },
-        taskCreateMessageSend() {
+        taskCreateMessageSend(delivery) {
             if (createKind !== "task" || botCreateDraft?.submitting) return;
-            botCreateComposer?.getState().textSubmit();
+            botCreateComposer?.getState().textSubmit(delivery);
         },
         async taskCreateSubmit() {
             if (createKind === "task") await createDraftSubmit();
@@ -7838,9 +7864,9 @@ export function happyAgentWorkspaceStoreCreate(
             if (botCreateComposer && !botCreateDraft?.submitting)
                 attachmentRemoveFrom(botCreateComposer, attachmentId);
         },
-        botCreateTaskSend: () => {
+        botCreateTaskSend: (delivery) => {
             if (botCreateDraft?.submitting) return;
-            botCreateComposer?.getState().textSubmit();
+            botCreateComposer?.getState().textSubmit(delivery);
         },
         async botCreateSubmit() {
             if (createKind === "bot") await createDraftSubmit();
@@ -8310,14 +8336,17 @@ export function happyAgentWorkspaceStoreCreate(
 }
 
 /**
- * Whether a freshly projected conversation is indistinguishable from the current
- * one, so the existing object — and every React subtree bound to it — is kept.
+ * How text the reader did not type into a composer is sent: a slot's message,
+ * or the first words of a conversation just made. It keeps the delivery every
+ * send had before the reader could choose one; a new agent is idle, where steer
+ * and queue are the same.
  */
+const AUTHORED_DELIVERY: MessageDelivery = "steer";
+
 /* Stable empties, so an acquiring snapshot recomputed twice stays equal to
    itself and the surface is not notified for nothing. */
 const NO_ENTRIES: readonly ConversationEntry[] = [];
 const NO_ERROR_ASSISTANCE: readonly ConversationErrorAssistanceEntry[] = [];
-const NO_QUEUED: readonly HappyAgentQueuedMessage[] = [];
 const NO_SUBMISSIONS: HappyAgentChatSnapshot["requestSubmissions"] = [];
 const NO_SELECTIONS: HappyAgentChatSnapshot["requestSelections"] = new Map();
 const NO_TASKS: readonly HappyAgentTodo[] = [];
@@ -8352,7 +8381,6 @@ function conversationAcquiring(
         workingPhase: "working",
         transcriptComplete: true,
         loadingMore: false,
-        queuedMessages: NO_QUEUED,
         requestSubmissions: NO_SUBMISSIONS,
         requestSelections: NO_SELECTIONS,
         tasks: NO_TASKS,
@@ -8369,6 +8397,10 @@ function conversationAcquiring(
     };
 }
 
+/**
+ * Whether a freshly projected conversation is indistinguishable from the current
+ * one, so the existing object — and every React subtree bound to it — is kept.
+ */
 function conversationEqual(
     left: HappyAgentConversationSnapshot,
     right: HappyAgentConversationSnapshot,

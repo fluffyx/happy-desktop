@@ -279,13 +279,13 @@ it("sends the selected Ultrafast wire tier with the user message, then clears it
     const { connection, daemon, chat, sessionId } = await liveHarness();
     connection.setServiceTier(sessionId, "ultrafast");
     expect(chat.session?.serviceTier).toBe("ultrafast");
-    connection.sendMessage(sessionId, "first");
+    connection.sendMessage(sessionId, { text: "first", delivery: "steer" });
     await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(1));
     expect(daemon.calls.find((call) => call.method === "sendMessage")?.args[1]).toMatchObject({
         mode: { serviceTier: "ultrafast" },
     });
     connection.setServiceTier(sessionId, undefined);
-    connection.sendMessage(sessionId, "second");
+    connection.sendMessage(sessionId, { text: "second", delivery: "steer" });
     await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(2));
     expect(daemon.calls.filter((call) => call.method === "sendMessage")[1]?.args[1]).toMatchObject({
         mode: { serviceTier: null },
@@ -637,9 +637,11 @@ it("voice acceptance waits for authority and preserves the optimistic row identi
     const { connection, daemon, chat, sessionId } = await liveHarness();
     const release = daemon.pause("sendMessage");
     let accepted = false;
-    const sent = connection.sendMessageConfirmed(sessionId, "Reviewed voice text").then(() => {
-        accepted = true;
-    });
+    const sent = connection
+        .sendMessageConfirmed(sessionId, { text: "Reviewed voice text", delivery: "steer" })
+        .then(() => {
+            accepted = true;
+        });
     const optimistic = userMessages(chat.elements)[0]!;
     expect(optimistic.authority).toBe("local");
     await Promise.resolve();
@@ -658,7 +660,10 @@ it("voice acceptance resolves from an authoritative event before the HTTP respon
     const { connection, daemon, chat, sessionId } = await liveHarness();
     const release = daemon.pause("sendMessage:respond");
     try {
-        await connection.sendMessageConfirmed(sessionId, "Exact confirmed text");
+        await connection.sendMessageConfirmed(sessionId, {
+            text: "Exact confirmed text",
+            delivery: "steer",
+        });
         expect(userMessages(chat.elements)).toHaveLength(1);
         expect(userMessages(chat.elements)[0]?.authority).toBe("server");
         expect(daemon.callCount("sendMessage")).toBe(1);
@@ -670,7 +675,10 @@ it("voice acceptance resolves from an authoritative event before the HTTP respon
 it("voice acceptance rejects a delayed daemon refusal without claiming delivery or retrying", async () => {
     const { connection, daemon, chat, sessionId } = await liveHarness();
     daemon.failOnce("sendMessage", new HappyAgentApiError(400, "refused", "invalid_request", null));
-    const sent = connection.sendMessageConfirmed(sessionId, "Do not claim this was sent");
+    const sent = connection.sendMessageConfirmed(sessionId, {
+        text: "Do not claim this was sent",
+        delivery: "steer",
+    });
     expect(userMessages(chat.elements)[0]?.authority).toBe("local");
     await expect(sent).rejects.toThrow("not accepted");
     expect(userMessages(chat.elements)).toEqual([]);
@@ -680,7 +688,10 @@ it("voice acceptance rejects a delayed daemon refusal without claiming delivery 
 it("shows an optimistic message immediately and keeps its identity once the daemon takes it", async () => {
     const { connection, daemon, chat, sessionId } = await liveHarness();
     const release = daemon.pause("sendMessage");
-    const mutationId = connection.sendMessage(sessionId, "hello there");
+    const mutationId = connection.sendMessage(sessionId, {
+        text: "hello there",
+        delivery: "steer",
+    });
 
     expect(userMessages(chat.elements)).toHaveLength(1);
     expect(userMessages(chat.elements)[0]?.messageId).toBe(mutationId);
@@ -705,7 +716,7 @@ it("shows an optimistic message immediately and keeps its identity once the daem
 it("does not duplicate the sent message when its event beats the HTTP response", async () => {
     const { connection, daemon, chat, sessionId } = await liveHarness();
     const release = daemon.pause("sendMessage:respond");
-    const mutationId = connection.sendMessage(sessionId, "race");
+    const mutationId = connection.sendMessage(sessionId, { text: "race", delivery: "steer" });
 
     // The stream event arrives while the response is still held. It carries the
     // client's own identity, so it lands on the row already there instead of
@@ -730,7 +741,7 @@ it("removes the optimistic message and reports the rejection when the send fails
         "sendMessage",
         new HappyAgentApiError(400, "the daemon refused", "invalid_request", null),
     );
-    const mutationId = connection.sendMessage(sessionId, "doomed");
+    const mutationId = connection.sendMessage(sessionId, { text: "doomed", delivery: "steer" });
     expect(userMessages(chat.elements)).toHaveLength(1);
 
     await vi.waitFor(() => expect(rejections).toHaveLength(1));
@@ -746,7 +757,7 @@ it("removes the optimistic message and reports the rejection when the send fails
 it("retries a send the daemon never answered and reports nothing when it lands", async () => {
     const { connection, daemon, chat, rejections, sessionId } = await liveHarness();
     daemon.failOnce("sendMessage", new Error("connection reset"));
-    const mutationId = connection.sendMessage(sessionId, "kept");
+    const mutationId = connection.sendMessage(sessionId, { text: "kept", delivery: "steer" });
 
     await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(2));
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -777,14 +788,95 @@ it("marks pending messages accepted and moves them under the run that took them"
     expect(chat.session?.status).toBe("running");
 });
 
+it("sends the delivery the sender chose, on the optimistic row and on every retry", async () => {
+    const { connection, daemon, chat, sessionId } = await liveHarness();
+    // The agent is idle. A queued send is still sent as queued: the client
+    // never second-guesses the choice from the status it last heard.
+    expect(chat.session?.status).toBe("idle");
+    daemon.failOnce("sendMessage", new Error("connection reset"));
+    const queued = connection.sendMessage(sessionId, { text: "after this", delivery: "queue" });
+    expect(userMessages(chat.elements)[0]).toMatchObject({
+        messageId: queued,
+        delivery: "pending_queue",
+    });
+
+    await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(2));
+    const attempts = daemon.calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => call.args[1] as { id: string; delivery: string });
+    expect(attempts).toEqual([
+        expect.objectContaining({ id: queued, delivery: "queue" }),
+        expect.objectContaining({ id: queued, delivery: "queue" }),
+    ]);
+
+    const steered = connection.sendMessage(sessionId, { text: "now", delivery: "steer" });
+    expect(userMessages(chat.elements).find((row) => row.messageId === steered)?.delivery).toBe(
+        "pending_steering",
+    );
+    await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(3));
+    expect(daemon.calls.filter((call) => call.method === "sendMessage")[2]?.args[1]).toMatchObject({
+        id: steered,
+        delivery: "steer",
+    });
+});
+
+it("lists pending messages in the order the agent accepts them: steering, then the queue", async () => {
+    const { daemon, chat, sessionId } = await liveHarness();
+    daemon.eventEmit("run.started", {
+        agentId: sessionId,
+        run: fakeRun({ id: "r1", status: "running" }),
+        acceptedMessageIds: [],
+    });
+    const pending = [
+        fakeUserMessage({ id: "q1", createdAt: 10, delivery: "queue" }),
+        fakeUserMessage({ id: "s1", createdAt: 20, delivery: "steer" }),
+        fakeUserMessage({ id: "q2", createdAt: 30, delivery: "queue" }),
+        fakeUserMessage({ id: "s2", createdAt: 40, delivery: "steer" }),
+    ];
+    for (const message of pending)
+        daemon.eventEmit("message.created", { agentId: sessionId, message, runId: null });
+    await vi.waitFor(() => expect(userMessages(chat.elements)).toHaveLength(4));
+    expect(
+        userMessages(chat.elements).map((row) => [row.messageId, row.delivery] as const),
+    ).toEqual([
+        ["s1", "pending_steering"],
+        ["s2", "pending_steering"],
+        ["q1", "pending_queue"],
+        ["q2", "pending_queue"],
+    ]);
+
+    // Steering is taken at the next step and the queue stays behind it.
+    daemon.eventEmit("run.boundary", {
+        agentId: sessionId,
+        finishedRun: fakeRun({ id: "r1", status: "aborted", reason: "steering", endedAt: 2 }),
+        startedRun: fakeRun({ id: "r2", status: "running" }),
+        acceptedMessageIds: ["s1", "s2"],
+    });
+    await vi.waitFor(() =>
+        expect(
+            userMessages(chat.elements).map((row) => [row.messageId, row.delivery] as const),
+        ).toEqual([
+            ["s1", "sent"],
+            ["s2", "sent"],
+            ["q1", "pending_queue"],
+            ["q2", "pending_queue"],
+        ]),
+    );
+    expect(
+        userMessages(chat.elements)
+            .slice(0, 2)
+            .map((row) => row.groupId),
+    ).toEqual(["r2", "r2"]);
+});
+
 it("starts sends without waiting for draft persistence or another send", async () => {
     const { connection, daemon, sessionId } = await liveHarness();
     const releaseDraft = daemon.pause("saveAgentDraft");
     const release = daemon.pause("sendMessage");
     connection.setDraft(sessionId, "");
     await vi.waitFor(() => expect(daemon.callCount("saveAgentDraft")).toBe(1));
-    connection.sendMessage(sessionId, "first");
-    connection.sendMessage(sessionId, "second");
+    connection.sendMessage(sessionId, { text: "first", delivery: "steer" });
+    connection.sendMessage(sessionId, { text: "second", delivery: "steer" });
     await vi.waitFor(() => expect(daemon.callCount("sendMessage")).toBe(2));
     const texts = daemon.calls
         .filter((call) => call.method === "sendMessage")

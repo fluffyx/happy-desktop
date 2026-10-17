@@ -1,6 +1,8 @@
 import { Badge } from "../../src/Badge";
 import { Box } from "../../src/Box";
 import { Button } from "../../src/Button";
+import { KeyCap } from "../../src/Badge";
+import { SegmentedControl } from "../../src/SegmentedControl";
 import { FormRow } from "../../src/FormRow";
 import { ComponentPage, DimensionRule, Specimen } from "../kit";
 
@@ -31,6 +33,39 @@ export function FormRowPage() {
                             description="Applies across every workspace on this device"
                             htmlFor="theme"
                             label="Appearance"
+                        />
+                    </div>
+                </Specimen>
+
+                <Specimen
+                    detail="inline · description + detail line · 4px gaps · 18px key cap line"
+                    label="Detail line"
+                    number="F-01b"
+                    stage="surface"
+                >
+                    <div style={{ display: "grid", width: "440px", padding: "24px" }}>
+                        <FormRow
+                            control={
+                                <SegmentedControl
+                                    aria-label="Follow-up behavior"
+                                    onChange={() => {}}
+                                    segments={[
+                                        { value: "steer", label: "Steer" },
+                                        { value: "queue", label: "Queue" },
+                                    ]}
+                                    size="small"
+                                    value="steer"
+                                />
+                            }
+                            description="Steer the agent mid-turn, or queue messages to send after it finishes"
+                            detail={
+                                <>
+                                    <span>Use</span>
+                                    <KeyCap keys="⌘↵" />
+                                    <span>to queue</span>
+                                </>
+                            }
+                            label="Follow-up behavior"
                         />
                     </div>
                 </Specimen>

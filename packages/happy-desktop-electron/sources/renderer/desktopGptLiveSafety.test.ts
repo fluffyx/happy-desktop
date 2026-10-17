@@ -273,7 +273,7 @@ it("reads immutable context during a mutation, stages in the existing composer a
         controller.actionReceive({ ...stateRequest, actionId: "read-after-close" });
         expect(frames).toHaveLength(frameCount);
         expect(f.voice.draftRead()?.text).toBe("My edited message");
-        f.workspace.composerTextSubmit();
+        f.workspace.composerTextSubmit("steer");
         await vi.waitFor(() => expect(f.voice.draftRead()?.text).toBe(""));
         const sent = f.daemon.calls.find((call) => call.method === "sendMessage");
         expect(sent?.args[1]).toMatchObject({ text: "My edited message" });
@@ -481,7 +481,7 @@ it.each(["edit", "empty", "submit"] as const)(
             expect(receive).toHaveBeenCalledWith(
                 expect.objectContaining({ type: "actionStatusUpdated" }),
             );
-            if (change === "submit") f.workspace.composerTextSubmit();
+            if (change === "submit") f.workspace.composerTextSubmit("steer");
             else
                 f.workspace.composerTextUpdate(
                     change === "empty" ? "" : "Human edited the suggestion",
@@ -972,7 +972,7 @@ it("keeps edited voice drafts local across navigation and blocks a later questio
         expect(f.voice.draftRead()?.voiceDraft).toBe(true);
         f.question();
         await vi.waitFor(() => expect(f.voice.get().pendingUserInputs).toHaveLength(1));
-        f.workspace.composerTextSubmit();
+        f.workspace.composerTextSubmit("steer");
         await vi.waitFor(() => expect(f.voice.draftRead()?.submission.status).toBe("failed"));
         expect(f.daemon.callCount("answerQuestion")).toBe(0);
         expect(f.daemon.callCount("sendMessage")).toBe(0);
@@ -982,7 +982,7 @@ it("keeps edited voice drafts local across navigation and blocks a later questio
         f.workspace.composerTextUpdate("");
         expect(f.voice.draftRead()?.voiceDraft).toBeUndefined();
         f.workspace.composerTextUpdate("Approve");
-        f.workspace.composerTextSubmit();
+        f.workspace.composerTextSubmit("steer");
         await vi.waitFor(() => expect(f.daemon.callCount("answerQuestion")).toBe(1));
         expect(f.daemon.callCount("sendMessage")).toBe(0);
     } finally {
@@ -995,10 +995,10 @@ it("preserves local text until daemon acceptance, sends slash text literally and
     try {
         await f.voice.draftAppend("/abort", "");
         const release = f.daemon.pause("sendMessage");
-        f.workspace.composerTextSubmit();
+        f.workspace.composerTextSubmit("steer");
         expect(f.voice.draftRead()?.text).toBe("/abort");
         expect(f.voice.draftRead()?.submission.status).toBe("pending");
-        f.workspace.composerTextSubmit();
+        f.workspace.composerTextSubmit("steer");
         expect(f.daemon.callCount("invokeSlashCommand")).toBe(0);
         release();
         await vi.waitFor(() => expect(f.voice.draftRead()?.submission.status).toBe("idle"));
@@ -1020,7 +1020,7 @@ it("retains edited voice text when the existing composer send is refused", async
             "sendMessage",
             new HappyAgentApiError(400, "refused", "invalid_request", null),
         );
-        f.workspace.composerTextSubmit();
+        f.workspace.composerTextSubmit("steer");
         await vi.waitFor(() => expect(f.voice.draftRead()?.submission.status).toBe("failed"));
         expect(f.voice.draftRead()?.text).toBe("Changed text");
         expect(f.daemon.callCount("sendMessage")).toBe(1);
@@ -1160,7 +1160,7 @@ it("creates one acknowledged session with a local-only prompt and blocks a later
         expect(f.daemon.callCount("saveAgentDraft")).toBe(0);
         f.question(newId);
         await vi.waitFor(() => expect(created?.get().pendingUserInputs).toHaveLength(1));
-        f.workspace.composerTextSubmit();
+        f.workspace.composerTextSubmit("steer");
         await vi.waitFor(() => expect(created?.draftRead()?.submission.status).toBe("failed"));
         expect(f.daemon.callCount("answerQuestion")).toBe(0);
         expect(f.daemon.callCount("sendMessage")).toBe(0);
